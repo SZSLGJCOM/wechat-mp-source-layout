@@ -2,6 +2,7 @@
   "name": "wechat-mp-source-layout",
   "version": "0.9.4",
   "private": true,
+  "license": "PolyForm-Noncommercial-1.0.0",
   "type": "module",
   "scripts": {
     "check": "node tools/verify-extension.mjs",

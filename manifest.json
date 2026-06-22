@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "公众号源码排版助手",
   "short_name": "源码排版",
-  "description": "开源的微信公众号后台排版与源码增强工具，支持 HTML 源码编辑、图片参数微调、多图 SVG 动效与成品复原管理。",
+  "description": "源码公开、非商用授权的微信公众号后台排版与源码增强工具，支持 HTML 源码编辑、图片参数微调、多图 SVG 动效与成品复原管理。",
   "version": "0.9.4",
   "permissions": [],
   "host_permissions": [

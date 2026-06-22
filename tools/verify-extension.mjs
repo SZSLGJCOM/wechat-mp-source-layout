@@ -70,6 +70,22 @@ function checkManifest() {
   for (const icon of Object.values(manifest.icons || {})) assertFile(icon);
 }
 
+function checkLicense() {
+  const license = readText('LICENSE');
+  const readme = readText('README.md');
+  const pkg = readJson('package.json');
+  const manifest = readJson('manifest.json');
+
+  assert(/PolyForm Noncommercial License 1\.0\.0/.test(license), 'LICENSE must use PolyForm Noncommercial License 1.0.0');
+  assert(/Noncommercial Purposes/.test(license), 'LICENSE must include noncommercial purpose terms');
+  assert(!/MIT License/.test(license), 'LICENSE must not use MIT terms');
+  assert(pkg && pkg.license === 'PolyForm-Noncommercial-1.0.0', 'package.json must declare PolyForm-Noncommercial-1.0.0');
+  assert(!/开源/.test(readme), 'README must not call the project open source after adding noncommercial restrictions');
+  assert(/非商用/.test(readme), 'README must disclose the noncommercial license');
+  assert(manifest && !/开源/.test(manifest.description || ''), 'manifest.description must not call the project open source');
+  assert(manifest && /非商用/.test(manifest.description || ''), 'manifest.description must disclose noncommercial licensing');
+}
+
 function checkBridgeCentralization() {
   assertFile('src/bridge-client.js');
   if (!fs.existsSync(resolvePath('src/bridge-client.js'))) return;
@@ -145,6 +161,7 @@ function checkJavaScriptSyntax() {
 }
 
 checkManifest();
+checkLicense();
 checkBridgeCentralization();
 checkProductWording();
 checkCommentHygiene();

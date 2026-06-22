@@ -34,6 +34,22 @@ test('repository exposes one-command extension verification', () => {
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
 });
 
+test('license is noncommercial and product wording does not claim open source', () => {
+  const license = readText('LICENSE');
+  const readme = readText('README.md');
+  const pkg = readJson('package.json');
+  const manifest = readJson('manifest.json');
+
+  assert.match(license, /PolyForm Noncommercial License 1\.0\.0/);
+  assert.match(license, /Noncommercial Purposes/);
+  assert.doesNotMatch(license, /MIT License/);
+  assert.equal(pkg.license, 'PolyForm-Noncommercial-1.0.0');
+  assert.doesNotMatch(readme, /开源/);
+  assert.match(readme, /非商用/);
+  assert.doesNotMatch(manifest.description, /开源/);
+  assert.match(manifest.description, /非商用/);
+});
+
 test('content scripts load the shared bridge client before dependent modules', () => {
   const manifest = readJson('manifest.json');
   const js = manifest.content_scripts?.[0]?.js || [];
