@@ -96,7 +96,7 @@
       const afterNext = String(tokens[i + 2] || '').trim();
       const name = tagName(token);
 
-      // 让 <span leaf=""><br></span> 这种微信占位结构保持在一行，更接近壹伴的显示。
+      // 微信占位结构保持单行，避免源码模式引入额外换行。
       if (
         isOpening(token) &&
         /^<br\s*\/?>$/i.test(next) &&
@@ -656,8 +656,7 @@
 
     const html = textarea.value || '';
 
-    // 不做任何隐藏清理、不做危险标签判断、不自动改写源码。
-    // 用户在源码框里看到什么，就原样写回微信公众号编辑器。
+    // 源码模式按编辑区内容原样写回。
     if (!state.dirty && html === state.lastHtml) {
       if (closeAfter) closeInline({ force: true });
       return;

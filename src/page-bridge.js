@@ -98,16 +98,19 @@
     return rect.width > 120 && rect.height > 80;
   }
 
+  function readFrameDocument(iframe) {
+    try {
+      return iframe.contentDocument || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   function getAccessibleDocuments() {
     const docs = [document];
     for (const iframe of document.querySelectorAll('iframe')) {
-      try {
-        if (iframe.contentDocument) {
-          docs.push(iframe.contentDocument);
-        }
-      } catch (_) {
-        // 跨域 iframe 无法访问，忽略。
-      }
+      const doc = readFrameDocument(iframe);
+      if (doc) docs.push(doc);
     }
     return docs;
   }

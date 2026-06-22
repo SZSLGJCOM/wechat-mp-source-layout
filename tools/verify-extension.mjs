@@ -116,6 +116,22 @@ function checkProductWording() {
   assert(!fs.existsSync(resolvePath('docs/self-check-v0.9.4.md')), 'docs/self-check-v0.9.4.md should not be published');
 }
 
+function checkCommentHygiene() {
+  for (const file of [
+    'src/content.js',
+    'src/image-tools.js',
+    'src/page-bridge.js',
+    'src/svg-tools.js',
+    'src/svg-block-tools.js',
+    'src/overlay.css'
+  ]) {
+    const source = readText(file);
+    assert(!/\/\/\s*(ignore|fall through)\b/i.test(source), `${file} contains low-value comments`);
+    assert(!/catch\s*\([^)]*\)\s*\{\s*\}/.test(source), `${file} contains empty catch blocks`);
+    assert(!/壹伴|临时|随便|凑合|低级|垃圾|屎山|忽略/i.test(source), `${file} contains unprofessional wording`);
+  }
+}
+
 function checkJavaScriptSyntax() {
   for (const file of listFiles('src', '.js')) {
     const result = spawnSync(process.execPath, ['--check', resolvePath(file)], {
@@ -131,6 +147,7 @@ function checkJavaScriptSyntax() {
 checkManifest();
 checkBridgeCentralization();
 checkProductWording();
+checkCommentHygiene();
 checkJavaScriptSyntax();
 
 if (errors.length) {

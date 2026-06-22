@@ -98,3 +98,19 @@ test('public release files avoid internal release-log wording', () => {
 
   assert.equal(fs.existsSync(path.join(rootDir, 'docs', 'self-check-v0.9.4.md')), false);
 });
+
+test('production comments are concise and professional', () => {
+  for (const file of [
+    'src/content.js',
+    'src/image-tools.js',
+    'src/page-bridge.js',
+    'src/svg-tools.js',
+    'src/svg-block-tools.js',
+    'src/overlay.css'
+  ]) {
+    const source = readText(file);
+    assert.doesNotMatch(source, /\/\/\s*(ignore|fall through)\b/i, file);
+    assert.doesNotMatch(source, /catch\s*\([^)]*\)\s*\{\s*\}/, file);
+    assert.doesNotMatch(source, /壹伴|临时|随便|凑合|低级|垃圾|屎山|忽略/i, file);
+  }
+});

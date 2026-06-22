@@ -103,15 +103,19 @@
     return raw;
   }
 
+  function readFrameDocument(frame) {
+    try {
+      return frame.contentDocument || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   function getAccessibleDocuments() {
     const docs = [document];
     for (const frame of Array.from(document.querySelectorAll('iframe'))) {
-      try {
-        const doc = frame.contentDocument;
-        if (doc && doc.documentElement && !docs.includes(doc)) docs.push(doc);
-      } catch (_) {
-        // ignore cross-origin frames
-      }
+      const doc = readFrameDocument(frame);
+      if (doc && doc.documentElement && !docs.includes(doc)) docs.push(doc);
     }
     return docs;
   }
@@ -119,11 +123,7 @@
   function getFrameByDocument(doc) {
     if (!doc || doc === document) return null;
     for (const frame of Array.from(document.querySelectorAll('iframe'))) {
-      try {
-        if (frame.contentDocument === doc) return frame;
-      } catch (_) {
-        // ignore
-      }
+      if (readFrameDocument(frame) === doc) return frame;
     }
     return null;
   }
@@ -255,12 +255,13 @@
 
     const srcs = block.getAttribute('data-mpse-srcs') || '';
     if (srcs) {
+      let parsed = null;
       try {
-        const parsed = JSON.parse(decodeURIComponent(srcs));
-        if (Array.isArray(parsed) && parsed.length) return Array.from(new Set(parsed.map(displayUrl).filter(Boolean))).slice(0, MAX_IMAGES);
+        parsed = JSON.parse(decodeURIComponent(srcs));
       } catch (_) {
-        // fall through
+        parsed = null;
       }
+      if (Array.isArray(parsed) && parsed.length) return Array.from(new Set(parsed.map(displayUrl).filter(Boolean))).slice(0, MAX_IMAGES);
     }
 
     const urls = [];

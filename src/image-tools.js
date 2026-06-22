@@ -209,6 +209,14 @@
     return key ? state.effectMemory.get(key) : '';
   }
 
+  function readFrameDocument(frame) {
+    try {
+      return frame.contentDocument || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   function hasNonEmptyStyle(image, prop) {
     return Boolean(image && image.style && String(image.style.getPropertyValue(prop) || '').trim());
   }
@@ -258,12 +266,8 @@
     const docs = [document];
     const frames = Array.from(document.querySelectorAll('iframe'));
     for (const frame of frames) {
-      try {
-        const doc = frame.contentDocument;
-        if (doc && doc.documentElement && !docs.includes(doc)) docs.push(doc);
-      } catch (_) {
-        // 跨域 iframe 不能访问，忽略。
-      }
+      const doc = readFrameDocument(frame);
+      if (doc && doc.documentElement && !docs.includes(doc)) docs.push(doc);
     }
     return docs;
   }
@@ -271,11 +275,7 @@
   function getFrameByDocument(doc) {
     if (!doc || doc === document) return null;
     for (const frame of Array.from(document.querySelectorAll('iframe'))) {
-      try {
-        if (frame.contentDocument === doc) return frame;
-      } catch (_) {
-        // ignore
-      }
+      if (readFrameDocument(frame) === doc) return frame;
     }
     return null;
   }
@@ -891,20 +891,26 @@
     };
   }
 
+  function dispatchEditorEvent(target, type) {
+    try {
+      return target.dispatchEvent(new Event(type, { bubbles: true }));
+    } catch (_) {
+      return false;
+    }
+  }
+
   function markChanged(image, reason) {
     if (!image || !image.ownerDocument) return;
     image.setAttribute('data-mpse-image-edited', '1');
     state.lastSnapshot = snapshotCurrentImage();
     state.needsCommit = true;
 
-    try {
-      const doc = image.ownerDocument;
-      const root = findEditableRoot(image) || doc.body;
-      for (const target of [image, root, doc.body].filter(Boolean)) {
-        try { target.dispatchEvent(new Event('input', { bubbles: true })); } catch (_) {}
-        try { target.dispatchEvent(new Event('change', { bubbles: true })); } catch (_) {}
-      }
-    } catch (_) {}
+    const doc = image.ownerDocument;
+    const root = findEditableRoot(image) || doc.body;
+    for (const target of [image, root, doc.body].filter(Boolean)) {
+      dispatchEditorEvent(target, 'input');
+      dispatchEditorEvent(target, 'change');
+    }
 
     if (DEBUG) console.info('[公众号源码排版助手] image style applied', reason || '', image.getAttribute('style') || '');
     scheduleContentCommit(reason);
@@ -918,8 +924,7 @@
   function scheduleContentCommit(reason) {
     if (state.commitTimer) window.clearTimeout(state.commitTimer);
 
-    // 拖动滑块时只做本地即时预览，不连续触发整篇正文 get/set，
-    // 避免微信新编辑器在拖动过程中频繁重建内容模型。
+    // 拖动期间仅预览，停止后再同步正文，避免编辑器频繁重建内容。
     if (state.isDragging) {
       setBadgeText('待同步');
       return;

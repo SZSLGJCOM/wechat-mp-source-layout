@@ -84,15 +84,19 @@
     return image && image.getAttribute ? (image.getAttribute(name) || '') : '';
   }
 
+  function readFrameDocument(frame) {
+    try {
+      return frame.contentDocument || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   function getAccessibleDocuments() {
     const docs = [document];
     for (const frame of Array.from(document.querySelectorAll('iframe'))) {
-      try {
-        const doc = frame.contentDocument;
-        if (doc && doc.documentElement && !docs.includes(doc)) docs.push(doc);
-      } catch (_) {
-        // ignore cross-origin frames
-      }
+      const doc = readFrameDocument(frame);
+      if (doc && doc.documentElement && !docs.includes(doc)) docs.push(doc);
     }
     return docs;
   }
@@ -100,11 +104,7 @@
   function getFrameByDocument(doc) {
     if (!doc || doc === document) return null;
     for (const frame of Array.from(document.querySelectorAll('iframe'))) {
-      try {
-        if (frame.contentDocument === doc) return frame;
-      } catch (_) {
-        // ignore
-      }
+      if (readFrameDocument(frame) === doc) return frame;
     }
     return null;
   }
@@ -167,7 +167,11 @@
 
   function imageSignature(image) {
     let rect = { width: 0, height: 0 };
-    try { rect = image.getBoundingClientRect(); } catch (_) {}
+    try {
+      rect = image.getBoundingClientRect();
+    } catch (_) {
+      rect = { width: 0, height: 0 };
+    }
     return {
       index: imageIndexInArticle(image),
       src: stableUrl(getAttr(image, 'src') || image.currentSrc || image.src),
@@ -343,7 +347,7 @@
         const panel = document.getElementById(PANEL_ID);
         if (state.selected.length < 2 && panel) panel.classList.remove('mpse-visible');
       } else {
-        // 普通点击已选图片只聚焦它，不取消选择；取消用 Ctrl / Shift / Command + 点击，或点“重选”。
+        // 非切换模式下，点击已选图片仅更新焦点。
         state.selected[existingIndex].image = image;
         state.selected[existingIndex].identity = identity;
         if (state.selected.length >= 2) showDualPanel();
