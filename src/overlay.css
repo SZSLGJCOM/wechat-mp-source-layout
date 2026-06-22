@@ -1,0 +1,969 @@
+#mpse-toolbar-button,
+#mpse-floating-button,
+#mpse-inline-panel,
+#mpse-inline-panel * {
+  box-sizing: border-box;
+}
+
+#mpse-floating-button {
+  position: fixed;
+  right: 22px;
+  top: 128px;
+  z-index: 2147483646;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 58px;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid #c8ead4;
+  border-radius: 16px;
+  background: #fff;
+  color: #12a05c;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: 0 6px 18px rgba(15, 35, 55, 0.12);
+}
+
+#mpse-floating-button:hover,
+#mpse-floating-button.mpse-active {
+  border-color: #8fd9ac;
+  background: #f5fff8;
+}
+
+#mpse-toolbar-button {
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  height: 22px;
+  min-width: 38px;
+  margin: 0 2px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: #222;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 22px;
+  cursor: pointer;
+  user-select: none;
+}
+
+#mpse-toolbar-button:hover,
+#mpse-toolbar-button.mpse-active {
+  background: #f1f3f5;
+  color: #07a75a;
+}
+
+#mpse-toolbar-button.mpse-active {
+  box-shadow: inset 0 -2px 0 #07c160;
+}
+
+#mpse-inline-panel {
+  width: 100%;
+  max-width: 462px;
+  margin: 10px auto 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  overflow: visible;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", Arial, sans-serif;
+}
+
+.mpse-inline-editor-shell {
+  padding: 0;
+  background: transparent;
+}
+
+.mpse-inline-code-wrap {
+  position: relative;
+  display: flex;
+  width: 100%;
+  height: 180px;
+  min-height: 160px;
+  border: 0;
+  background: #eef7ff;
+  overflow: hidden;
+}
+
+.mpse-inline-lines {
+  flex: 0 0 34px;
+  width: 34px;
+  height: 100%;
+  margin: 0;
+  padding: 10px 8px 10px 0;
+  border: 0;
+  background: #eef7ff;
+  color: #8493a3;
+  font-family: Consolas, Monaco, "SFMono-Regular", Menlo, monospace;
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.95;
+  text-align: right;
+  white-space: pre;
+  overflow: hidden;
+  user-select: none;
+}
+
+.mpse-code-stage {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  background: #eef7ff;
+}
+
+.mpse-highlight-layer,
+.mpse-inline-editor {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 10px 12px 10px 4px;
+  border: 0;
+  outline: none;
+  font-family: Consolas, Monaco, "SFMono-Regular", Menlo, monospace;
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.95;
+  letter-spacing: 0;
+  tab-size: 2;
+  white-space: pre;
+  word-break: normal;
+  overflow: auto;
+}
+
+.mpse-highlight-layer {
+  z-index: 1;
+  pointer-events: none;
+  background: #eef7ff;
+  color: #46515d;
+}
+
+.mpse-highlight-code {
+  display: block;
+  min-height: 100%;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  font: inherit;
+}
+
+.mpse-inline-editor {
+  z-index: 2;
+  resize: none;
+  background: transparent;
+  color: transparent;
+  caret-color: #26323f;
+  -webkit-text-fill-color: transparent;
+}
+
+.mpse-inline-editor::selection {
+  background: rgba(60, 130, 230, 0.22);
+}
+
+.mpse-inline-editor::placeholder {
+  color: #8d9dad;
+  -webkit-text-fill-color: #8d9dad;
+}
+
+.mpse-inline-editor::-webkit-scrollbar,
+.mpse-highlight-layer::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.mpse-inline-editor::-webkit-scrollbar-thumb,
+.mpse-highlight-layer::-webkit-scrollbar-thumb {
+  background: rgba(122, 142, 165, 0.28);
+  border-radius: 8px;
+  border: 2px solid #eef7ff;
+}
+
+.mpse-token-mark {
+  color: #737f8c;
+}
+
+.mpse-token-tag {
+  color: #0b9b5b;
+}
+
+.mpse-token-attr {
+  color: #2f70bd;
+}
+
+.mpse-token-string {
+  color: #d04b70;
+}
+
+.mpse-token-comment {
+  color: #94a0ad;
+}
+
+.mpse-mini-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 2px;
+  min-width: 0;
+  opacity: 0.42;
+  transition: opacity 0.16s ease;
+}
+
+#mpse-inline-panel:hover .mpse-mini-actions,
+#mpse-inline-panel:focus-within .mpse-mini-actions {
+  opacity: 1;
+}
+
+.mpse-mini-action,
+.mpse-mini-close {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  font-family: inherit;
+  cursor: pointer;
+  user-select: none;
+}
+
+.mpse-mini-action {
+  height: 22px;
+  padding: 0 5px;
+  border-radius: 5px;
+  color: #66727f;
+  font-size: 11px;
+  line-height: 22px;
+}
+
+.mpse-mini-action:hover,
+.mpse-mini-close:hover {
+  background: #f2f6fa;
+  color: #1f2328;
+}
+
+.mpse-mini-action-save {
+  color: #07a75a;
+}
+
+#mpse-inline-panel.mpse-dirty .mpse-mini-action-save {
+  color: #07a75a;
+  font-weight: 600;
+}
+
+.mpse-mini-close {
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  color: #6b7480;
+  font-size: 15px;
+  line-height: 18px;
+}
+
+.mpse-inline-loading {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.72);
+  color: #495057;
+  font-size: 13px;
+}
+
+#mpse-inline-panel.mpse-busy .mpse-inline-loading {
+  display: flex;
+}
+
+.mpse-inline-footer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 24px;
+  padding: 5px 0 0;
+  border-top: 0;
+  background: transparent;
+  color: #8b949e;
+  font-size: 11px;
+  opacity: 0.68;
+  transition: opacity 0.16s ease;
+}
+
+#mpse-inline-panel:hover .mpse-inline-footer,
+#mpse-inline-panel:focus-within .mpse-inline-footer {
+  opacity: 1;
+}
+
+.mpse-inline-status {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mpse-inline-status.mpse-ok {
+  color: #13a35d;
+}
+
+.mpse-inline-status.mpse-error {
+  color: #d93025;
+}
+
+.mpse-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #8b949e;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.mpse-checkbox input {
+  width: 12px;
+  height: 12px;
+  margin: 0;
+  accent-color: #07c160;
+}
+
+.mpse-inline-counter {
+  color: #8b949e;
+  white-space: nowrap;
+}
+
+#mpse-inline-panel.mpse-dirty::before {
+  content: "未保存";
+  display: block;
+  height: 0;
+  transform: translateY(-17px);
+  color: #d93025;
+  font-size: 11px;
+  line-height: 0;
+}
+
+@media (max-width: 900px) {
+  #mpse-inline-panel {
+    max-width: calc(100vw - 32px);
+  }
+
+  .mpse-mini-actions {
+    width: 100%;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    opacity: 1;
+  }
+
+  .mpse-inline-footer {
+    flex-wrap: wrap;
+  }
+}
+
+/* 源码模式只保留代码区；进入/退出都由工具栏 HTML 切换。 */
+#mpse-inline-panel .mpse-inline-footer { display: none !important; }
+
+/* 图片侧边参数工具 */
+#mpse-img2-menu,
+#mpse-img2-panel,
+#mpse-img2-box,
+#mpse-img2-badge,
+#mpse-img2-menu *,
+#mpse-img2-panel * {
+  box-sizing: border-box;
+}
+
+#mpse-img2-menu {
+  position: fixed;
+  z-index: 2147483646;
+  display: none;
+  flex-direction: column;
+  gap: 4px;
+  width: 54px;
+  padding: 6px;
+  border: 1px solid rgba(7, 193, 96, 0.22);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 8px 26px rgba(15, 35, 55, 0.14);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", Arial, sans-serif;
+}
+
+#mpse-img2-menu.mpse-visible {
+  display: flex;
+}
+
+#mpse-img2-menu button {
+  position: relative;
+  width: 42px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #59636e;
+  font-size: 12px;
+  line-height: 28px;
+  cursor: pointer;
+}
+
+#mpse-img2-menu button:hover {
+  background: #f3f7f9;
+  color: #07a852;
+}
+
+#mpse-img2-menu button.mpse-applied {
+  background: #f2fff7;
+  color: #13985b;
+}
+
+#mpse-img2-menu button.mpse-applied::after {
+  content: "";
+  position: absolute;
+  right: 5px;
+  top: 5px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #07c160;
+}
+
+#mpse-img2-menu button.mpse-active {
+  background: #07c160;
+  color: #fff;
+  font-weight: 600;
+}
+
+#mpse-img2-menu button.mpse-active::after {
+  background: #fff;
+}
+
+#mpse-img2-panel {
+  position: fixed;
+  z-index: 2147483646;
+  display: none;
+  width: 238px;
+  border: 1px solid #e6e8eb;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 10px 34px rgba(15, 35, 55, 0.16);
+  overflow: hidden;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", Arial, sans-serif;
+}
+
+#mpse-img2-panel.mpse-visible {
+  display: block;
+}
+
+.mpse-img2-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 38px;
+  padding: 0 10px 0 12px;
+  border-bottom: 1px solid #f0f2f5;
+  color: #222;
+  font-size: 13px;
+}
+
+.mpse-img2-panel-head button {
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #8a8f99;
+  cursor: pointer;
+}
+
+.mpse-img2-panel-head button:hover {
+  background: #f5f7f9;
+  color: #333;
+}
+
+.mpse-img2-panel-body {
+  padding: 10px 12px 6px;
+}
+
+.mpse-img2-control {
+  display: block;
+  margin: 0 0 10px;
+  color: #5f6670;
+  font-size: 12px;
+}
+
+.mpse-img2-control > span {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 5px;
+}
+
+.mpse-img2-control em {
+  color: #07a852;
+  font-style: normal;
+}
+
+.mpse-img2-control input[type="range"] {
+  width: 100%;
+  margin: 0;
+  accent-color: #07c160;
+}
+
+.mpse-img2-control input[type="text"],
+.mpse-img2-control select {
+  width: 100%;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid #e2e5e9;
+  border-radius: 8px;
+  outline: none;
+  background: #fff;
+  color: #333;
+  font-size: 12px;
+}
+
+.mpse-img2-control input[type="text"]:focus,
+.mpse-img2-control select:focus {
+  border-color: #07c160;
+}
+
+.mpse-img2-inline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.mpse-img2-inline > span {
+  margin-bottom: 0;
+}
+
+.mpse-img2-inline input[type="color"] {
+  width: 38px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid #e2e5e9;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.mpse-img2-tip {
+  padding: 0 12px 10px;
+  color: #9aa0a6;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+#mpse-img2-box {
+  position: fixed;
+  z-index: 2147483645;
+  display: none;
+  border: 2px solid #07c160;
+  border-radius: 4px;
+  pointer-events: none;
+  box-shadow: 0 0 0 2px rgba(7, 193, 96, 0.08);
+}
+
+#mpse-img2-box.mpse-visible {
+  display: block;
+}
+
+#mpse-img2-badge {
+  position: fixed;
+  z-index: 2147483646;
+  display: none;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 11px;
+  background: rgba(7, 193, 96, 0.96);
+  color: #fff;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", Arial, sans-serif;
+  font-size: 12px;
+  line-height: 22px;
+  pointer-events: none;
+  box-shadow: 0 4px 12px rgba(7, 193, 96, 0.24);
+}
+
+#mpse-img2-badge.mpse-visible {
+  display: block;
+}
+
+
+/* 允许参数面板原生控件正常点击/拖动 */
+#mpse-img2-menu,
+#mpse-img2-panel {
+  pointer-events: auto !important;
+  user-select: none;
+}
+
+#mpse-img2-menu button,
+#mpse-img2-panel button,
+#mpse-img2-panel input,
+#mpse-img2-panel select {
+  pointer-events: auto !important;
+}
+
+#mpse-img2-panel input[type="range"] {
+  cursor: ew-resize;
+  touch-action: auto;
+}
+
+/* 多图 SVG 动效工具 */
+#mpse-svg2-pick-button {
+  border-top: 1px solid rgba(7, 193, 96, 0.14) !important;
+  color: #0a8f50 !important;
+  font-weight: 700 !important;
+}
+
+#mpse-svg2-pick-button.mpse-svg2-picking {
+  background: #e9fff3 !important;
+  color: #07a85a !important;
+}
+
+.mpse-svg2-selected-box {
+  position: fixed;
+  z-index: 2147483646;
+  border: 2px solid rgba(7, 193, 96, 0.98);
+  border-radius: 8px;
+  pointer-events: none;
+  box-shadow: 0 0 0 3px rgba(7, 193, 96, 0.14), 0 8px 20px rgba(7, 193, 96, 0.16);
+}
+
+.mpse-svg2-selected-mark {
+  position: fixed;
+  z-index: 2147483647;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 11px;
+  background: rgba(7, 193, 96, 0.96);
+  color: #fff;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", Arial, sans-serif;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 22px;
+  pointer-events: none;
+  box-shadow: 0 4px 12px rgba(7, 193, 96, 0.24);
+}
+
+#mpse-svg2-panel,
+#mpse-svg2-panel * {
+  box-sizing: border-box;
+}
+
+#mpse-svg2-panel {
+  position: fixed;
+  z-index: 2147483647;
+  display: none;
+  width: 270px;
+  border: 1px solid rgba(7, 193, 96, 0.18);
+  border-radius: 12px;
+  background: #fff;
+  color: #202124;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", Arial, sans-serif;
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.14);
+  overflow: hidden;
+}
+
+#mpse-svg2-panel.mpse-visible {
+  display: block;
+}
+
+.mpse-svg2-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 38px;
+  padding: 0 10px 0 12px;
+  border-bottom: 1px solid #eef1f4;
+}
+
+.mpse-svg2-head strong {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.mpse-svg2-head button,
+.mpse-svg2-actions button {
+  appearance: none;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.mpse-svg2-head button {
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  color: #687078;
+  font-size: 16px;
+  line-height: 26px;
+}
+
+.mpse-svg2-head button:hover {
+  background: #f4f6f8;
+  color: #222;
+}
+
+.mpse-svg2-preview {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  padding: 10px 10px 6px;
+  max-height: 164px;
+  overflow: auto;
+}
+
+.mpse-svg2-preview-multi {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.mpse-svg2-preview div {
+  position: relative;
+  height: 72px;
+  overflow: hidden;
+  border-radius: 8px;
+  background: #f2f5f8;
+}
+
+.mpse-svg2-preview img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.mpse-svg2-preview span {
+  position: absolute;
+  left: 6px;
+  top: 6px;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 9px;
+  background: rgba(0, 0, 0, 0.52);
+  color: #fff;
+  font-size: 11px;
+  line-height: 18px;
+}
+
+.mpse-svg2-body {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 8px 12px;
+}
+
+.mpse-svg2-control {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  color: #5f6770;
+  font-size: 12px;
+}
+
+.mpse-svg2-control span {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.mpse-svg2-control em {
+  color: #07a958;
+  font-style: normal;
+}
+
+.mpse-svg2-control input[type="range"] {
+  width: 100%;
+  cursor: ew-resize;
+  touch-action: auto;
+}
+
+.mpse-svg2-control select {
+  width: 100%;
+  height: 30px;
+  border: 1px solid #dde3e8;
+  border-radius: 8px;
+  background: #fff;
+  color: #202124;
+  font-size: 12px;
+}
+
+.mpse-svg2-check {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #5f6770;
+  font-size: 12px;
+  user-select: none;
+}
+
+.mpse-svg2-actions {
+  display: flex;
+  gap: 8px;
+  padding: 0 12px 10px;
+}
+
+.mpse-svg2-actions button {
+  flex: 1;
+  height: 30px;
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.mpse-svg2-actions button[data-mpse-svg-clear] {
+  background: #f5f7f9;
+  color: #5f6770;
+}
+
+.mpse-svg2-actions button[data-mpse-svg-generate] {
+  background: #07c160;
+  color: #fff;
+  font-weight: 700;
+}
+
+.mpse-svg2-tip {
+  padding: 0 12px 12px;
+  color: #8b929a;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+/* 已生成 SVG 块再次选中 / 编辑 / 还原 */
+#mpse-svgb-menu,
+#mpse-svgb-panel,
+#mpse-svgb-box,
+#mpse-svgb-badge,
+#mpse-svgb-menu *,
+#mpse-svgb-panel * { box-sizing: border-box; }
+
+#mpse-svgb-box {
+  position: fixed;
+  z-index: 2147483645;
+  display: none;
+  border: 2px solid #07c160;
+  border-radius: 8px;
+  pointer-events: none;
+  box-shadow: 0 0 0 3px rgba(7, 193, 96, 0.14), 0 8px 20px rgba(7, 193, 96, 0.14);
+}
+#mpse-svgb-box.mpse-visible { display: block; }
+
+#mpse-svgb-badge {
+  position: fixed;
+  z-index: 2147483646;
+  display: none;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 11px;
+  background: rgba(7, 193, 96, 0.96);
+  color: #fff;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", Arial, sans-serif;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 22px;
+  pointer-events: none;
+  box-shadow: 0 4px 12px rgba(7, 193, 96, 0.24);
+}
+#mpse-svgb-badge.mpse-visible { display: block; }
+
+#mpse-svgb-menu {
+  position: fixed;
+  z-index: 2147483647;
+  display: none;
+  width: 52px;
+  padding: 6px;
+  border: 1px solid rgba(7, 193, 96, 0.18);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 10px 26px rgba(15, 35, 55, 0.14);
+  backdrop-filter: blur(8px);
+}
+#mpse-svgb-menu.mpse-visible { display: flex; flex-direction: column; gap: 6px; }
+#mpse-svgb-menu button {
+  height: 30px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #3f4a56;
+  font-size: 12px;
+  cursor: pointer;
+}
+#mpse-svgb-menu button:hover { background: #e9fff3; color: #07a85a; }
+
+#mpse-svgb-panel {
+  position: fixed;
+  z-index: 2147483647;
+  display: none;
+  width: 270px;
+  border: 1px solid rgba(7, 193, 96, 0.18);
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 12px 30px rgba(15, 35, 55, 0.16);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", Arial, sans-serif;
+}
+#mpse-svgb-panel.mpse-visible { display: block; }
+.mpse-svgb-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px 8px; border-bottom: 1px solid #eef0f2; }
+.mpse-svgb-head strong { flex: 1; color: #222; font-size: 13px; }
+.mpse-svgb-head button,
+.mpse-svgb-actions button { border: 0; border-radius: 8px; background: #f5f7f9; color: #5f6770; cursor: pointer; }
+.mpse-svgb-head button { width: 24px; height: 24px; }
+.mpse-svgb-head button:hover,
+.mpse-svgb-actions button:hover { background: #e9fff3; color: #07a85a; }
+.mpse-svgb-body { display: flex; flex-direction: column; gap: 10px; padding: 12px; }
+.mpse-svgb-control { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: #4b5560; }
+.mpse-svgb-control span { display: flex; justify-content: space-between; }
+.mpse-svgb-control em { color: #07a85a; font-style: normal; font-weight: 700; }
+.mpse-svgb-control input[type="range"] { width: 100%; cursor: ew-resize; }
+.mpse-svgb-control select { height: 30px; border: 1px solid #dfe5ea; border-radius: 8px; background: #fff; color: #333; }
+.mpse-svgb-actions { display: flex; gap: 8px; padding: 0 12px 10px; }
+.mpse-svgb-actions button { flex: 1; height: 30px; font-size: 12px; }
+.mpse-svgb-actions button[data-update] { background: #07c160; color: #fff; font-weight: 700; }
+.mpse-svgb-tip { padding: 0 12px 12px; color: #8b929a; font-size: 11px; line-height: 1.5; }
+
+.mpse-svgb-preview {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  padding: 10px 12px 0;
+}
+.mpse-svgb-preview div {
+  position: relative;
+  height: 48px;
+  overflow: hidden;
+  border-radius: 8px;
+  background: #f3f7fa;
+}
+.mpse-svgb-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.mpse-svgb-preview span {
+  position: absolute;
+  left: 5px;
+  top: 5px;
+  min-width: 16px;
+  height: 16px;
+  border-radius: 8px;
+  background: rgba(7, 193, 96, 0.92);
+  color: #fff;
+  font-size: 10px;
+  line-height: 16px;
+  text-align: center;
+}
+.mpse-svgb-status {
+  padding: 0 12px 8px;
+  color: #69717a;
+  font-size: 11px;
+  line-height: 1.4;
+}
+.mpse-svgb-status.mpse-ok { color: #07a85a; }
+.mpse-svgb-status.mpse-error { color: #d93025; }
+.mpse-svgb-actions button[data-svgb-update] {
+  background: #07c160;
+  color: #fff;
+  font-weight: 700;
+}
+.mpse-svgb-actions button[data-svgb-delete] {
+  color: #d93025;
+}
