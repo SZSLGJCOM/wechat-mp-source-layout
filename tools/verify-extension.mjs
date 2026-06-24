@@ -80,10 +80,8 @@ function checkLicense() {
   assert(/Noncommercial Purposes/.test(license), 'LICENSE must include noncommercial purpose terms');
   assert(!/MIT License/.test(license), 'LICENSE must not use MIT terms');
   assert(pkg && pkg.license === 'PolyForm-Noncommercial-1.0.0', 'package.json must declare PolyForm-Noncommercial-1.0.0');
-  assert(!/开源/.test(readme), 'README must not call the project open source after adding noncommercial restrictions');
-  assert(/非商用/.test(readme), 'README must disclose the noncommercial license');
-  assert(manifest && !/开源/.test(manifest.description || ''), 'manifest.description must not call the project open source');
-  assert(manifest && /非商用/.test(manifest.description || ''), 'manifest.description must disclose noncommercial licensing');
+  assert(!/源码公开|非商用|商业使用|开源|授权/.test(readme), 'README introduction must stay product-focused');
+  assert(manifest && !/源码公开|非商用|开源|授权/.test(manifest.description || ''), 'manifest.description must stay product-focused');
 }
 
 function checkBridgeCentralization() {
