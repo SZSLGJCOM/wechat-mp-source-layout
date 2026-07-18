@@ -248,35 +248,8 @@
   function findImageFromEvent(event) {
     const target = event.target;
     if (!target || isExtensionElement(target)) return null;
-    const candidates = [];
-    if (target.tagName === 'IMG') candidates.push(target);
-    if (target.closest) {
-      const closest = target.closest('img');
-      if (closest) candidates.push(closest);
-      const wrapper = target.closest('section,p,span,div,figure,td');
-      if (wrapper && wrapper.querySelector) {
-        const nested = wrapper.querySelector('img');
-        if (nested) candidates.push(nested);
-      }
-    }
-    const doc = target.ownerDocument;
-    if (doc && doc.elementsFromPoint && Number.isFinite(event.clientX) && Number.isFinite(event.clientY)) {
-      for (const element of doc.elementsFromPoint(event.clientX, event.clientY)) {
-        if (!element) continue;
-        if (element.tagName === 'IMG') candidates.push(element);
-        if (element.querySelector) {
-          const nested = element.querySelector('img');
-          if (nested) candidates.push(nested);
-        }
-      }
-    }
-    const seen = new Set();
-    for (const image of candidates) {
-      if (!image || seen.has(image)) continue;
-      seen.add(image);
-      if (isLikelyArticleImage(image)) return image;
-    }
-    return null;
+    const image = target.closest ? target.closest('img') : null;
+    return image && isLikelyArticleImage(image) ? image : null;
   }
 
   function removeSelectionOverlays() {
@@ -769,6 +742,7 @@
 
   function onDocumentPointer(event) {
     if (!event || !event.target) return;
+    if (event.type === 'pointerdown' && event.button !== 0) return;
     if (isExtensionElement(event.target)) return;
     if (document.getElementById('mpse-inline-panel')) return;
 

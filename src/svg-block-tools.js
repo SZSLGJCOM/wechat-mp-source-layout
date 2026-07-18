@@ -186,31 +186,18 @@
   function closestSvgBlock(target) {
     if (!target || !target.closest) return null;
     const marked = target.closest('[data-mpse-svg-block="1"], [data-mpse-svg-multi="1"], [data-mpse-svg-dual="1"]');
-    if (marked && looksGeneratedSvgBlock(marked)) return marked;
     const svg = target.closest('svg');
-    if (svg) {
-      const block = svg.closest('section,div,p,span,figure') || svg;
-      if (looksGeneratedSvgBlock(block)) return block;
-    }
-    const wrapper = target.closest('section,div,p,span,figure');
-    if (wrapper && wrapper.querySelector && wrapper.querySelector('svg') && looksGeneratedSvgBlock(wrapper)) return wrapper;
+    if (!svg) return null;
+    if (marked && marked.contains(svg) && looksGeneratedSvgBlock(marked)) return marked;
+    const block = svg.closest('section,div,p,span,figure') || svg;
+    if (looksGeneratedSvgBlock(block)) return block;
     return null;
   }
 
   function findSvgBlockFromEvent(event) {
     const target = event && event.target;
     if (!target || isExtensionElement(target)) return null;
-    const direct = closestSvgBlock(target);
-    if (direct) return direct;
-
-    const doc = target.ownerDocument;
-    if (doc && doc.elementsFromPoint && Number.isFinite(event.clientX) && Number.isFinite(event.clientY)) {
-      for (const element of doc.elementsFromPoint(event.clientX, event.clientY)) {
-        const block = closestSvgBlock(element);
-        if (block) return block;
-      }
-    }
-    return null;
+    return closestSvgBlock(target);
   }
 
   function uniqueBlocks(blocks) {
@@ -777,6 +764,7 @@
 
   function onDocumentPointer(event) {
     if (!event || !event.target) return;
+    if (event.type === 'pointerdown' && event.button !== 0) return;
     if (isExtensionElement(event.target)) return;
     if (document.getElementById('mpse-inline-panel')) return;
     const block = findSvgBlockFromEvent(event);

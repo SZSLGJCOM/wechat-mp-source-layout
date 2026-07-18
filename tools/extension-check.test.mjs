@@ -128,3 +128,18 @@ test('production comments are concise and professional', () => {
     assert.doesNotMatch(source, /壹伴|临时|随便|凑合|低级|垃圾|屎山|忽略/i, file);
   }
 });
+
+test('media tools only activate from direct media hits', () => {
+  const imageTools = readText('src/image-tools.js');
+  const svgTools = readText('src/svg-tools.js');
+  const svgBlockTools = readText('src/svg-block-tools.js');
+
+  for (const source of [imageTools, svgTools]) {
+    assert.match(source, /const image = target\.closest \? target\.closest\('img'\) : null;/);
+    assert.doesNotMatch(source, /wrapper\.querySelector\('img'\)/);
+  }
+
+  assert.match(svgBlockTools, /if \(!svg\) return null;/);
+  assert.doesNotMatch(svgBlockTools, /wrapper\.querySelector\('svg'\)/);
+  assert.doesNotMatch(svgBlockTools, /doc\.elementsFromPoint\(event\.clientX, event\.clientY\)/);
+});
