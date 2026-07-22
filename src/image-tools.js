@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const VERSION = 'v0.9.10';
+  const VERSION = 'v0.10.0';
   const MENU_ID = 'mpse-img2-menu';
   const PANEL_ID = 'mpse-img2-panel';
   const BOX_ID = 'mpse-img2-box';
@@ -15,6 +15,7 @@
   const VERSION_ATTR = 'data-mpse-image-tools-version';
   const bridgeClient = window.__MPSE_BRIDGE_CLIENT__;
   const imageGeometry = window.__MPSE_IMAGE_GEOMETRY__;
+  const snapshotMerge = window.__MPSE_IMAGE_SNAPSHOT_MERGE__;
   const injectBridge = bridgeClient && typeof bridgeClient.inject === 'function'
     ? bridgeClient.inject
     : () => false;
@@ -26,53 +27,27 @@
     : () => Promise.reject(new Error('扩展桥接客户端未加载，请刷新页面后重试'));
 
   if (!imageGeometry) throw new Error('图片几何模块未加载，请刷新页面后重试');
-
-  const MANAGED_STYLE_PROPS = [
-    'border-radius', 'overflow', 'width', 'max-width', 'height', 'display',
-    'margin-left', 'margin-right', 'margin-top', 'margin-bottom', 'box-shadow',
-    'filter', 'border', 'padding', 'background-color', 'box-sizing', 'object-fit',
-    'transform', 'transform-origin', 'vertical-align'
-  ];
+  if (!snapshotMerge) throw new Error('图片写回合并模块未加载，请刷新页面后重试');
 
   const MANAGED_DATA_KEYS = [
     'mpseGlowOn', 'mpseGlowBlur', 'mpseGlowSpread', 'mpseGlowOpacity', 'mpseGlowColor',
-    'mpseBrightness', 'mpseContrast', 'mpseSaturate', 'mpseGray', 'mpseRotate',
+    'mpseBrightness', 'mpseContrast', 'mpseSaturate', 'mpseGray', 'mpseColorOn', 'mpseRotate', 'mpseRotateOn',
     'mpseShadowOn', 'mpseShadowX', 'mpseShadowY', 'mpseShadowBlur', 'mpseShadowSpread', 'mpseShadowOpacity', 'mpseShadowColor',
-    'mpseBaseBoxShadow', 'mpseCircleOn', 'mpseCircleBase', 'mpseColorBase', 'mpseRotateBase', 'mpseFrameBase',
-    'mpseRadiusOn', 'mpseRadiusValue', 'mpseFrameOn',
+    'mpseBaseBoxShadow', 'mpseCircleOn', 'mpseCircleBase', 'mpseCircleDiameter', 'mpseColorBase', 'mpseRotateBase', 'mpseFrameBase',
+    'mpseImageBase', 'mpseRadiusOn', 'mpseRadiusValue',
+    'mpseSpacingOn', 'mpseSpacingBase', 'mpseFrameOn',
+    'mpseFrameBorderWidth', 'mpseFramePadding', 'mpseFrameRadius', 'mpseFrameBorderColor', 'mpseFrameBackgroundColor',
     'mpseFeatherOn', 'mpseFeatherAmount', 'mpseFeatherBase',
     'mpseStrokeOn', 'mpseStrokeWidth', 'mpseStrokeColor', 'mpseStrokeOpacity', 'mpseStrokeBase',
     'mpseOpacityOn', 'mpseOpacityValue', 'mpseOpacityBase'
   ];
-
-  const APPEARANCE_EFFECTS = {
-    feather: {
-      activeKey: 'mpseFeatherOn',
-      baseKey: 'mpseFeatherBase',
-      valueKeys: ['mpseFeatherAmount'],
-      props: ['mask-image', '-webkit-mask-image', 'mask-size', '-webkit-mask-size', 'mask-repeat', '-webkit-mask-repeat', 'mask-position', '-webkit-mask-position']
-    },
-    stroke: {
-      activeKey: 'mpseStrokeOn',
-      baseKey: 'mpseStrokeBase',
-      valueKeys: ['mpseStrokeWidth', 'mpseStrokeColor', 'mpseStrokeOpacity'],
-      props: ['outline', 'outline-offset']
-    },
-    opacity: {
-      activeKey: 'mpseOpacityOn',
-      baseKey: 'mpseOpacityBase',
-      valueKeys: ['mpseOpacityValue'],
-      props: ['opacity']
-    }
-  };
   const FRAME_STYLE_PROPS = [
     'border', 'border-top-width', 'border-right-width', 'border-bottom-width', 'border-left-width',
     'border-top-style', 'border-right-style', 'border-bottom-style', 'border-left-style',
     'border-top-color', 'border-right-color', 'border-bottom-color', 'border-left-color',
     'padding', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left',
-    'background-color', 'border-radius', 'box-sizing'
+    'background-color', 'border-radius', 'box-sizing', 'overflow'
   ];
-
   const DEBUG = false;
 
   const state = {
@@ -90,6 +65,10 @@
     interaction: null,
     cropMode: false,
     cropTransientHost: false,
+    cropTransientBase: false,
+    cropTransientCirclePresentation: null,
+    cropSessionRevision: 0,
+    cropSessionGeometryChanged: false,
     needsCommit: false,
     lastSnapshot: null,
     pendingSnapshots: new Map(),
@@ -103,7 +82,9 @@
     selectionRevision: 0,
     reacquireTimer: null,
     lastImagePress: null,
-    lastCropToggleAt: 0
+    lastCropToggleAt: 0,
+    zoomFrame: 0,
+    pendingZoom: null
   };
 
   function isMpHost() {
@@ -142,11 +123,6 @@
     return match ? Number(match[1]) : fallback;
   }
 
-  function cssNumber(image, name, fallback) {
-    const style = image ? image.style.getPropertyValue(name) : '';
-    return parsePx(style, fallback);
-  }
-
   function getDataNumber(image, name, fallback) {
     const n = image && image.dataset ? Number(image.dataset[name]) : NaN;
     return Number.isFinite(n) ? n : fallback;
@@ -182,89 +158,7 @@
     return fallback;
   }
 
-  function readStyleNumber(image, prop, fallback = 0) {
-    return parsePx(image && image.style ? image.style.getPropertyValue(prop) : '', fallback);
-  }
 
-  function readOpacityPercent(image, fallback = 100) {
-    const raw = String(image && image.style ? image.style.getPropertyValue('opacity') : '').trim();
-    if (!raw) return fallback;
-    const value = Number(raw);
-    return Number.isFinite(value) ? clampInt(value * 100, 0, 100, fallback) : fallback;
-  }
-
-  function readBorderWidth(image, fallback = 1) {
-    image = getAppearanceHost(image);
-    if (!image || !image.style) return fallback;
-    return parsePx(image.style.getPropertyValue('border-width') || image.style.getPropertyValue('border'), fallback);
-  }
-
-  function readBorderColor(image, fallback = '#e6e8eb') {
-    image = getAppearanceHost(image);
-    if (!image || !image.style) return fallback;
-    const direct = image.style.getPropertyValue('border-color');
-    if (direct) return normalizeCssColorToHex(direct, fallback);
-    const border = image.style.getPropertyValue('border');
-    const color = border.match(/(#[0-9a-f]{3,6}|rgba?\([^)]*\))/i);
-    return color ? normalizeCssColorToHex(color[1], fallback) : fallback;
-  }
-
-  function readBackgroundColor(image, fallback = '#ffffff') {
-    image = getAppearanceHost(image);
-    return normalizeCssColorToHex(image && image.style ? image.style.getPropertyValue('background-color') : '', fallback);
-  }
-
-  function readBoxShadow(image) {
-    const target = getAppearanceHost(image);
-    const value = target && target.style ? target.style.getPropertyValue('box-shadow') : '';
-    const px = Array.from(String(value).matchAll(/(-?\d+(?:\.\d+)?)px/g)).map((m) => Number(m[1]));
-    const color = String(value).match(/(rgba?\([^)]*\)|#[0-9a-f]{3,6})/i);
-    return {
-      raw: value,
-      x: px[0] ?? 0,
-      y: px[1] ?? 8,
-      blur: px[2] ?? 24,
-      spread: px[3] ?? 0,
-      opacity: color ? parseOpacityFromCssColor(color[1], 0.16) : 0.16,
-      color: color ? normalizeCssColorToHex(color[1], '#ffd447') : '#ffd447'
-    };
-  }
-
-  function readFilterValues(image) {
-    const raw = image && image.style ? image.style.getPropertyValue('filter') : '';
-    function percent(name, fallback) {
-      const match = raw.match(new RegExp(`${name}\\(([-\\d.]+)%\\)`, 'i'));
-      return match ? clampInt(match[1], 0, 300, fallback) : fallback;
-    }
-    return {
-      brightness: getDataNumber(image, 'mpseBrightness', percent('brightness', 100)),
-      contrast: getDataNumber(image, 'mpseContrast', percent('contrast', 100)),
-      saturate: getDataNumber(image, 'mpseSaturate', percent('saturate', 100)),
-      gray: getDataNumber(image, 'mpseGray', percent('grayscale', 0))
-    };
-  }
-
-  function readRotateAngle(image) {
-    const fromData = getDataNumber(image, 'mpseRotate', NaN);
-    if (Number.isFinite(fromData)) return fromData;
-    const raw = image && image.style ? image.style.getPropertyValue('transform') : '';
-    const match = String(raw).match(/rotate\((-?\d+(?:\.\d+)?)deg\)/i);
-    return match ? clampInt(match[1], -180, 180, 0) : 0;
-  }
-
-  function readCircleDiameter(image) {
-    const widthPx = readStyleNumber(image, 'width', NaN);
-    const heightPx = readStyleNumber(image, 'height', NaN);
-    if (Number.isFinite(widthPx) && widthPx > 0) return widthPx;
-    if (Number.isFinite(heightPx) && heightPx > 0) return heightPx;
-    try {
-      const rect = image.getBoundingClientRect();
-      const d = Math.round(Math.min(rect.width || 160, rect.height || rect.width || 160));
-      return clamp(d, 40, 520);
-    } catch (_) {
-      return 160;
-    }
-  }
 
   function readFrameDocument(frame) {
     try {
@@ -274,41 +168,7 @@
     }
   }
 
-  function hasNonEmptyStyle(image, prop) {
-    return Boolean(image && image.style && String(image.style.getPropertyValue(prop) || '').trim());
-  }
 
-  function getAppliedEffects(image) {
-    const applied = new Set();
-    if (!image || !image.style) return applied;
-
-    const appearanceHost = getAppearanceHost(image);
-    const radius = readStyleNumber(appearanceHost, 'border-radius', 0);
-    const width = image.style.getPropertyValue('width');
-    const cropLayout = getCropContainer(image) ? readCropLayout(image) : null;
-    const top = cropLayout ? parsePx(cropLayout.styles?.['margin-top']?.value, 0) : readStyleNumber(image, 'margin-top', 0);
-    const bottom = cropLayout ? parsePx(cropLayout.styles?.['margin-bottom']?.value, 0) : readStyleNumber(image, 'margin-bottom', 0);
-    const shadow = appearanceHost.style.getPropertyValue('box-shadow');
-    const filter = image.style.getPropertyValue('filter');
-    const transform = image.style.getPropertyValue('transform');
-    const objectFit = image.style.getPropertyValue('object-fit');
-
-    if (image.dataset.mpseRadiusOn === '1') applied.add('radius');
-    if (width || hasNonEmptyStyle(image, 'max-width') || hasNonEmptyStyle(image, 'margin-left') || hasNonEmptyStyle(image, 'margin-right') || getCropContainer(image)) applied.add('size');
-    if (top > 0 || bottom > 0) applied.add('spacing');
-    if (image.dataset.mpseShadowOn === '1') applied.add('shadow');
-    if (image.dataset.mpseGlowOn === '1') applied.add('glow');
-    if (image.dataset.mpseFeatherOn === '1') applied.add('feather');
-    if (image.dataset.mpseStrokeOn === '1') applied.add('stroke');
-    if (image.dataset.mpseOpacityOn === '1') applied.add('opacity');
-    if (shadow && image.dataset.mpseShadowOn !== '1' && image.dataset.mpseGlowOn !== '1') applied.add('shadow');
-    if (filter && !/^brightness\(100%\)\s+contrast\(100%\)\s+saturate\(100%\)$/i.test(filter.trim())) applied.add('color');
-    if (readRotateAngle(image) !== 0) applied.add('rotate');
-    if (image.dataset.mpseFrameOn === '1') applied.add('frame');
-    if (getCaptionNode(image)) applied.add('caption');
-    if (image.dataset.mpseCircleOn === '1' || ((radius >= 120 || /999/.test(image.style.getPropertyValue('border-radius')) || objectFit === 'cover') && hasNonEmptyStyle(image, 'height'))) applied.add('circle');
-    return applied;
-  }
 
   function getAccessibleDocuments() {
     const docs = [document];
@@ -444,16 +304,6 @@
     return `${identity.scopeKey || 'article'}:${position}:${primary}`;
   }
 
-  function imageIdentitiesMatch(first, second) {
-    if (!first || !second) return false;
-    if (first.scopeKey && second.scopeKey && first.scopeKey !== second.scopeKey) return false;
-    if (first.editId && second.editId) return first.editId === second.editId;
-    if (first.index !== second.index) return false;
-    const keys = ['src', 'dataSrc', 'dataBackSrc', 'dataCropSrc', 'fileId'];
-    const comparable = keys.filter((key) => first[key] && second[key]);
-    return comparable.length === 0 || comparable.some((key) => first[key] === second[key]);
-  }
-
   function scoreImageByIdentity(candidate, identity) {
     if (!candidate || !identity) return 0;
     let score = 0;
@@ -489,20 +339,28 @@
     return candidate && scoreImageByIdentity(candidate, identity) > 0 ? candidate : null;
   }
 
+  function shortlistImagesByEditId(images, identity) {
+    const indexed = images.map((image, index) => ({ image, index }));
+    if (!identity?.editId) return { exact: null, indexed };
+    const exact = indexed.find(({ image }) => getAttr(image, 'data-mpse-image-id') === identity.editId);
+    if (exact) return { exact: exact.image, indexed: [] };
+    return {
+      exact: null,
+      indexed: indexed.filter(({ image }) => !getAttr(image, 'data-mpse-image-id'))
+    };
+  }
+
   function locateImageInHtml(root, identity) {
     const images = Array.from(root.querySelectorAll('img'));
     if (!images.length) return null;
-    if (identity?.editId) {
-      const exact = images.find((image) => image.getAttribute('data-mpse-image-id') === identity.editId);
-      if (exact) return exact;
-      if (images.some((image) => image.hasAttribute('data-mpse-image-id'))) return null;
-    }
+    const shortlist = shortlistImagesByEditId(images, identity);
+    if (shortlist.exact) return shortlist.exact;
 
     let best = null;
     let bestScore = -1;
     let bestDistance = Number.POSITIVE_INFINITY;
     const preferredIndex = Number.isFinite(identity && identity.index) ? identity.index : 0;
-    for (const [index, img] of images.entries()) {
+    for (const { image: img, index } of shortlist.indexed) {
       const score = scoreImageByIdentity(img, identity);
       const distance = Math.abs(index - preferredIndex);
       if (score > bestScore || (score === bestScore && distance < bestDistance)) {
@@ -539,12 +397,6 @@
     };
   }
 
-  function rectContains(outer, inner) {
-    const tolerance = 1;
-    return inner.left >= outer.left - tolerance && inner.right <= outer.right + tolerance
-      && inner.top >= outer.top - tolerance && inner.bottom <= outer.bottom + tolerance;
-  }
-
   function rectsIntersect(first, second) {
     return Boolean(first && second && first.right > second.left && first.left < second.right
       && first.bottom > second.top && first.top < second.bottom);
@@ -573,42 +425,55 @@
   }
 
   function isSelectionVisible(image, rect) {
-    if (!rectContains(getViewportRect(), rect)) return false;
+    if (!rectsIntersect(getViewportRect(), rect)) return false;
     const frame = getFrameByDocument(image.ownerDocument);
-    if (frame && !rectContains(getFrameContentRect(frame), rect)) return false;
+    if (frame && !rectsIntersect(getFrameContentRect(frame), rect)) return false;
 
     const selection = getSelectionElement(image);
     for (let parent = selection.parentElement; parent && parent !== image.ownerDocument.documentElement; parent = parent.parentElement) {
-      if (isClippingAncestor(parent) && !rectContains(getTopRect(parent), rect)) return false;
+      if (isClippingAncestor(parent) && !rectsIntersect(getTopRect(parent), rect)) return false;
     }
     if (frame) {
       for (let parent = frame.parentElement; parent && parent !== document.documentElement; parent = parent.parentElement) {
-        if (isClippingAncestor(parent) && !rectContains(getTopRect(parent), rect)) return false;
+        if (isClippingAncestor(parent) && !rectsIntersect(getTopRect(parent), rect)) return false;
       }
     }
     return true;
   }
 
-  function getTopClientPoint(event) {
-    const x = Number(event && event.clientX);
-    const y = Number(event && event.clientY);
-    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
-
-    const sourceDocument = event.target && event.target.ownerDocument;
-    if (!sourceDocument || sourceDocument === document) return { x, y };
-
+  function createClientPointMapping(sourceDocument) {
+    if (!sourceDocument || sourceDocument === document) return null;
     const frame = getFrameByDocument(sourceDocument);
     if (!frame) return null;
     const frameRect = frame.getBoundingClientRect();
     const sourceWindow = sourceDocument.defaultView;
     const frameWidth = Math.max(1, (sourceWindow && sourceWindow.innerWidth) || frame.clientWidth || frameRect.width);
     const frameHeight = Math.max(1, (sourceWindow && sourceWindow.innerHeight) || frame.clientHeight || frameRect.height);
-    const scaleX = frameRect.width / frameWidth;
-    const scaleY = frameRect.height / frameHeight;
     return {
-      x: frameRect.left + frame.clientLeft * scaleX + x * scaleX,
-      y: frameRect.top + frame.clientTop * scaleY + y * scaleY
+      sourceDocument,
+      offsetX: frameRect.left + frame.clientLeft * frameRect.width / frameWidth,
+      offsetY: frameRect.top + frame.clientTop * frameRect.height / frameHeight,
+      scaleX: frameRect.width / frameWidth,
+      scaleY: frameRect.height / frameHeight
     };
+  }
+
+  function getTopClientPoint(event, mapping = null) {
+    const x = Number(event && event.clientX);
+    const y = Number(event && event.clientY);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+
+    if (event && event.mpseTopCoordinates) return { x, y };
+
+    const sourceDocument = (event.target && event.target.ownerDocument)
+      || (event.view && event.view.document)
+      || null;
+    if (mapping && (!sourceDocument || sourceDocument === mapping.sourceDocument)) {
+      return { x: mapping.offsetX + x * mapping.scaleX, y: mapping.offsetY + y * mapping.scaleY };
+    }
+    if (!sourceDocument || sourceDocument === document) return { x, y };
+    const pointMapping = createClientPointMapping(sourceDocument);
+    return pointMapping ? { x: pointMapping.offsetX + x * pointMapping.scaleX, y: pointMapping.offsetY + y * pointMapping.scaleY } : null;
   }
 
   function schedulePositionTools() {
@@ -656,13 +521,6 @@
         return;
       }
       showPanel(effect);
-      if (isToggleEffect(effect) && !isEffectEnabled(state.image, effect)) {
-        const panel = document.getElementById(PANEL_ID);
-        if (panel) {
-          applyEffect(effect, collectValues(panel));
-          showPanel(effect);
-        }
-      }
     }, true);
     document.body.appendChild(menu);
     return menu;
@@ -944,12 +802,14 @@
     const computed = view && image ? view.getComputedStyle(image) : null;
     const computedDisplay = computed ? computed.display : 'block';
     const alignment = detectHorizontalAlignment(image);
-    const props = [
+    const hostProps = [
       'width', 'height', 'max-width', 'display', 'margin-left', 'margin-right',
       'margin-top', 'margin-bottom', 'vertical-align', 'float', 'transform', 'transform-origin'
     ];
+    const imageOnlyProps = ['position', 'left', 'top', 'right', 'bottom', 'translate', 'scale'];
+    const props = [...hostProps, ...imageOnlyProps];
     const styles = captureInlineStyles(image, props);
-    const hostStyles = Object.fromEntries(Object.entries(styles).map(([key, entry]) => [key, { ...entry }]));
+    const hostStyles = Object.fromEntries(hostProps.map((key) => [key, { ...styles[key] }]));
     for (const property of ['margin-top', 'margin-bottom', 'vertical-align', 'float']) {
       if (!hostStyles[property].value && computed) hostStyles[property] = { value: computed.getPropertyValue(property), priority: '' };
     }
@@ -970,7 +830,7 @@
       display: computedDisplay === 'inline' ? 'inline-block' : (computedDisplay === 'none' ? 'block' : computedDisplay),
       offsetX: 0,
       offsetY: 0,
-      frameStyles: captureInlineStyles(image, FRAME_STYLE_PROPS),
+      frameStyles: captureFrameSourceStyles(image),
       hostStyles,
       styles
     };
@@ -1309,9 +1169,13 @@
 
   function ensureCropContainer(image) {
     const existing = getCropContainer(image);
-    if (existing) return { host: existing, created: false };
-    if (!image || !image.parentNode) return { host: null, created: false };
+    if (existing) return { host: existing, created: false, circlePresentation: null };
+    if (!image || !image.parentNode) return { host: null, created: false, circlePresentation: null };
 
+    const circleDiameter = image.dataset.mpseCircleOn === '1'
+      ? clamp(getDataNumber(image, 'mpseCircleDiameter', 160), 40, 520)
+      : null;
+    const circlePresentation = suspendImageCirclePresentation(image);
     const rect = image.getBoundingClientRect();
     const sourceMetrics = readDecorationMetrics(image, 100);
     const horizontalDecoration = sourceMetrics.paddingLeft + sourceMetrics.paddingRight
@@ -1340,7 +1204,7 @@
     applyCropDecorationScale(host, layout, baseWidth);
     writeCropLayout(image, layout);
 
-    for (const prop of ['width', 'max-width', 'display', 'margin-left', 'margin-right', 'margin-top', 'margin-bottom', 'vertical-align', 'float', 'position', 'left', 'top', 'height', 'transform', 'transform-origin']) {
+    for (const prop of ['width', 'max-width', 'display', 'margin-left', 'margin-right', 'margin-top', 'margin-bottom', 'vertical-align', 'float', 'position', 'left', 'top', 'right', 'bottom', 'height', 'translate', 'scale', 'transform', 'transform-origin']) {
       image.style.removeProperty(prop);
     }
     writeCropState(image, {
@@ -1348,8 +1212,13 @@
       media: { x: 0, y: 0, width: 1, height: 1 },
       baseAspect
     });
-    renderAppearance(image);
-    return { host, created: true };
+    clearFrameAppearance(image);
+    renderCropAppearance(image);
+    if (circlePresentation && circleDiameter !== null && image.dataset.mpseCircleOn === '1') {
+      imageControls.applyCircleCropGeometry(image, circleDiameter, true);
+      renderCropAppearance(image);
+    }
+    return { host, created: true, circlePresentation };
   }
 
   function unwrapCropContainer(image) {
@@ -1362,10 +1231,13 @@
       && Number.isFinite(layout.baseWidth) && Math.abs(baseWidth - layout.baseWidth) < 0.01);
     transferInlineStyles(host, image, FRAME_STYLE_PROPS);
     if (restoreOriginalFrame) restoreInlineStyles(image, layout.frameStyles);
-    for (const prop of ['position', 'left', 'top', 'height', 'max-width', 'display', 'margin-left', 'margin-right', 'margin-top', 'margin-bottom', 'width', 'vertical-align', 'float', 'translate', 'scale']) {
+    for (const prop of ['position', 'left', 'top', 'right', 'bottom', 'height', 'max-width', 'display', 'margin-left', 'margin-right', 'margin-top', 'margin-bottom', 'width', 'vertical-align', 'float', 'translate', 'scale']) {
       image.style.removeProperty(prop);
     }
     restoreInlineStyles(image, layout.styles);
+    if (layout.frameStyles?.overflow) {
+      restoreInlineStyles(image, { overflow: layout.frameStyles.overflow });
+    }
     if (Number.isFinite(layout.baseWidth) && Math.abs(baseWidth - layout.baseWidth) >= 0.01) {
       setStyle(image, 'width', `${baseWidth.toFixed(4)}%`);
       const heightEntry = layout.styles && layout.styles.height;
@@ -1375,6 +1247,7 @@
     }
     parent.insertBefore(image, host);
     host.remove();
+    rebuildFrameAppearance(image);
     renderAppearance(image);
     if (image.dataset.mpseShadowOn !== '1' && image.dataset.mpseGlowOn !== '1') {
       delete image.dataset.mpseBaseBoxShadow;
@@ -1385,6 +1258,10 @@
   function resetCrop() {
     const image = state.image;
     if (!image || !getCropContainer(image)) return;
+    const circleDiameter = image.dataset.mpseCircleOn === '1'
+      ? readCircleDiameter(image)
+      : null;
+    if (circleDiameter !== null) clearEffect('circle', false);
     if (hasCropLayoutOffset(image)) {
       const crop = readCropState(image);
       writeCropState(image, {
@@ -1397,9 +1274,14 @@
     }
     state.cropMode = false;
     state.cropTransientHost = false;
+    state.cropTransientBase = false;
+    state.cropTransientCirclePresentation = null;
+    state.cropSessionRevision = 0;
+    state.cropSessionGeometryChanged = false;
     const box = document.getElementById(BOX_ID);
     if (box) box.classList.remove('mpse-crop-mode');
-    markChanged(state.image, 'crop-reset');
+    if (circleDiameter !== null) applyEffect('circle', { diameter: circleDiameter });
+    else markChanged(state.image, 'crop-reset');
     schedulePositionTools();
   }
 
@@ -1460,8 +1342,9 @@
 
   function deferGeometryFinish(event, forceCancel = false, closeSelection = false) {
     const interaction = state.interaction;
-    if (!interaction || !state.commitInFlight || (state.image && state.image.isConnected)) return false;
-    const point = getTopClientPoint(event) || interaction.lastPoint;
+    if (!interaction || (state.image && state.image.isConnected)) return false;
+    if (rebaseInteractionAfterEditorWrite(interaction.identity || state.identity)) return false;
+    const point = getTopClientPoint(event, interaction.pointMapping) || interaction.lastPoint;
     if (point) {
       interaction.lastPoint = point;
       interaction.lastEvent = {
@@ -1469,6 +1352,7 @@
         pointerId: interaction.pointerId,
         clientX: point.x,
         clientY: point.y,
+        mpseTopCoordinates: true,
         target: document
       };
     }
@@ -1477,6 +1361,14 @@
         || (event && (event.type === 'pointercancel' || event.type === 'lostpointercapture'))),
       closeSelection: Boolean(interaction.pendingFinish?.closeSelection || closeSelection)
     };
+    if (!interaction.disconnectTimer) {
+      interaction.disconnectTimer = window.setTimeout(() => {
+        interaction.disconnectTimer = 0;
+        if (state.interaction !== interaction || !interaction.pendingFinish) return;
+        if (rebaseInteractionAfterEditorWrite(interaction.identity || state.identity)) return;
+        finishGeometryGesture(undefined, true);
+      }, 800);
+    }
     return true;
   }
 
@@ -1644,18 +1536,23 @@
       : 1 + verticalDelta / Math.max(1, interaction.rect.height);
     const minimumScale = 4 / Math.max(4, interaction.startWidthPercent);
     let maximumScale = 100 / Math.max(4, interaction.startWidthPercent);
+    let boundedMinimumScale = minimumScale;
+    if (Number.isFinite(interaction.circleDiameterPx) && interaction.circleDiameterPx > 0) {
+      boundedMinimumScale = Math.max(boundedMinimumScale, 40 / interaction.circleDiameterPx);
+      maximumScale = Math.min(maximumScale, 520 / interaction.circleDiameterPx);
+    }
     const bounds = interaction.bounds;
     if (bounds) {
       const available = interaction.resizeOrigin.x < 0.5
         ? bounds.right - interaction.rect.left
         : interaction.rect.right - bounds.left;
-      maximumScale = Math.min(maximumScale, Math.max(minimumScale, available / Math.max(1, interaction.rect.width)));
+      maximumScale = Math.min(maximumScale, Math.max(boundedMinimumScale, available / Math.max(1, interaction.rect.width)));
       if (interaction.resizeOrigin.y > 0.5) {
         const verticalAvailable = interaction.rect.bottom - bounds.top;
-        maximumScale = Math.min(maximumScale, Math.max(minimumScale, verticalAvailable / Math.max(1, interaction.rect.height)));
+        maximumScale = Math.min(maximumScale, Math.max(boundedMinimumScale, verticalAvailable / Math.max(1, interaction.rect.height)));
       }
     }
-    const scale = clamp(requestedScale, minimumScale, maximumScale);
+    const scale = clamp(requestedScale, boundedMinimumScale, Math.max(boundedMinimumScale, maximumScale));
     const widthPercent = clamp(interaction.startWidthPercent * scale, 4, 100);
     return { widthPercent, scale: widthPercent / Math.max(0.01, interaction.startWidthPercent) };
   }
@@ -1669,47 +1566,31 @@
     return rect;
   }
 
-  function initializeCropGesture(interaction, image) {
-    if (interaction.startCrop) return true;
-    const result = ensureCropContainer(image);
-    if (!result.host || !image.isConnected) return false;
-    interaction.createdCrop = result.created;
-    interaction.startCrop = readCropState(image);
-    interaction.rect = getTopRect(result.host);
-    interaction.contentRect = getCropContentRect(image);
-    interaction.startCropBaseWidth = readCropBaseWidth(image);
-    interaction.baseCanvasHeight = interaction.contentRect.height / Math.max(imageGeometry.MIN_FRACTION, interaction.startCrop.frame.height);
-    captureGeometryPreviewStyles(interaction, image);
-    return Boolean(interaction.startCrop);
-  }
-
-  function initializeResizeGesture(interaction, image) {
-    if (interaction.startCrop) return true;
-    const result = ensureCropContainer(image);
-    if (!result.host || !image.isConnected) return false;
-    interaction.createdCrop = result.created;
-    interaction.startCrop = readCropState(image);
-    interaction.rect = getTopRect(result.host);
-    interaction.contentRect = getCropContentRect(image);
-    interaction.startWidthPercent = readLayoutWidthPercent(image);
-    interaction.availableWidth = getAvailableImageWidth(image);
-    interaction.bounds = getImageLayoutBounds(image);
-    interaction.startCropBaseWidth = readCropBaseWidth(image);
-    interaction.baseCanvasHeight = interaction.contentRect.height / Math.max(imageGeometry.MIN_FRACTION, interaction.startCrop.frame.height);
-    captureGeometryPreviewStyles(interaction, image);
-    return Boolean(interaction.startCrop);
+  function discardCapturedImageBase(image, created) {
+    if (created && image && image.dataset) delete image.dataset.mpseImageBase;
   }
 
   function beginGeometryGesture(handle, event, captureTarget) {
     const image = state.image;
     if (!image || !image.isConnected) return;
+    const createdImageBase = captureImageBase(image);
     state.identity = imageSignature(image);
-    const point = getTopClientPoint(event);
-    if (!point) return;
+    const pointMapping = createClientPointMapping(event.target && event.target.ownerDocument);
+    const point = getTopClientPoint(event, pointMapping);
+    if (!point) {
+      discardCapturedImageBase(image, createdImageBase);
+      return;
+    }
     const isCorner = ['nw', 'ne', 'se', 'sw'].includes(handle);
-    const target = getSelectionElement(image);
+    const cropResult = ensureCropContainer(image);
+    if (!cropResult.host) {
+      discardCapturedImageBase(image, createdImageBase);
+      return;
+    }
+    const target = cropResult.host;
     const rect = getTopRect(target);
     const startCrop = readCropState(image);
+    const contentRect = startCrop ? getCropContentRect(image) : rect;
     deferContentCommitForGesture();
     const interaction = {
       kind: isCorner ? 'resize' : 'crop',
@@ -1717,18 +1598,25 @@
       handle,
       pointerId: event.pointerId,
       pointerTarget: captureTarget || event.target,
+      pointMapping,
       startX: point.x,
       startY: point.y,
       rect,
       startCrop,
-      contentRect: startCrop ? getCropContentRect(image) : rect,
+      contentRect,
       startCropBaseWidth: startCrop ? readCropBaseWidth(image) : null,
-      baseCanvasHeight: startCrop ? getCropContentRect(image).height / Math.max(imageGeometry.MIN_FRACTION, startCrop.frame.height) : null,
+      baseCanvasHeight: startCrop ? contentRect.height / Math.max(imageGeometry.MIN_FRACTION, startCrop.frame.height) : null,
       resizeOrigin: imageGeometry.cornerResizeOrigin(handle),
       startWidthPercent: readLayoutWidthPercent(image),
       availableWidth: getAvailableImageWidth(image),
       bounds: getImageLayoutBounds(image),
-      createdCrop: false,
+      createdCrop: cropResult.created,
+      createdImageBase,
+      sessionRevision: state.editRevision,
+      circlePresentation: cropResult.circlePresentation,
+      circleDiameterPx: image.dataset.mpseCircleOn === '1'
+        ? Math.min(contentRect.width, contentRect.height)
+        : null,
       started: false,
       gestureEpoch: ++state.gestureEpoch,
       preview: null,
@@ -1744,11 +1632,19 @@
   }
 
   function beginCropPan(image, event) {
+    const createdImageBase = captureImageBase(image);
     state.identity = imageSignature(image);
+    const pointMapping = createClientPointMapping(event.target && event.target.ownerDocument);
+    const point = getTopClientPoint(event, pointMapping);
+    if (!point) {
+      discardCapturedImageBase(image, createdImageBase);
+      return;
+    }
     const result = ensureCropContainer(image);
-    if (!result.host) return;
-    const point = getTopClientPoint(event);
-    if (!point) return;
+    if (!result.host) {
+      discardCapturedImageBase(image, createdImageBase);
+      return;
+    }
     const rect = getTopRect(result.host);
     deferContentCommitForGesture();
     const interaction = {
@@ -1756,12 +1652,16 @@
       identity: state.identity,
       pointerId: event.pointerId,
       pointerTarget: image,
+      pointMapping,
       startX: point.x,
       startY: point.y,
       rect,
       startCrop: readCropState(image),
       contentRect: getCropContentRect(image),
       createdCrop: result.created,
+      createdImageBase,
+      sessionRevision: state.editRevision,
+      circlePresentation: result.circlePresentation,
       started: false,
       gestureEpoch: ++state.gestureEpoch,
       preview: null,
@@ -1796,7 +1696,9 @@
     const interaction = state.interaction;
     const image = state.image;
     if (!interaction || !interactionOwnsEvent(interaction, event)) return;
-    const point = getTopClientPoint(event);
+    const point = event && event.mpseTopCoordinates
+      ? { x: Number(event.clientX), y: Number(event.clientY) }
+      : getTopClientPoint(event, interaction.pointMapping);
     if (!point) return;
     interaction.lastPoint = point;
     interaction.lastEvent = event;
@@ -1807,14 +1709,6 @@
       const distance = Math.hypot(point.x - interaction.startX, point.y - interaction.startY);
       if (distance < GEOMETRY_DRAG_THRESHOLD) return;
       interaction.started = true;
-      if (interaction.kind === 'resize' && !initializeResizeGesture(interaction, image)) {
-        interaction.started = false;
-        return;
-      }
-      if (interaction.kind === 'crop' && !initializeCropGesture(interaction, image)) {
-        interaction.started = false;
-        return;
-      }
       rect = interaction.rect;
     }
     const geometryRect = interaction.kind === 'resize' ? rect : (interaction.contentRect || rect);
@@ -1833,40 +1727,122 @@
       interaction.preview = { kind: 'pan', crop: imageGeometry.panMedia(start, dx, dy) };
     } else {
       const ratio = interaction.handle === 'e' || interaction.handle === 'w' ? dx : dy;
-      interaction.preview = {
-        kind: 'crop',
-        crop: imageGeometry.resizeFrameEdge(start, interaction.handle, ratio, getEdgeResizeConstraints(interaction))
-      };
+      const constraints = interaction.edgeConstraints || (interaction.edgeConstraints = getEdgeResizeConstraints(interaction));
+      let crop = imageGeometry.resizeFrameEdge(start, interaction.handle, ratio, constraints);
+      if (image.dataset.mpseCircleOn === '1') {
+        crop = imageGeometry.constrainFrameAspect(crop, interaction.handle, 1);
+      }
+      interaction.preview = { kind: 'crop', crop };
     }
     queueGeometryPreview(interaction);
   }
 
-  function zoomCrop(image, event) {
+  function rollbackCropZoomSetup(pending) {
+    if (!pending) return;
+    let image = pending.image;
+    if (pending.createdCrop && image?.isConnected && getCropContainer(image)) {
+      const restored = unwrapCropContainer(image);
+      resumeImageCirclePresentation(restored, pending.circlePresentation);
+      if (state.image === image) state.image = restored;
+      image = restored;
+    }
+    discardCapturedImageBase(image, pending.createdImageBase);
+  }
+
+  function cancelPendingCropZoom(image = null) {
+    const pending = state.pendingZoom;
+    if (!pending || (image && pending.image !== image)) return false;
+    if (state.zoomFrame) window.cancelAnimationFrame(state.zoomFrame);
+    state.zoomFrame = 0;
+    state.pendingZoom = null;
+    rollbackCropZoomSetup(pending);
+    if (state.needsCommit) scheduleContentCommit('crop-zoom-cancel');
+    return true;
+  }
+
+  function flushCropZoom() {
+    state.zoomFrame = 0;
+    const pending = state.pendingZoom;
+    state.pendingZoom = null;
+    if (!pending || pending.image !== state.image || !pending.image.isConnected) return;
+    const image = pending.image;
     const host = getCropContainer(image);
     const crop = readCropState(image);
-    if (!host || !crop) return;
+    if (!host || !crop) {
+      rollbackCropZoomSetup(pending);
+      return;
+    }
     const rect = getCropContentRect(image);
-    if (rect.width < 1 || rect.height < 1) return;
-    const point = getTopClientPoint(event);
-    if (!point) return;
+    if (rect.width < 1 || rect.height < 1) {
+      rollbackCropZoomSetup(pending);
+      if (state.needsCommit) scheduleContentCommit('crop-zoom-invalid');
+      return;
+    }
+    const point = pending.point;
     const pointX = clamp((point.x - rect.left) / rect.width, 0, 1);
     const pointY = clamp((point.y - rect.top) / rect.height, 0, 1);
-    const scale = event.deltaY < 0 ? 0.9 : 1.1;
-    writeCropState(image, imageGeometry.zoomMedia(crop, scale, pointX, pointY));
+    const scale = Math.exp(clamp(pending.deltaY, -240, 240) * 0.0015);
+    const next = imageGeometry.zoomMedia(crop, scale, pointX, pointY);
+    if (imageGeometry.modelsMatch(crop, next)) {
+      rollbackCropZoomSetup(pending);
+      if (state.needsCommit) scheduleContentCommit('crop-zoom-noop');
+      schedulePositionTools();
+      return;
+    }
+    writeCropState(image, next);
+    if (pending.createdCrop) {
+      state.cropTransientHost = true;
+      state.cropTransientBase = pending.createdImageBase;
+      state.cropTransientCirclePresentation = pending.circlePresentation;
+      state.cropSessionRevision = pending.sessionRevision;
+    }
+    state.cropSessionGeometryChanged = true;
     markChanged(image, 'crop-zoom');
     schedulePositionTools();
+  }
+
+  function queueCropZoom(image, event) {
+    const point = getTopClientPoint(event);
+    if (!point) return;
+    const createdImageBase = captureImageBase(image);
+    const result = ensureCropContainer(image);
+    if (!result.host) {
+      discardCapturedImageBase(image, createdImageBase);
+      return;
+    }
+    deferContentCommitForGesture();
+    if (!state.pendingZoom || state.pendingZoom.image !== image) {
+      state.pendingZoom = {
+        image,
+        point,
+        deltaY: 0,
+        createdCrop: result.created,
+        createdImageBase,
+        circlePresentation: result.circlePresentation,
+        sessionRevision: state.editRevision
+      };
+    }
+    state.pendingZoom.point = point;
+    state.pendingZoom.deltaY += Number(event.deltaY) || 0;
+    if (!state.zoomFrame) state.zoomFrame = window.requestAnimationFrame(flushCropZoom);
   }
 
   function restoreGeometryGesture(interaction, image) {
     clearGeometryPreview(interaction, image);
     if (!interaction || !image || !image.isConnected) return image;
-    if (interaction.createdCrop && getCropContainer(image)) return unwrapCropContainer(image);
-    return image;
+    let restored = image;
+    if (interaction.createdCrop && getCropContainer(image)) {
+      restored = unwrapCropContainer(image);
+      resumeImageCirclePresentation(restored, interaction.circlePresentation);
+    }
+    return restored;
   }
 
   function finishGeometryGesture(event, forceCancel = false) {
     const interaction = state.interaction;
     if (!interaction || !interactionOwnsEvent(interaction, event)) return false;
+    state.lastImagePress = null;
+    if (interaction.disconnectTimer) window.clearTimeout(interaction.disconnectTimer);
     const canceled = forceCancel || Boolean(event && (event.type === 'pointercancel' || event.type === 'lostpointercapture'));
     if (canceled) {
       if (interaction.frame) window.cancelAnimationFrame(interaction.frame);
@@ -1884,6 +1860,7 @@
     releasePointer(interaction.pointerTarget, interaction.pointerId);
     if (canceled) {
       state.image = restoreGeometryGesture(interaction, image);
+      if (interaction.createdImageBase && state.image) delete state.image.dataset.mpseImageBase;
       if (state.needsCommit) scheduleContentCommit('gesture-cancel');
       schedulePositionTools();
       return true;
@@ -1899,15 +1876,30 @@
       }
       updateGeometryOverlay(image);
     }
+    if (changed && (state.cropMode || interaction.kind === 'crop')) {
+      state.cropSessionGeometryChanged = true;
+    }
+    if (changed && state.cropMode && interaction.createdCrop) {
+      state.cropTransientHost = true;
+      state.cropTransientBase = interaction.createdImageBase;
+      state.cropTransientCirclePresentation = interaction.circlePresentation;
+      state.cropSessionRevision = interaction.sessionRevision ?? state.editRevision;
+    }
     if (interaction.kind === 'crop' && changed && state.image) {
+      if (!state.cropMode) {
+        state.cropTransientBase = interaction.createdImageBase;
+        state.cropTransientCirclePresentation = interaction.circlePresentation;
+        state.cropSessionRevision = state.editRevision;
+      }
       state.cropMode = true;
       state.cropTransientHost = interaction.createdCrop || state.cropTransientHost;
       createBox().classList.add('mpse-crop-mode');
       setBadgeText('裁切模式：拖动图片，Ctrl + 滚轮缩放');
     }
-    if (!changed && interaction.started) {
+    if (!changed) {
       state.image = restoreGeometryGesture(interaction, image);
       image = state.image;
+      if (interaction.createdImageBase && image) delete image.dataset.mpseImageBase;
     }
     if (changed && state.image) {
       markChanged(state.image, interaction.kind === 'pan' ? 'crop-pan' : interaction.kind, false);
@@ -1920,10 +1912,12 @@
   }
 
   function enterCropMode(image) {
-    const result = ensureCropContainer(image);
-    if (!result.host) return;
     state.cropMode = true;
-    state.cropTransientHost = result.created;
+    state.cropTransientHost = false;
+    state.cropTransientBase = false;
+    state.cropTransientCirclePresentation = null;
+    state.cropSessionRevision = state.editRevision;
+    state.cropSessionGeometryChanged = false;
     createBox().classList.add('mpse-crop-mode');
     setBadgeText('裁切模式：拖动图片，Ctrl + 滚轮缩放');
     schedulePositionTools();
@@ -1931,15 +1925,26 @@
 
   function exitCropMode() {
     const image = state.image;
+    cancelPendingCropZoom(image);
+    const untouchedSession = state.cropTransientBase && state.editRevision === state.cropSessionRevision;
     const shouldUnwrap = state.cropTransientHost && image
-      && getCropContainer(image) && !hasCropAdjustment(image) && !hasCropLayoutOffset(image);
-    const refreshSnapshot = Boolean(shouldUnwrap && state.lastSnapshot && state.lastSnapshot.cropHtml);
+      && getCropContainer(image) && !state.cropSessionGeometryChanged && !hasCropLayoutOffset(image);
+    const pendingSnapshot = image && state.pendingSnapshots.get(imageIdentityKey(imageSignature(image)));
+    const refreshSnapshot = Boolean(shouldUnwrap && pendingSnapshot?.cropAction === 'ensure');
     if (shouldUnwrap) {
       state.image = unwrapCropContainer(image);
+      resumeImageCirclePresentation(state.image, null);
+      if (untouchedSession && state.image) delete state.image.dataset.mpseImageBase;
       if (refreshSnapshot) markChanged(state.image, 'crop-exit');
+    } else if (untouchedSession && image) {
+      delete image.dataset.mpseImageBase;
     }
     state.cropMode = false;
     state.cropTransientHost = false;
+    state.cropTransientBase = false;
+    state.cropTransientCirclePresentation = null;
+    state.cropSessionRevision = 0;
+    state.cropSessionGeometryChanged = false;
     const box = document.getElementById(BOX_ID);
     if (box) box.classList.remove('mpse-crop-mode');
     const badge = document.getElementById(BADGE_ID);
@@ -1947,794 +1952,128 @@
     schedulePositionTools();
   }
 
-  function setCarrierStyles(image, styles) {
-    const carrier = getVisualCarrier(image);
-    if (!carrier) return;
-    setStyles(carrier, styles);
+  const controlsFactory = window.__MPSE_IMAGE_CONTROLS__;
+  if (!controlsFactory || typeof controlsFactory.create !== 'function') {
+    throw new Error('图片参数控制模块未加载，请刷新页面后重试');
   }
+  const imageControls = controlsFactory.create({
+    MENU_ID,
+    PANEL_ID,
+    state,
+    imageGeometry,
+    frameStyleProps: FRAME_STYLE_PROPS,
+    clamp,
+    parsePx,
+    parsePercent,
+    getDataNumber,
+    getDataString,
+    clampInt,
+    normalizeCssColorToHex,
+    parseOpacityFromCssColor,
+    escapeHtml,
+    setStyle,
+    setStyles,
+    captureInlineStyles,
+    restoreInlineStyles,
+    getVisualCarrier,
+    getCropContainer,
+    getCropContentRect,
+    getLayoutHost,
+    getAppearanceHost,
+    detectHorizontalAlignment,
+    readCropLayout,
+    writeCropLayout,
+    getAvailableImageWidth,
+    readCropState,
+    hasCropAdjustment,
+    readCropBaseWidth,
+    setCropBaseWidth,
+    writeCropState,
+    setCropLayoutStyle,
+    setLayoutWidthPercent,
+    refreshCropDecoration,
+    createPanel,
+    isLikelyArticleImage,
+    hideTools,
+    positionTools,
+    schedulePositionTools,
+    markChanged
+  });
+  const {
+    captureImageBase,
+    restoreImageBase,
+    renderAppearance,
+    renderCropAppearance,
+    rebuildFrameAppearance,
+    clearFrameAppearance,
+    captureBaseBoxShadow,
+    captureFrameSourceStyles,
+    readCircleDiameter,
+    applyCircleCropGeometry,
+    suspendImageCirclePresentation,
+    resumeImageCirclePresentation,
+    collectValues,
+    showPanel,
+    closePanel,
+    setButtonStates,
+    refreshVisiblePanel,
+    onPanelInput,
+    applyEffect,
+    clearEffect,
+    hasManagedEffect,
+    getCaptionNode
+  } = imageControls;
 
-  function hexToRgb(hex) {
-    const clean = String(hex || '#ffd447').replace('#', '').trim();
-    const full = clean.length === 3 ? clean.split('').map((ch) => ch + ch).join('') : clean;
-    const int = Number.parseInt(full, 16);
-    if (!Number.isFinite(int)) return { r: 255, g: 212, b: 71 };
-    return { r: (int >> 16) & 255, g: (int >> 8) & 255, b: int & 255 };
-  }
-
-  function hexToRgba(hex, opacity, fallback = '#0f2337') {
-    const color = hexToRgb(hex || fallback);
-    return `rgba(${color.r}, ${color.g}, ${color.b}, ${clamp(opacity, 0, 1)})`;
-  }
-
-  function rebuildFilter(image) {
-    const brightness = getDataNumber(image, 'mpseBrightness', 100);
-    const contrast = getDataNumber(image, 'mpseContrast', 100);
-    const saturate = getDataNumber(image, 'mpseSaturate', 100);
-    const gray = getDataNumber(image, 'mpseGray', 0);
-    const parts = [`brightness(${brightness}%)`, `contrast(${contrast}%)`, `saturate(${saturate}%)`];
-    if (gray > 0) parts.push(`grayscale(${gray}%)`);
-    setStyle(image, 'filter', parts.join(' '));
-  }
-
-  function applyGlowBoxShadow(image, values) {
-    image.dataset.mpseGlowOn = '1';
-    image.dataset.mpseGlowBlur = String(clamp(values.blur, 0, 120));
-    image.dataset.mpseGlowSpread = String(clamp(values.spread, 0, 40));
-    image.dataset.mpseGlowOpacity = String(clamp(values.opacity, 0, 100));
-    image.dataset.mpseGlowColor = values.glowColor || '#ffd447';
-    rebuildManagedBoxShadow(image);
-  }
-
-  function captureBaseBoxShadow(image) {
-    if (!image || image.dataset.mpseBaseBoxShadow !== undefined) return;
-    const target = getAppearanceHost(image);
-    image.dataset.mpseBaseBoxShadow = target.style.getPropertyValue('box-shadow') || '';
-  }
-
-  function rebuildManagedBoxShadow(image) {
-    if (!image) return;
-    const shadows = [];
-    const base = image.dataset.mpseBaseBoxShadow;
-    if (base) shadows.push(base);
-
-    if (image.dataset.mpseShadowOn === '1') {
-      const x = getDataNumber(image, 'mpseShadowX', 0);
-      const y = getDataNumber(image, 'mpseShadowY', 8);
-      const blur = getDataNumber(image, 'mpseShadowBlur', 24);
-      const spread = getDataNumber(image, 'mpseShadowSpread', 0);
-      const opacity = getDataNumber(image, 'mpseShadowOpacity', 16) / 100;
-      const color = getDataString(image, 'mpseShadowColor', '#0f2337');
-      shadows.push(`${x}px ${y}px ${blur}px ${spread}px ${hexToRgba(color, opacity, '#0f2337')}`);
-    }
-
-    if (image.dataset.mpseGlowOn === '1') {
-      const blur = getDataNumber(image, 'mpseGlowBlur', 22);
-      const spread = getDataNumber(image, 'mpseGlowSpread', 0);
-      const opacity = getDataNumber(image, 'mpseGlowOpacity', 55) / 100;
-      const color = hexToRgb(getDataString(image, 'mpseGlowColor', '#ffd447'));
-      const rgba1 = `rgba(${color.r}, ${color.g}, ${color.b}, ${opacity})`;
-      const rgba2 = `rgba(${color.r}, ${color.g}, ${color.b}, ${Math.max(0, opacity * 0.42)})`;
-      const secondBlur = Math.round(blur * 1.65);
-      shadows.push(`0 0 ${blur}px ${spread}px ${rgba1}`);
-      shadows.push(`0 0 ${secondBlur}px ${Math.max(0, Math.round(spread / 2))}px ${rgba2}`);
-    }
-
-    const target = getAppearanceHost(image);
-    if (target !== image) setStyle(image, 'box-shadow', '');
-    setStyle(target, 'box-shadow', shadows.join(', '));
-  }
-
-  function restoreBaseBoxShadow(image) {
-    if (!image) return;
-    const target = getAppearanceHost(image);
-    if (target !== image) setStyle(image, 'box-shadow', '');
-    setStyle(target, 'box-shadow', image.dataset.mpseBaseBoxShadow || '');
-    delete image.dataset.mpseBaseBoxShadow;
-  }
-
-  function captureCircleBase(image) {
-    if (!image || image.dataset.mpseCircleBase) return;
-    const values = {};
-    for (const prop of ['width', 'height', 'max-width', 'border-radius', 'object-fit', 'display', 'margin-left', 'margin-right']) {
-      values[prop] = image.style.getPropertyValue(prop) || '';
-    }
-    image.dataset.mpseCircleBase = JSON.stringify(values);
-  }
-
-  function restoreCircleBase(image) {
-    if (!image) return;
-    try {
-      const values = JSON.parse(image.dataset.mpseCircleBase || '{}');
-      for (const prop of ['width', 'height', 'max-width', 'border-radius', 'object-fit', 'display', 'margin-left', 'margin-right']) {
-        setStyle(image, prop, values[prop] || '');
-      }
-    } catch (_) {
-      setStyles(image, { height: '', 'object-fit': '', 'border-radius': '' });
-    }
-    delete image.dataset.mpseCircleBase;
-    delete image.dataset.mpseCircleOn;
-  }
-
-  function captureStyleBase(image, key, props, target = image) {
-    if (!image || image.dataset[key]) return;
-    const values = {};
-    for (const prop of props) {
-      values[prop] = {
-        value: target.style.getPropertyValue(prop) || '',
-        priority: target.style.getPropertyPriority(prop) || ''
-      };
-    }
-    image.dataset[key] = JSON.stringify(values);
-  }
-
-  function applyStyleBase(image, key, props, target = image) {
-    if (!image) return;
-    try {
-      const values = JSON.parse(image.dataset[key] || '{}');
-      for (const prop of props) {
-        const entry = values[prop];
-        if (entry && typeof entry === 'object') {
-          setStyle(target, prop, entry.value || '', entry.priority === 'important');
-        } else {
-          setStyle(target, prop, entry || '');
-        }
-      }
-    } catch (_) {
-      for (const prop of props) setStyle(target, prop, '');
-    }
-  }
-
-  function restoreStyleBase(image, key, props, target = image) {
-    applyStyleBase(image, key, props, target);
-    delete image.dataset[key];
-  }
-
-  function captureCropTransformBase(image, layout) {
-    if (image.dataset.mpseRotateBase !== undefined) return;
-    image.dataset.mpseRotateBase = JSON.stringify({
-      transform: layout.styles?.transform || { value: '', priority: '' },
-      'transform-origin': layout.styles?.['transform-origin'] || { value: '', priority: '' }
-    });
-  }
-
-  function restoreCropTransformBase(image) {
-    const crop = readCropState(image);
-    if (!crop) return false;
-    const layout = readCropLayout(image);
-    try {
-      const base = JSON.parse(image.dataset.mpseRotateBase || '{}');
-      layout.styles.transform = base.transform || { value: '', priority: '' };
-      layout.styles['transform-origin'] = base['transform-origin'] || { value: '', priority: '' };
-    } catch (_) {
-      layout.styles.transform = { value: '', priority: '' };
-      layout.styles['transform-origin'] = { value: '', priority: '' };
-    }
-    delete image.dataset.mpseRotateBase;
-    writeCropLayout(image, layout);
-    writeCropState(image, crop);
-    return true;
-  }
-
-  function appearanceConfig(effect) {
-    return APPEARANCE_EFFECTS[effect] || null;
-  }
-
-  function isAppearanceEnabled(image, effect) {
-    const config = appearanceConfig(effect);
-    return Boolean(config && image && image.dataset[config.activeKey] === '1');
-  }
-
-  function clearAppearanceProperties(target, props) {
-    for (const prop of props) setStyle(target, prop, '');
-  }
-
-  function getAppearanceStyles(image, effect) {
-    if (effect === 'feather') {
-      const amount = clamp(getDataNumber(image, 'mpseFeatherAmount', 0), 0, 45);
-      const opaqueStop = clamp(100 - amount * 2, 0, 100);
-      const mask = `radial-gradient(ellipse at center, #000 0%, #000 ${opaqueStop}%, transparent 100%)`;
-      return {
-        'mask-image': mask,
-        '-webkit-mask-image': mask,
-        'mask-size': '100% 100%',
-        '-webkit-mask-size': '100% 100%',
-        'mask-repeat': 'no-repeat',
-        '-webkit-mask-repeat': 'no-repeat',
-        'mask-position': 'center',
-        '-webkit-mask-position': 'center'
-      };
-    }
-    if (effect === 'stroke') {
-      const width = clamp(getDataNumber(image, 'mpseStrokeWidth', 0), 0, 20);
-      const color = getDataString(image, 'mpseStrokeColor', '#07c160');
-      const opacity = clamp(getDataNumber(image, 'mpseStrokeOpacity', 100), 0, 100) / 100;
-      return { outline: `${width}px solid ${hexToRgba(color, opacity, '#07c160')}`, 'outline-offset': '0px' };
-    }
-    if (effect === 'opacity') {
-      return { opacity: String(clamp(getDataNumber(image, 'mpseOpacityValue', 100), 0, 100) / 100) };
-    }
-    return {};
-  }
-
-  function renderAppearance(image) {
-    if (!image || !image.style) return;
-    const host = getAppearanceHost(image);
-    for (const effect of ['feather', 'stroke', 'opacity']) {
-      const config = appearanceConfig(effect);
-      const enabled = isAppearanceEnabled(image, effect);
-      const hasBase = image.dataset[config.baseKey] !== undefined;
-      if (host !== image && (enabled || hasBase)) clearAppearanceProperties(host, config.props);
-      if (enabled) {
-        if (host !== image) clearAppearanceProperties(image, config.props);
-        setStyles(host, getAppearanceStyles(image, effect));
-      } else if (hasBase) {
-        applyStyleBase(image, config.baseKey, config.props, image);
-      }
-    }
-    if (image.dataset.mpseBaseBoxShadow !== undefined
-      || image.dataset.mpseShadowOn === '1'
-      || image.dataset.mpseGlowOn === '1') rebuildManagedBoxShadow(image);
-  }
-
-  function clearAppearanceEffect(image, effect) {
-    const config = appearanceConfig(effect);
-    if (!config || !image) return;
-    delete image.dataset[config.activeKey];
-    for (const key of config.valueKeys) delete image.dataset[key];
-    renderAppearance(image);
-    delete image.dataset[config.baseKey];
-  }
-
-  function resetAppearanceEffects(image) {
-    if (!image) return;
-    const host = getAppearanceHost(image);
-    for (const effect of ['feather', 'stroke', 'opacity']) {
-      const config = appearanceConfig(effect);
-      const hasBase = image.dataset[config.baseKey] !== undefined;
-      const enabled = isAppearanceEnabled(image, effect);
-      if (host !== image && (enabled || hasBase)) clearAppearanceProperties(host, config.props);
-      if (hasBase || enabled) restoreStyleBase(image, config.baseKey, config.props, image);
-      delete image.dataset[config.activeKey];
-      for (const key of config.valueKeys) delete image.dataset[key];
-    }
-  }
-
-  function applyAppearanceEffect(image, effect, values) {
-    const config = appearanceConfig(effect);
-    if (!config || !image) return;
-    captureStyleBase(image, config.baseKey, config.props);
-
-    if (effect === 'feather') {
-      const amount = clamp(values.amount, 0, 45);
-      if (amount <= 0) {
-        clearAppearanceEffect(image, effect);
-        return;
-      }
-      image.dataset.mpseFeatherOn = '1';
-      image.dataset.mpseFeatherAmount = String(amount);
-    }
-
-    if (effect === 'stroke') {
-      const width = clamp(values.width, 0, 20);
-      if (width <= 0) {
-        clearAppearanceEffect(image, effect);
-        return;
-      }
-      image.dataset.mpseStrokeOn = '1';
-      image.dataset.mpseStrokeWidth = String(width);
-      image.dataset.mpseStrokeColor = values.strokeColor || '#07c160';
-      image.dataset.mpseStrokeOpacity = String(clamp(values.opacity, 0, 100));
-    }
-
-    if (effect === 'opacity') {
-      const value = clamp(values.value, 0, 100);
-      if (value >= 100) {
-        clearAppearanceEffect(image, effect);
-        return;
-      }
-      image.dataset.mpseOpacityOn = '1';
-      image.dataset.mpseOpacityValue = String(value);
-    }
-
-    renderAppearance(image);
-  }
-
-  function range(label, name, min, max, step, value, suffix = '') {
-    return `
-      <label class="mpse-img2-control">
-        <span>${escapeHtml(label)} <em data-value-for="${escapeHtml(name)}" data-suffix="${escapeHtml(suffix)}">${escapeHtml(value)}${escapeHtml(suffix)}</em></span>
-        <input type="range" name="${escapeHtml(name)}" min="${min}" max="${max}" step="${step}" value="${escapeHtml(value)}">
-      </label>
-    `;
-  }
-
-  function color(label, name, value) {
-    return `
-      <label class="mpse-img2-control mpse-img2-inline">
-        <span>${escapeHtml(label)}</span>
-        <input type="color" name="${escapeHtml(name)}" value="${escapeHtml(value)}">
-      </label>
-    `;
-  }
-
-  function text(label, name, value, placeholder = '') {
-    return `
-      <label class="mpse-img2-control">
-        <span>${escapeHtml(label)}</span>
-        <input type="text" name="${escapeHtml(name)}" value="${escapeHtml(value)}" placeholder="${escapeHtml(placeholder)}">
-      </label>
-    `;
-  }
-
-  function select(label, name, value) {
-    const options = [
-      { value: 'left', label: '左对齐' },
-      { value: 'center', label: '居中' },
-      { value: 'right', label: '右对齐' }
-    ];
-    return `
-      <label class="mpse-img2-control">
-        <span>${escapeHtml(label)}</span>
-        <select name="${escapeHtml(name)}">
-          ${options.map((item) => `<option value="${item.value}"${item.value === value ? ' selected' : ''}>${item.label}</option>`).join('')}
-        </select>
-      </label>
-    `;
-  }
-
-  function getCaptionAnchor(image) {
-    if (!image || !image.closest) return image;
-    return image.closest('section,p,figure,div') || image;
-  }
-
-  function getCaptionNode(image) {
-    if (!image) return null;
-    const anchor = getCaptionAnchor(image);
-    const next = anchor && anchor.nextElementSibling;
-    if (next && next.getAttribute('data-mpse-image-caption') === '1') return next;
-    return null;
-  }
-
-  function buildPanelBody(effect, image) {
-    const layoutHost = getLayoutHost(image);
-    const cropLayout = getCropContainer(image) ? readCropLayout(image) : null;
-    const radius = image.dataset.mpseRadiusOn === '1' ? getDataNumber(image, 'mpseRadiusValue', 12) : 12;
-    const layoutRect = layoutHost.getBoundingClientRect();
-    const width = parsePercent(layoutHost.style.getPropertyValue('width'), clamp(layoutRect.width / Math.max(1, getAvailableImageWidth(image)) * 100, 4, 100));
-    const top = cropLayout ? parsePx(cropLayout.styles?.['margin-top']?.value, 0) : readStyleNumber(layoutHost, 'margin-top', 0);
-    const bottom = cropLayout ? parsePx(cropLayout.styles?.['margin-bottom']?.value, 0) : readStyleNumber(layoutHost, 'margin-bottom', 0);
-    const shadowDefaults = readBoxShadow(image);
-    const colorDefaults = readFilterValues(image);
-
-    if (effect === 'radius') return range('圆角半径', 'radius', 0, 80, 1, radius, 'px');
-    if (effect === 'size') {
-      let align = cropLayout?.alignment || 'center';
-      if (!cropLayout && (layoutHost.style.getPropertyValue('margin-left') === '0px' || layoutHost.style.getPropertyValue('margin-left') === '0')) align = 'left';
-      if (!cropLayout && (layoutHost.style.getPropertyValue('margin-right') === '0px' || layoutHost.style.getPropertyValue('margin-right') === '0')) align = 'right';
-      const cropAction = hasCropAdjustment(image)
-        ? '<button type="button" class="mpse-img2-reset-crop" data-reset-crop>恢复裁切</button>'
-        : '';
-      return `${range('宽度', 'width', 10, 100, 1, width, '%')}${select('对齐', 'align', align)}${cropAction}`;
-    }
-    if (effect === 'spacing') return `${range('上间距', 'top', 0, 120, 1, top, 'px')}${range('下间距', 'bottom', 0, 120, 1, bottom, 'px')}`;
-    if (effect === 'shadow') return `${range('水平', 'x', -80, 80, 1, getDataNumber(image, 'mpseShadowX', clampInt(shadowDefaults.x, -80, 80, 0)), 'px')}${range('下移', 'y', -80, 80, 1, getDataNumber(image, 'mpseShadowY', clampInt(shadowDefaults.y, -80, 80, 8)), 'px')}${range('模糊', 'blur', 0, 120, 1, getDataNumber(image, 'mpseShadowBlur', clampInt(shadowDefaults.blur, 0, 120, 24)), 'px')}${range('扩散', 'spread', -40, 40, 1, getDataNumber(image, 'mpseShadowSpread', clampInt(shadowDefaults.spread, -40, 40, 0)), 'px')}${range('透明度', 'opacity', 0, 100, 1, getDataNumber(image, 'mpseShadowOpacity', clampInt(shadowDefaults.opacity * 100, 0, 100, 16)), '%')}${color('阴影颜色', 'shadowColor', getDataString(image, 'mpseShadowColor', shadowDefaults.color || '#0f2337'))}`;
-    if (effect === 'glow') return `${range('发光半径', 'blur', 0, 120, 1, getDataNumber(image, 'mpseGlowBlur', clampInt(shadowDefaults.blur, 0, 120, 22)), 'px')}${range('扩散', 'spread', 0, 40, 1, getDataNumber(image, 'mpseGlowSpread', clampInt(shadowDefaults.spread, 0, 40, 0)), 'px')}${range('发光强度', 'opacity', 0, 100, 1, getDataNumber(image, 'mpseGlowOpacity', clampInt(shadowDefaults.opacity * 100, 0, 100, 55)), '%')}${color('发光颜色', 'glowColor', getDataString(image, 'mpseGlowColor', shadowDefaults.color || '#ffd447'))}`;
-    if (effect === 'feather') return range('羽化范围', 'amount', 0, 45, 1, getDataNumber(image, 'mpseFeatherAmount', 0), '%');
-    if (effect === 'stroke') return `${range('描边宽度', 'width', 0, 20, 1, getDataNumber(image, 'mpseStrokeWidth', 0), 'px')}${range('描边透明度', 'opacity', 0, 100, 1, getDataNumber(image, 'mpseStrokeOpacity', 100), '%')}${color('描边颜色', 'strokeColor', getDataString(image, 'mpseStrokeColor', '#07c160'))}`;
-    if (effect === 'color') return `${range('亮度', 'brightness', 40, 180, 1, colorDefaults.brightness, '%')}${range('对比度', 'contrast', 40, 180, 1, colorDefaults.contrast, '%')}${range('饱和度', 'saturate', 0, 240, 1, colorDefaults.saturate, '%')}${range('灰度', 'gray', 0, 100, 1, colorDefaults.gray, '%')}`;
-    if (effect === 'opacity') return range('图片透明度', 'value', 0, 100, 1, getDataNumber(image, 'mpseOpacityValue', readOpacityPercent(image, 100)), '%');
-    if (effect === 'rotate') return range('角度', 'angle', -180, 180, 1, readRotateAngle(image), '°');
-    if (effect === 'frame') return `${range('边框宽度', 'borderWidth', 0, 20, 1, readBorderWidth(image, 1), 'px')}${range('内边距', 'padding', 0, 40, 1, readStyleNumber(image, 'padding', 4), 'px')}${range('框圆角', 'radius', 0, 80, 1, radius, 'px')}${color('边框颜色', 'borderColor', readBorderColor(image, '#e6e8eb'))}${color('底色', 'backgroundColor', readBackgroundColor(image, '#ffffff'))}`;
-    if (effect === 'caption') {
-      const caption = getCaptionNode(image);
-      const textNode = caption ? caption.querySelector('[data-mpse-caption-text="1"]') : null;
-      return `${text('说明文字', 'caption', textNode ? textNode.textContent : '图片说明', '输入图片说明')}${range('字号', 'fontSize', 10, 24, 1, textNode ? parsePx(textNode.style.getPropertyValue('font-size'), 12) : 12, 'px')}${range('上间距', 'marginTop', 0, 40, 1, textNode ? parsePx(textNode.style.getPropertyValue('margin-top'), 6) : 6, 'px')}${color('文字颜色', 'captionColor', '#8a8f99')}`;
-    }
-    if (effect === 'circle') return range('直径', 'diameter', 40, 520, 1, readCircleDiameter(image), 'px');
-    return '';
-  }
-
-  function collectValues(panel) {
-    const values = {};
-    for (const input of Array.from(panel.querySelectorAll('input, select'))) {
-      if (!input.name) continue;
-      values[input.name] = input.type === 'range' ? Number(input.value) : input.value;
-    }
-    return values;
-  }
-
-  function updateValueLabels(panel) {
-    for (const input of Array.from(panel.querySelectorAll('input[type="range"]'))) {
-      const label = panel.querySelector(`[data-value-for="${input.name}"]`);
-      if (label) label.textContent = `${input.value}${label.dataset.suffix || ''}`;
-    }
-  }
-
-  function panelTipForEffect(effect) {
-    if (effect === 'size') return '角点等比缩放，边中点裁切；双击图片进入裁切模式，拖动图片并用 Ctrl + 滚轮缩放。';
-    if (effect === 'shadow' || effect === 'glow') return '阴影/发光的边角跟随图片圆角；需要圆角请单独调“圆角”。';
-    if (effect === 'feather') return '羽化作用于图片或裁切容器的边缘，拖到 0 可恢复原状。';
-    if (effect === 'stroke') return '描边不改变图片尺寸，也不会影响阴影、发光或相框。';
-    if (effect === 'opacity') return '透明度作用于整张图片；调回 100% 可恢复原始透明度。';
-    return '只有实际调整后才会同步到正文 HTML';
-  }
-
-  function isToggleEffect(effect) {
-    return effect === 'shadow' || effect === 'glow';
-  }
-
-  function isEffectEnabled(image, effect) {
-    if (!image) return false;
-    if (effect === 'shadow') return image.dataset.mpseShadowOn === '1';
-    if (effect === 'glow') return image.dataset.mpseGlowOn === '1';
-    if (appearanceConfig(effect)) return isAppearanceEnabled(image, effect);
-    return getAppliedEffects(image).has(effect);
-  }
-
-  function closePanel() {
-    const panel = document.getElementById(PANEL_ID);
-    if (panel) panel.classList.remove('mpse-visible');
-    state.activePanel = null;
-    setButtonStates();
-  }
-
-  function showPanel(effect) {
-    const image = state.image;
-    if (!image || !image.isConnected || !isLikelyArticleImage(image)) {
-      hideTools();
-      return;
-    }
-
-    state.activePanel = effect;
-    const titles = { radius: '圆角', size: '尺寸', spacing: '间距', shadow: '阴影', glow: '发光', feather: '羽化', stroke: '描边', color: '色彩', opacity: '透明度', rotate: '旋转', frame: '相框', caption: '图注', circle: '圆形' };
-    const panel = createPanel();
-    const supportsToggle = isToggleEffect(effect);
-    const enabled = isEffectEnabled(image, effect);
-    const supportsClear = effect !== 'size';
-    panel.dataset.effect = effect;
-    panel.innerHTML = `
-      <div class="mpse-img2-panel-head">
-        <strong>${escapeHtml(titles[effect] || '图片参数')}</strong>
-        <span class="mpse-img2-panel-actions">
-          ${supportsToggle ? `<button type="button" data-toggle-effect title="${enabled ? '关闭效果' : '启用效果'}">${enabled ? '关闭' : '启用'}</button>` : ''}
-          ${supportsClear ? '<button type="button" data-clear-effect title="恢复此项">恢复</button>' : ''}
-          <button type="button" data-close-panel title="收起">×</button>
-        </span>
-      </div>
-      <div class="mpse-img2-panel-body">${buildPanelBody(effect, image)}</div>
-      <div class="mpse-img2-tip">${escapeHtml(panelTipForEffect(effect))}</div>
-    `;
-    panel.classList.add('mpse-visible');
-    setButtonStates();
-    updateValueLabels(panel);
-    positionTools();
-  }
-
-  function setButtonStates() {
-    const menu = document.getElementById(MENU_ID);
-    if (!menu) return;
-    const applied = getAppliedEffects(state.image);
-    const panel = document.getElementById(PANEL_ID);
-    const activeEffect = panel && panel.classList.contains('mpse-visible') ? state.activePanel : null;
-    for (const button of Array.from(menu.querySelectorAll('[data-effect]'))) {
-      const effect = button.dataset.effect;
-      const isCurrent = effect === activeEffect && effect !== 'size';
-      const isApplied = applied.has(effect);
-      const showApplied = effect !== 'size' && effect !== 'reset' && isApplied;
-      button.classList.toggle('mpse-active', isCurrent);
-      button.classList.toggle('mpse-applied', showApplied);
-      button.setAttribute('aria-pressed', showApplied ? 'true' : 'false');
-      button.title = `${button.textContent || effect}${showApplied ? '：已应用' : ''}${isCurrent ? '（正在调整）' : ''}`;
-    }
-  }
-
-  function refreshVisiblePanel() {
-    const panel = document.getElementById(PANEL_ID);
-    if (!panel || !panel.classList.contains('mpse-visible')) return;
-    if (!state.image || !state.image.isConnected) return;
-    if (state.isDragging) return;
-    showPanel(state.activePanel || panel.dataset.effect || 'radius');
-  }
-
-  function onPanelInput(event) {
-    const panel = document.getElementById(PANEL_ID);
-    if (!panel || !panel.classList.contains('mpse-visible')) return;
-    if (!event.target || !event.target.closest(`#${PANEL_ID}`)) return;
-    updateValueLabels(panel);
-    applyEffect(panel.dataset.effect, collectValues(panel));
-  }
-
-  function applyEffect(effect, values) {
-    const image = state.image;
+  function resetImage() {
+    let image = state.image;
     if (!image || !image.isConnected) return;
-    const layoutHost = getLayoutHost(image);
-
-    if (effect === 'radius') {
-      const r = clamp(values.radius, 0, 80);
-      if (r > 0) {
-        image.dataset.mpseRadiusOn = '1';
-        image.dataset.mpseRadiusValue = String(r);
-      } else {
-        delete image.dataset.mpseRadiusOn;
-        delete image.dataset.mpseRadiusValue;
+    const hasExactBase = image.dataset.mpseImageBase !== undefined;
+    if (!hasExactBase) {
+      for (const effect of ['radius', 'spacing', 'shadow', 'glow', 'feather', 'stroke', 'opacity', 'color', 'rotate', 'frame', 'caption', 'circle']) {
+        clearEffect(effect, false);
       }
-      setStyles(image, { 'border-radius': `${r}px`, overflow: r > 0 ? 'hidden' : '', 'vertical-align': 'middle' });
-      setCarrierStyles(image, getCropContainer(image)
-        ? { 'border-radius': `${r}px`, overflow: 'hidden' }
-        : { 'border-radius': `${r}px`, overflow: r > 0 ? 'hidden' : '', display: 'inline-block' });
-    }
-
-    if (effect === 'size') {
-      const width = clamp(values.width, 10, 100);
-      const align = values.align || 'center';
-      const crop = readCropState(image);
-      if (crop) {
-        const layout = readCropLayout(image);
-        layout.alignment = align;
-        layout.display = 'block';
-        layout.offsetX = imageGeometry.alignedFrameOffset(crop.frame, align);
-        setCropLayoutStyle(layout, 'display', 'block');
-        setCropLayoutStyle(layout, 'margin-left', align === 'left' ? '0' : 'auto');
-        setCropLayoutStyle(layout, 'margin-right', align === 'right' ? '0' : 'auto');
-        writeCropLayout(image, layout);
-      }
-      setLayoutWidthPercent(image, width);
-      if (crop) writeCropState(image, crop);
-      else {
-        setStyles(layoutHost, { 'max-width': '100%', display: 'block' });
-        setStyle(image, 'height', 'auto');
-        if (align === 'left') setStyles(layoutHost, { 'margin-left': '0', 'margin-right': 'auto' });
-        if (align === 'center') setStyles(layoutHost, { 'margin-left': 'auto', 'margin-right': 'auto' });
-        if (align === 'right') setStyles(layoutHost, { 'margin-left': 'auto', 'margin-right': '0' });
-      }
-      const block = layoutHost.closest && layoutHost.closest('p,section,div,figure');
-      if (block) setStyle(block, 'text-align', align);
-    }
-
-    if (effect === 'spacing') {
-      const crop = readCropState(image);
-      if (crop) {
-        const layout = readCropLayout(image);
-        layout.display = 'block';
-        setCropLayoutStyle(layout, 'display', 'block');
-        setCropLayoutStyle(layout, 'margin-top', `${clamp(values.top, 0, 120)}px`);
-        setCropLayoutStyle(layout, 'margin-bottom', `${clamp(values.bottom, 0, 120)}px`);
-        writeCropLayout(image, layout);
-        writeCropState(image, crop);
-      } else {
-        setStyles(layoutHost, { display: 'block', 'margin-top': `${clamp(values.top, 0, 120)}px`, 'margin-bottom': `${clamp(values.bottom, 0, 120)}px` });
-      }
-    }
-
-    if (effect === 'shadow') {
-      const x = clamp(values.x, -80, 80);
-      const y = clamp(values.y, -80, 80);
-      const blur = clamp(values.blur, 0, 120);
-      const spread = clamp(values.spread, -40, 40);
-      const shadowColor = values.shadowColor || '#0f2337';
-      captureBaseBoxShadow(image);
-      image.dataset.mpseShadowOn = '1';
-      image.dataset.mpseShadowX = String(x);
-      image.dataset.mpseShadowY = String(y);
-      image.dataset.mpseShadowBlur = String(blur);
-      image.dataset.mpseShadowSpread = String(spread);
-      image.dataset.mpseShadowOpacity = String(clamp(values.opacity, 0, 100));
-      image.dataset.mpseShadowColor = shadowColor;
-      rebuildManagedBoxShadow(image);
-    }
-
-    if (effect === 'glow') {
-      captureBaseBoxShadow(image);
-      applyGlowBoxShadow(image, values);
-    }
-
-    if (appearanceConfig(effect)) applyAppearanceEffect(image, effect, values);
-
-    if (effect === 'color') {
-      captureStyleBase(image, 'mpseColorBase', ['filter']);
-      image.dataset.mpseBrightness = String(clamp(values.brightness, 40, 180));
-      image.dataset.mpseContrast = String(clamp(values.contrast, 40, 180));
-      image.dataset.mpseSaturate = String(clamp(values.saturate, 0, 240));
-      image.dataset.mpseGray = String(clamp(values.gray, 0, 100));
-      rebuildFilter(image);
-    }
-
-    if (effect === 'rotate') {
-      const angle = clamp(values.angle, -180, 180);
-      image.dataset.mpseRotate = String(angle);
-      const crop = readCropState(image);
-      if (crop) {
-        const layout = readCropLayout(image);
-        captureCropTransformBase(image, layout);
-        layout.styles.transform = { value: `rotate(${angle}deg)`, priority: 'important' };
-        layout.styles['transform-origin'] = { value: 'center center', priority: 'important' };
-        writeCropLayout(image, layout);
-        writeCropState(image, crop);
-      } else {
-        captureStyleBase(image, 'mpseRotateBase', ['transform', 'transform-origin']);
-        setStyles(image, { transform: `rotate(${angle}deg)`, 'transform-origin': 'center center' });
-      }
-    }
-
-    if (effect === 'frame') {
-      const borderWidth = clamp(values.borderWidth, 0, 20);
-      const target = getAppearanceHost(image);
-      image.dataset.mpseFrameOn = '1';
-      captureStyleBase(image, 'mpseFrameBase', FRAME_STYLE_PROPS, target);
-      if (target !== image) clearAppearanceProperties(image, FRAME_STYLE_PROPS);
-      setStyles(target, {
-        border: borderWidth > 0 ? `${borderWidth}px solid ${values.borderColor || '#e6e8eb'}` : '',
-        padding: `${clamp(values.padding, 0, 40)}px`,
-        'background-color': values.backgroundColor || '#ffffff',
-        'border-radius': `${clamp(values.radius, 0, 80)}px`,
-        'box-sizing': getCropContainer(image) ? 'content-box' : 'border-box'
-      });
-      if (getCropContainer(image)) {
-        const layout = readCropLayout(image);
-        layout.frameChanged = true;
-        writeCropLayout(image, layout);
-        refreshCropDecoration(image);
-        writeCropState(image, readCropState(image));
-      }
-    }
-
-    if (effect === 'caption') updateCaption(image, values);
-
-    if (effect === 'circle') {
-      const d = clamp(values.diameter, 40, 520);
-      captureCircleBase(image);
-      image.dataset.mpseCircleOn = '1';
-      setStyles(image, {
-        width: `${d}px`, height: `${d}px`, 'max-width': '100%', 'border-radius': '999px',
-        'object-fit': 'cover', display: 'block', 'margin-left': 'auto', 'margin-right': 'auto'
-      });
-    }
-
-    markChanged(image, effect);
-    setButtonStates();
-    schedulePositionTools();
-  }
-
-  function clearEffect(effect) {
-    const image = state.image;
-    if (!image || !image.isConnected || effect === 'size') return;
-
-    if (effect === 'radius') {
-      delete image.dataset.mpseRadiusOn;
-      delete image.dataset.mpseRadiusValue;
-      setStyles(image, { 'border-radius': '', overflow: '', 'vertical-align': '' });
-      setCarrierStyles(image, getCropContainer(image)
-        ? { 'border-radius': '' }
-        : { 'border-radius': '', overflow: '' });
-    }
-    if (effect === 'spacing') {
-      const crop = readCropState(image);
-      if (crop) {
-        const layout = readCropLayout(image);
-        setCropLayoutStyle(layout, 'margin-top', '');
-        setCropLayoutStyle(layout, 'margin-bottom', '');
-        writeCropLayout(image, layout);
-        writeCropState(image, crop);
-      } else {
-        setStyles(getLayoutHost(image), { 'margin-top': '', 'margin-bottom': '' });
-      }
-    }
-    if (effect === 'shadow') {
-      for (const key of ['mpseShadowOn', 'mpseShadowX', 'mpseShadowY', 'mpseShadowBlur', 'mpseShadowSpread', 'mpseShadowOpacity', 'mpseShadowColor']) delete image.dataset[key];
-      if (image.dataset.mpseGlowOn === '1') {
-        rebuildManagedBoxShadow(image);
-      } else {
-        restoreBaseBoxShadow(image);
-      }
-    }
-    if (effect === 'glow') {
-      for (const key of ['mpseGlowOn', 'mpseGlowBlur', 'mpseGlowSpread', 'mpseGlowOpacity', 'mpseGlowColor']) delete image.dataset[key];
-      if (image.dataset.mpseShadowOn === '1') {
-        rebuildManagedBoxShadow(image);
-      } else {
-        restoreBaseBoxShadow(image);
-      }
-    }
-    if (appearanceConfig(effect)) clearAppearanceEffect(image, effect);
-    if (effect === 'color') {
-      for (const key of ['mpseBrightness', 'mpseContrast', 'mpseSaturate', 'mpseGray']) delete image.dataset[key];
-      restoreStyleBase(image, 'mpseColorBase', ['filter']);
-    }
-    if (effect === 'rotate') {
-      delete image.dataset.mpseRotate;
-      if (!restoreCropTransformBase(image)) {
-        restoreStyleBase(image, 'mpseRotateBase', ['transform', 'transform-origin']);
-      }
-    }
-    if (effect === 'frame') {
-      delete image.dataset.mpseFrameOn;
-      restoreStyleBase(image, 'mpseFrameBase', FRAME_STYLE_PROPS, getAppearanceHost(image));
-      if (getCropContainer(image)) {
-        setStyle(getCropContainer(image), 'box-sizing', 'content-box');
-        const layout = readCropLayout(image);
-        layout.frameChanged = true;
-        writeCropLayout(image, layout);
-        refreshCropDecoration(image);
-        writeCropState(image, readCropState(image));
-      }
-    }
-    if (effect === 'caption') {
+    } else {
       const caption = getCaptionNode(image);
       if (caption) caption.remove();
     }
-    if (effect === 'circle') {
-      restoreCircleBase(image);
-    }
-
-    markChanged(image, `clear-${effect}`);
-    setButtonStates();
-    schedulePositionTools();
-  }
-
-  function updateCaption(image, values) {
-    const anchor = getCaptionAnchor(image);
-    if (!anchor || !anchor.parentNode) return;
-    let caption = getCaptionNode(image);
-    if (!caption) {
-      caption = image.ownerDocument.createElement('section');
-      caption.setAttribute('data-mpse-image-caption', '1');
-      caption.innerHTML = '<span data-mpse-caption-text="1"></span>';
-      anchor.parentNode.insertBefore(caption, anchor.nextSibling);
-    }
-    const textNode = caption.querySelector('[data-mpse-caption-text="1"]') || caption;
-    textNode.textContent = values.caption || '图片说明';
-    setStyles(caption, { 'text-align': 'center', margin: '0', padding: '0' });
-    setStyles(textNode, { display: 'inline-block', 'font-size': `${clamp(values.fontSize, 10, 24)}px`, 'line-height': '1.6', 'margin-top': `${clamp(values.marginTop, 0, 40)}px`, color: values.captionColor || '#8a8f99' });
-  }
-
-  function resetImage() {
-    const image = unwrapCropContainer(state.image);
+    image = unwrapCropContainer(image);
     if (!image || !image.isConnected) return;
     state.image = image;
     exitCropMode();
-    resetAppearanceEffects(image);
-    for (const prop of MANAGED_STYLE_PROPS) image.style.removeProperty(prop);
+    if (hasExactBase) restoreImageBase(image);
     for (const key of MANAGED_DATA_KEYS) delete image.dataset[key];
-    const carrier = getVisualCarrier(image);
-    if (carrier) {
-      for (const prop of ['border-radius', 'overflow', 'display']) carrier.style.removeProperty(prop);
-    }
-    const caption = getCaptionNode(image);
-    if (caption) caption.remove();
     markChanged(image, 'reset');
     closePanel();
     setButtonStates();
     positionTools();
   }
 
-  function snapshotCurrentImage(image = state.image) {
+  function snapshotCurrentImage(image = state.image, reason = '') {
     if (!image || !image.isConnected) return null;
     const identity = imageSignature(image);
+    const key = imageIdentityKey(identity);
+    const previous = state.pendingSnapshots.get(key);
     if (image === state.image) state.identity = identity;
     const cropHost = getCropContainer(image);
-    const carrier = cropHost ? null : getVisualCarrier(image);
-    const block = image.closest && image.closest('p,section,div,figure');
-    const caption = getCaptionNode(image);
-    return {
+    return snapshotMerge.createSnapshot({
       identity,
-      imgStyle: image.getAttribute('style') || '',
-      imgData: MANAGED_DATA_KEYS.reduce((acc, key) => {
-        if (image.dataset && image.dataset[key] !== undefined) acc[key] = image.dataset[key];
-        return acc;
-      }, {}),
-      carrierStyle: carrier ? (carrier.getAttribute('style') || '') : '',
-      blockStyle: block ? (block.getAttribute('style') || '') : '',
-      cropHtml: cropHost ? cropHost.outerHTML : '',
-      captionHtml: caption ? caption.outerHTML : '',
-      captionAction: caption ? 'upsert' : 'none'
-    };
+      image,
+      cropHost,
+      carrier: cropHost ? null : getVisualCarrier(image),
+      block: image.closest && image.closest('p,section,div,figure'),
+      caption: getCaptionNode(image),
+      previous,
+      reason,
+      managedDataKeys: MANAGED_DATA_KEYS,
+      cropAttribute: CROP_ATTR
+    });
   }
 
   function markChanged(image, reason, schedule = true) {
     if (!image || !image.ownerDocument) return;
     ensureImageEditId(image);
     image.setAttribute('data-mpse-image-edited', '1');
-    const snapshot = snapshotCurrentImage(image);
+    const snapshot = snapshotCurrentImage(image, reason);
     if (!snapshot) return;
     snapshot.revision = ++state.editRevision;
     snapshot.gestureEpoch = state.gestureEpoch;
@@ -2803,6 +2142,7 @@
   }
 
   function replaceOrRemoveCaption(targetImage, root, snapshot) {
+    if (snapshot.captionAction === 'none') return;
     const targetAnchor = targetImage.closest('section,p,figure,div') || targetImage;
     const next = targetAnchor.nextElementSibling;
     if (next && next.getAttribute('data-mpse-image-caption') === '1') next.remove();
@@ -2813,54 +2153,60 @@
     if (caption && targetAnchor.parentNode) targetAnchor.parentNode.insertBefore(caption, targetAnchor.nextSibling);
   }
 
-  function applyCropSnapshot(target, root, snapshot) {
+  function applyCropSnapshot(target, snapshot) {
     const currentHost = getCropContainer(target);
-    if (!snapshot.cropHtml) return currentHost ? unwrapCropContainer(target) : target;
-
-    const holder = root.ownerDocument.createElement('div');
-    holder.innerHTML = snapshot.cropHtml;
-    const replacement = holder.firstElementChild;
-    const replacementImage = replacement && replacement.querySelector ? replacement.querySelector('img') : null;
-    const replaceTarget = currentHost || target;
-    if (!replacement || !replacementImage || !replaceTarget.parentNode) return target;
-    replaceTarget.parentNode.replaceChild(replacement, replaceTarget);
-    return replacementImage;
+    const result = snapshotMerge.reconcileCropHost(
+      target,
+      currentHost,
+      snapshot.cropAction,
+      () => target.ownerDocument.createElement('span')
+    );
+    const host = result.host;
+    if (result.removed) snapshotMerge.applyStylePatch(result.target, snapshot.cropRemovalImgStylePatch);
+    if (!host || snapshot.cropAction !== 'ensure') return result.target;
+    if (result.created) {
+      snapshotMerge.syncAttributes(host, snapshot.cropCreateHostData, (name) => name === CROP_ATTR || name.startsWith('data-mpse-'));
+      snapshotMerge.applyStylePatch(result.target, snapshot.cropCreateImgStylePatch);
+      snapshotMerge.applyStylePatch(host, snapshot.cropCreateHostStylePatch);
+    }
+    if (snapshot.hostDataAction === 'sync') {
+      snapshotMerge.syncAttributes(host, snapshot.hostData, (name) => name === CROP_ATTR || name.startsWith('data-mpse-'));
+    }
+    snapshotMerge.applyStylePatch(host, snapshot.hostStylePatch);
+    return result.target;
   }
 
   function applySnapshotToTarget(target, root, snapshot) {
-    target = applyCropSnapshot(target, root, snapshot);
-    if (snapshot.imgStyle) target.setAttribute('style', snapshot.imgStyle);
-    else target.removeAttribute('style');
+    target = applyCropSnapshot(target, snapshot);
+    snapshotMerge.applyStylePatch(target, snapshot.imgStylePatch);
     target.setAttribute('data-mpse-image-edited', '1');
     if (snapshot.identity.editId) target.setAttribute('data-mpse-image-id', snapshot.identity.editId);
     copyManagedData(snapshot, target);
 
-    const carrier = snapshot.cropHtml ? null : target.parentElement;
-    const carrierImages = carrier && carrier.querySelectorAll ? carrier.querySelectorAll('img') : [];
-    const carrierText = carrier ? (carrier.textContent || '').replace(/\u200b/g, '').trim() : '';
-    if (carrier && ['SPAN', 'FIGURE', 'DIV'].includes(carrier.tagName) && carrierImages.length === 1 && !carrierText) {
-      if (snapshot.carrierStyle) carrier.setAttribute('style', snapshot.carrierStyle);
-      else if (carrier.hasAttribute('style')) carrier.removeAttribute('style');
-    }
+    const carrier = getCropContainer(target) ? null : getVisualCarrier(target);
+    if (carrier) snapshotMerge.applyStylePatch(carrier, snapshot.carrierStylePatch);
 
     const block = target.closest('p,section,div,figure');
-    if (block && snapshot.blockStyle) block.setAttribute('style', snapshot.blockStyle);
+    if (block) snapshotMerge.applyStylePatch(block, snapshot.blockStylePatch);
     replaceOrRemoveCaption(target, root, snapshot);
     return target;
   }
 
-  function applySnapshotToHtml(content, snapshot) {
-    if (!snapshot || !snapshot.identity) return { html: content, changed: false, reason: 'no-snapshot' };
+  function parseContentRoot(content) {
     const parser = new DOMParser();
     const doc = parser.parseFromString(`<div id="mpse-root">${content || ''}</div>`, 'text/html');
-    const root = doc.getElementById('mpse-root');
-    if (!root) return { html: content, changed: false, reason: 'parse-failed' };
+    return doc.getElementById('mpse-root');
+  }
+
+  function applySnapshotToRoot(root, snapshot) {
+    if (!snapshot || !snapshot.identity) return { changed: false, reason: 'no-snapshot' };
+    if (!root) return { changed: false, reason: 'parse-failed' };
 
     let target = locateImageInHtml(root, snapshot.identity);
-    if (!target) return { html: content, changed: false, reason: 'image-not-found' };
+    if (!target) return { changed: false, reason: 'image-not-found' };
 
     applySnapshotToTarget(target, root, snapshot);
-    return { html: root.innerHTML, changed: true, reason: 'ok' };
+    return { changed: true, reason: 'ok' };
   }
 
   function restoreLatestSnapshotInEditor(snapshot) {
@@ -2877,10 +2223,7 @@
     }
   }
 
-  function cropWasPersisted(content, identity) {
-    const parser = new DOMParser();
-    const doc = parser.parseFromString(`<div id="mpse-root">${content || ''}</div>`, 'text/html');
-    const root = doc.getElementById('mpse-root');
+  function cropWasPersistedInRoot(root, identity) {
     const target = root && locateImageInHtml(root, identity);
     const host = target && getCropContainer(target);
     if (!host) return false;
@@ -2907,13 +2250,13 @@
   }
 
   function applySnapshotBatch(content, batch) {
-    let html = content;
+    const root = parseContentRoot(content);
+    if (!root) return { html: content, changed: false, reason: 'parse-failed' };
     for (const { key, snapshot } of batch) {
-      const result = applySnapshotToHtml(html, snapshot);
-      if (!result.changed) return { ...result, html, failedKey: key, failedSnapshot: snapshot };
-      html = result.html;
+      const result = applySnapshotToRoot(root, snapshot);
+      if (!result.changed) return { ...result, html: content, failedKey: key, failedSnapshot: snapshot };
     }
-    return { html, changed: true, reason: 'ok' };
+    return { html: root.innerHTML, changed: true, reason: 'ok' };
   }
 
   function clearCommittedSnapshots(batch) {
@@ -2999,12 +2342,13 @@
       if (state.identity) scheduleSelectedImageReacquire(state.identity, { delay: 0, seq });
 
       let cropPersisted = true;
-      const cropSnapshots = batch.filter(({ snapshot }) => snapshot.cropHtml).map(({ snapshot }) => snapshot);
+      const cropSnapshots = batch.filter(({ snapshot }) => snapshot.cropAction === 'ensure').map(({ snapshot }) => snapshot);
       if (cropSnapshots.length) {
         try {
           state.commitPhase = 'verify';
           const verification = await readEditorContent(15000);
-          cropPersisted = cropSnapshots.every((snapshot) => cropWasPersisted(verification.content, snapshot.identity));
+          const verificationRoot = parseContentRoot(verification.content);
+          cropPersisted = cropSnapshots.every((snapshot) => cropWasPersistedInRoot(verificationRoot, snapshot.identity));
         } catch (error) {
           console.warn('[公众号源码排版助手] image crop verification failed:', error);
         }
@@ -3035,13 +2379,10 @@
     let bestScore = -1;
     let bestDistance = Number.POSITIVE_INFINITY;
     const list = getAllArticleImages().filter((image) => !identity.scopeKey || editorScopeKey(image) === identity.scopeKey);
-    if (identity.editId) {
-      const exact = list.find((image) => getAttr(image, 'data-mpse-image-id') === identity.editId);
-      if (exact) return exact;
-      if (list.some((image) => getAttr(image, 'data-mpse-image-id'))) return null;
-    }
+    const shortlist = shortlistImagesByEditId(list, identity);
+    if (shortlist.exact) return shortlist.exact;
     const preferredIndex = Number.isFinite(identity.index) ? identity.index : 0;
-    for (const [index, image] of list.entries()) {
+    for (const { image, index } of shortlist.indexed) {
       const asDom = {
         getAttribute: (name) => {
           if (name === 'src') return getAttr(image, 'src') || image.currentSrc || image.src || '';
@@ -3065,7 +2406,19 @@
     if (best) {
       state.image = best;
       state.identity = imageSignature(best);
-      if (state.cropMode && !getCropContainer(best)) exitCropMode();
+      if (state.cropMode && state.cropTransientHost && !getCropContainer(best)) {
+        if (!state.cropSessionGeometryChanged) {
+          const result = ensureCropContainer(best);
+          if (!result.host) {
+            exitCropMode();
+          } else {
+            state.cropTransientHost = true;
+            if (result.circlePresentation) state.cropTransientCirclePresentation = result.circlePresentation;
+          }
+        } else {
+          exitCropMode();
+        }
+      }
       revealToolElements();
       setButtonStates();
       refreshVisiblePanel();
@@ -3080,21 +2433,42 @@
     const image = findImageByIdentity(identity);
     if (!image) return false;
 
+    const previousPointerTarget = interaction.pointerTarget;
+    if (interaction.kind === 'pan') {
+      restoreInteractionCursor(interaction);
+      releasePointer(previousPointerTarget, interaction.pointerId);
+    }
+
     if (interaction.frame) window.cancelAnimationFrame(interaction.frame);
     clearGeometryPreview(interaction, state.image);
     interaction.frame = 0;
     interaction.preview = null;
     interaction.appliedPreview = null;
+    interaction.edgeConstraints = null;
     interaction.started = false;
     interaction.createdCrop = false;
     state.image = image;
     state.identity = imageSignature(image);
     interaction.identity = state.identity;
+    const createdImageBase = captureImageBase(image);
+    interaction.createdImageBase = interaction.createdImageBase || createdImageBase;
 
-    if (interaction.kind === 'pan' || interaction.kind === 'resize') {
+    if (['pan', 'resize', 'crop'].includes(interaction.kind)) {
       const result = ensureCropContainer(image);
-      if (!result.host) return false;
-      interaction.createdCrop = result.created;
+      if (!result.host) {
+        discardCapturedImageBase(image, createdImageBase);
+        return false;
+      }
+      interaction.createdCrop = interaction.createdCrop || result.created;
+      interaction.circlePresentation = interaction.circlePresentation || result.circlePresentation;
+    }
+    if (interaction.kind === 'pan') {
+      interaction.pointerTarget = image;
+      interaction.pointMapping = createClientPointMapping(image.ownerDocument);
+      capturePointer(image, interaction.pointerId);
+      setInteractionCursor(interaction, 'grabbing');
+    } else {
+      interaction.pointMapping = createClientPointMapping(interaction.pointerTarget?.ownerDocument);
     }
     const target = getSelectionElement(image);
     interaction.rect = getTopRect(target);
@@ -3109,7 +2483,18 @@
       ? interaction.contentRect.height / Math.max(imageGeometry.MIN_FRACTION, interaction.startCrop.frame.height)
       : null;
     captureGeometryPreviewStyles(interaction, image);
-    if (interaction.lastEvent) updateGeometryGesture(interaction.lastEvent);
+    if (interaction.lastPoint) {
+      updateGeometryGesture({
+        type: 'pointermove',
+        pointerId: interaction.pointerId,
+        clientX: interaction.lastPoint.x,
+        clientY: interaction.lastPoint.y,
+        mpseTopCoordinates: true,
+        target: document
+      });
+    } else if (interaction.lastEvent) {
+      updateGeometryGesture(interaction.lastEvent);
+    }
     if (interaction.pendingFinish) {
       const pending = interaction.pendingFinish;
       interaction.pendingFinish = null;
@@ -3155,10 +2540,12 @@
     for (const handle of getImageHandles()) handle.classList.toggle('mpse-offscreen', offscreen);
   }
 
-  function hideToolElements() {
+  function hideToolElements(preserveFocusedPanel = false) {
     for (const id of [MENU_ID, PANEL_ID, BOX_ID, BADGE_ID]) {
       const element = document.getElementById(id);
-      if (element) element.classList.remove('mpse-visible', 'mpse-offscreen');
+      if (element && !(preserveFocusedPanel && id === PANEL_ID && element.contains(document.activeElement))) {
+        element.classList.remove('mpse-visible', 'mpse-offscreen');
+      }
     }
     for (const handle of getImageHandles()) handle.classList.remove('mpse-visible', 'mpse-offscreen');
     hideDragShield();
@@ -3170,6 +2557,7 @@
       return;
     }
     if (state.interaction) finishGeometryGesture(undefined, true);
+    cancelPendingCropZoom();
     exitCropMode();
     state.image = null;
     state.identity = null;
@@ -3200,14 +2588,15 @@
     }
     if (!image.isConnected) {
       if (state.interaction) {
+        if (rebaseInteractionAfterEditorWrite(state.interaction.identity || state.identity)) return;
         setToolElementsOffscreen(true);
         return;
       }
-      hideToolElements();
+      hideToolElements(true);
       if (state.identity) scheduleSelectedImageReacquire(state.identity, { delay: 0 });
       return;
     }
-    if (hasBlockingEditorLayer()) {
+    if (state.blockedByLayer) {
       state.blockedByLayer = true;
       if (state.interaction) finishOrDeferGeometry(undefined, true);
       else if (state.isDragging) endActiveDrag();
@@ -3226,6 +2615,7 @@
       return;
     }
     setToolElementsOffscreen(false);
+    const menuHeight = Math.min(menu.offsetHeight || 330, Math.max(1, window.innerHeight - 16));
 
     positionSelectionBox(box, rect);
     box.classList.toggle('mpse-crop-mode', state.cropMode);
@@ -3237,7 +2627,6 @@
     let menuLeft = rect.right + gap;
     if (menuLeft + menuWidth > window.innerWidth - 8) menuLeft = rect.left - menuWidth - gap;
     menuLeft = Math.max(8, Math.min(menuLeft, window.innerWidth - menuWidth - 8));
-    const menuHeight = Math.min(menu.offsetHeight || 330, Math.max(1, window.innerHeight - 16));
     const menuTop = Math.max(8, Math.min(rect.top + 4, window.innerHeight - menuHeight - 8));
 
     menu.style.left = `${menuLeft}px`;
@@ -3272,6 +2661,15 @@
     ].join(',');
     const viewport = getViewportRect();
     const selectionRect = state.image?.isConnected ? getTopRect(getSelectionElement(state.image)) : null;
+    const docs = getAccessibleDocuments();
+    const editorRects = [];
+    for (const doc of docs) {
+      for (const root of Array.from(doc.querySelectorAll('[contenteditable="true"], body[contenteditable="true"]')).slice(0, 8)) {
+        const rect = getTopRect(root);
+        if (rect.width > 120 && rect.height > 80 && rectsIntersect(viewport, rect)) editorRects.push(rect);
+      }
+    }
+    if (selectionRect) editorRects.push(selectionRect);
     const globalSelector = [
       'dialog[open]',
       '[aria-modal="true"]',
@@ -3282,7 +2680,7 @@
       '[class*="modal-mask"]',
       '[class*="dialog__mask"]'
     ].join(',');
-    for (const doc of getAccessibleDocuments()) {
+    for (const doc of docs) {
       const view = doc.defaultView;
       if (!view) continue;
       for (const element of doc.querySelectorAll(selector)) {
@@ -3292,7 +2690,7 @@
         if (element.getAttribute('aria-hidden') === 'true') continue;
         const rect = getTopRect(element);
         if (rect.width <= 120 || rect.height <= 80 || !rectsIntersect(viewport, rect)) continue;
-        if (element.matches(globalSelector) || (selectionRect && rectsIntersect(selectionRect, rect))) return true;
+        if (element.matches(globalSelector) || editorRects.some((editorRect) => rectsIntersect(editorRect, rect))) return true;
       }
     }
     return false;
@@ -3376,18 +2774,19 @@
 
     const image = findImageFromEvent(event);
     if (image) {
+      if (state.cropMode && image === state.image) {
+        state.lastImagePress = null;
+        event.preventDefault();
+        event.stopPropagation();
+        beginCropPan(image, event);
+        return;
+      }
       const repeatedPress = isRepeatedImagePress(image, event);
       if (repeatedPress) {
         state.lastImagePress = null;
         event.preventDefault();
         event.stopPropagation();
         toggleCropMode(image);
-        return;
-      }
-      if (state.cropMode && image === state.image && getCropContainer(image)) {
-        event.preventDefault();
-        event.stopPropagation();
-        beginCropPan(image, event);
         return;
       }
       showToolsForImage(image);
@@ -3414,10 +2813,10 @@
     if (!isEditorLikePage()) return;
     if (!state.cropMode || !event.ctrlKey || !event.target) return;
     const image = findImageFromEvent(event);
-    if (!image || image !== state.image || !getCropContainer(image)) return;
+    if (!image || image !== state.image) return;
     event.preventDefault();
     event.stopPropagation();
-    zoomCrop(image, event);
+    queueCropZoom(image, event);
   }
 
   function onDocumentPointerMove(event) {
@@ -3426,9 +2825,16 @@
   }
 
   function onDocumentPointerUp(event) {
-    if (event && event.type === 'lostpointercapture' && state.commitPhase === 'set'
-      && state.image && !state.image.isConnected) return;
+    const disconnectedLoss = Boolean(event && event.type === 'lostpointercapture' && state.interaction
+      && ((!state.image || !state.image.isConnected)
+        || (event.target && event.target.isConnected === false)
+        || (state.interaction.pointerTarget && state.interaction.pointerTarget.isConnected === false)));
     if (state.interaction) stopUiEvent(event);
+    if (disconnectedLoss) {
+      if (deferGeometryFinish(undefined, false)) return;
+      finishGeometryGesture({ type: 'pointerup', pointerId: state.interaction?.pointerId, target: document });
+      return;
+    }
     if (state.interaction) finishOrDeferGeometry(event);
     else if (state.isDragging) endActiveDrag();
   }
@@ -3446,8 +2852,9 @@
   }
 
   function onDocumentKeyDown(event) {
-    if (event.key === 'Escape' && state.cropMode) {
-      exitCropMode();
+    if (event.key === 'Escape' && (state.cropMode || state.interaction)) {
+      if (state.interaction) finishOrDeferGeometry(undefined, true);
+      if (state.cropMode) exitCropMode();
       setBadgeText('已退出裁切');
     }
   }
@@ -3547,7 +2954,10 @@
         && (!state.interaction || (record.target !== state.image && record.target !== interactionTarget)));
       if (!relevant) return;
       scheduleBindDocuments();
-      if (state.image) schedulePositionTools();
+      if (state.image) {
+        monitorBlockingEditorLayer();
+        schedulePositionTools();
+      }
     });
     observer.observe(document.documentElement, {
       childList: true,
@@ -3558,7 +2968,7 @@
     state.pageObserver = observer;
 
     window.setInterval(scheduleBindDocuments, 1500);
-    window.setInterval(monitorBlockingEditorLayer, 250);
+    window.setInterval(monitorBlockingEditorLayer, 500);
     window.addEventListener('pointermove', onGlobalPointerMove, true);
     window.addEventListener('pointerup', onGlobalPointerUp, true);
     window.addEventListener('pointercancel', onGlobalPointerUp, true);

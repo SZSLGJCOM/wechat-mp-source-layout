@@ -1,9 +1,11 @@
 (() => {
   'use strict';
 
-  const VERSION = 'v0.9.10';
+  const VERSION = 'v0.10.0';
   const CONTENT_SOURCE = 'wechat-mp-source-layout:content';
   const PAGE_SOURCE = 'wechat-mp-source-layout:page';
+  const CONTENT_CONFLICT_CODE = 'MPSE_CONTENT_CONFLICT';
+  const MAX_CONTENT_CONFLICT_RETRIES = 2;
 
   if (window.__MPSE_BRIDGE_CLIENT__
     && window.__MPSE_BRIDGE_CLIENT__.version === VERSION
@@ -45,13 +47,13 @@
     const requestId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
     return new Promise((resolve, reject) => {
-      const timer = window.setTimeout(() => {
+      const timer = timeoutMs > 0 ? window.setTimeout(() => {
         cleanup();
         reject(new Error(`请求 ${type} 超时`));
-      }, timeoutMs);
+      }, timeoutMs) : 0;
 
       function cleanup() {
-        window.clearTimeout(timer);
+        if (timer) window.clearTimeout(timer);
         window.removeEventListener('message', onMessage);
       }
 
@@ -69,6 +71,7 @@
         const errorMessage = message.error && message.error.message ? message.error.message : '页面桥接脚本返回错误';
         const error = new Error(errorMessage);
         error.detail = message.error || null;
+        error.code = message.error && message.error.code ? message.error.code : '';
         reject(error);
       }
 
@@ -89,9 +92,9 @@
     return enqueueContentOperation(() => requestBridge('GET_CONTENT', {}, timeoutMs));
   }
 
-  function writeContent(content, timeoutMs = 15000) {
+  function writeContent(content) {
     const html = typeof content === 'string' ? content : '';
-    return enqueueContentOperation(() => requestBridge('SET_CONTENT', { content: html }, timeoutMs));
+    return enqueueContentOperation(() => requestBridge('SET_CONTENT', { content: html }, 0));
   }
 
   function normalizeMutationResult(result, currentContent) {
@@ -111,17 +114,34 @@
     throw new TypeError('Content mutator must return a string or an object containing content');
   }
 
+  function isContentConflict(error) {
+    return Boolean(error && (error.code === CONTENT_CONFLICT_CODE || error.detail?.code === CONTENT_CONFLICT_CODE));
+  }
+
   function mutateContent(mutator, timeoutMs = 15000) {
     if (typeof mutator !== 'function') return Promise.reject(new TypeError('Content mutator must be a function'));
     return enqueueContentOperation(async () => {
-      const read = await requestBridge('GET_CONTENT', {}, timeoutMs);
-      const currentContent = typeof read.content === 'string' ? read.content : '';
-      const mutation = normalizeMutationResult(await mutator(read), currentContent);
-      if (!mutation.changed) {
-        return { changed: false, content: currentContent, read, write: null, value: mutation.value };
+      let conflictRetries = 0;
+      while (true) {
+        const read = await requestBridge('GET_CONTENT', {}, timeoutMs);
+        const currentContent = typeof read.content === 'string' ? read.content : '';
+        const mutation = normalizeMutationResult(await mutator(read), currentContent);
+        if (!mutation.changed) {
+          return { changed: false, content: currentContent, read, write: null, value: mutation.value, conflictRetries };
+        }
+
+        try {
+          const write = await requestBridge('SET_CONTENT', {
+            content: mutation.content,
+            expectedContent: currentContent,
+            expectedMode: read.mode || ''
+          }, 0);
+          return { changed: true, content: mutation.content, read, write, value: mutation.value, conflictRetries };
+        } catch (error) {
+          if (!isContentConflict(error) || conflictRetries >= MAX_CONTENT_CONFLICT_RETRIES) throw error;
+          conflictRetries += 1;
+        }
       }
-      const write = await requestBridge('SET_CONTENT', { content: mutation.content }, timeoutMs);
-      return { changed: true, content: mutation.content, read, write, value: mutation.value };
     });
   }
 

@@ -83,9 +83,10 @@ function checkVersionConsistency() {
   const pkg = readJson('package.json');
   if (!manifest || !pkg) return;
   const version = manifest.version;
+  const releaseVersion = manifest.version_name || version;
   assert(pkg.version === version, 'package.json and manifest.json versions must match');
-  assert(readText('README.md').includes(`当前版本：\`v${version}\``), 'README current version must match manifest.json');
-  assert(readText('CHANGELOG.md').includes(`## v${version} ·`), 'CHANGELOG must include the current version');
+  assert(readText('README.md').includes(`当前版本：\`v${releaseVersion}\``), 'README current version must match manifest version_name');
+  assert(readText('CHANGELOG.md').includes(`## v${releaseVersion} ·`), 'CHANGELOG must include the current release version');
   assert(readText('src/bridge-client.js').includes(`const VERSION = 'v${version}';`), 'bridge-client version must match manifest.json');
   assert(readText('src/image-tools.js').includes(`const VERSION = 'v${version}';`), 'image-tools version must match manifest.json');
 }
@@ -141,6 +142,8 @@ function checkProductWording() {
     'docs/wechat-interface-notes.md',
     'src/content.js',
     'src/image-geometry.js',
+    'src/image-controls.js',
+    'src/image-snapshot-merge.js',
     'src/image-tools.js',
     'src/svg-tools.js',
     'src/svg-block-tools.js',
@@ -156,6 +159,8 @@ function checkCommentHygiene() {
   for (const file of [
     'src/content.js',
     'src/image-geometry.js',
+    'src/image-controls.js',
+    'src/image-snapshot-merge.js',
     'src/image-tools.js',
     'src/page-bridge.js',
     'src/svg-tools.js',

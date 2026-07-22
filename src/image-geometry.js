@@ -187,6 +187,78 @@
     return { left, top, right: left + width, bottom: top + height, width, height };
   }
 
+  function restoreFrameAfterPresentation(baseModel, appliedModel, currentModel) {
+    const base = normalizeModel(baseModel);
+    const applied = normalizeModel(appliedModel || baseModel);
+    const current = normalizeModel(currentModel || appliedModel || baseModel);
+    const baseRight = base.frame.x + base.frame.width;
+    const baseBottom = base.frame.y + base.frame.height;
+    const appliedRight = applied.frame.x + applied.frame.width;
+    const appliedBottom = applied.frame.y + applied.frame.height;
+    const currentRight = current.frame.x + current.frame.width;
+    const currentBottom = current.frame.y + current.frame.height;
+    const x = base.frame.x + current.frame.x - applied.frame.x;
+    const y = base.frame.y + current.frame.y - applied.frame.y;
+    const right = baseRight + currentRight - appliedRight;
+    const bottom = baseBottom + currentBottom - appliedBottom;
+    const boundedX = clamp(x, 0, 1 - MIN_FRACTION);
+    const boundedY = clamp(y, 0, 1 - MIN_FRACTION);
+    const boundedRight = clamp(right, boundedX + MIN_FRACTION, 1);
+    const boundedBottom = clamp(bottom, boundedY + MIN_FRACTION, 1);
+    return normalizeModel({
+      frame: {
+        x: boundedX,
+        y: boundedY,
+        width: boundedRight - boundedX,
+        height: boundedBottom - boundedY
+      },
+      media: current.media,
+      baseAspect: base.baseAspect
+    });
+  }
+
+  function constrainFrameAspect(model, handle, targetAspect = 1) {
+    const current = normalizeModel(model);
+    const desiredAspect = clamp(targetAspect, 0.05, 40);
+    const horizontal = handle === 'e' || handle === 'w';
+    const frame = { ...current.frame };
+    const media = { ...current.media };
+    if (horizontal) {
+      const center = frame.y + frame.height / 2;
+      const mediaCenter = media.y + media.height / 2;
+      const maximumHeight = Math.max(MIN_FRACTION, 2 * Math.min(center, 1 - center));
+      const height = Math.min(frame.width * current.baseAspect / desiredAspect, maximumHeight);
+      const width = height * desiredAspect / current.baseAspect;
+      const horizontalFactor = width / frame.width;
+      if (handle === 'w') frame.x += frame.width - width;
+      frame.width = width;
+      if (handle === 'w') media.x += media.width * (1 - horizontalFactor);
+      media.width *= horizontalFactor;
+      const factor = height / frame.height;
+      frame.y = center - height / 2;
+      frame.height = height;
+      media.height *= factor;
+      media.y = mediaCenter - media.height / 2;
+    } else {
+      const center = frame.x + frame.width / 2;
+      const mediaCenter = media.x + media.width / 2;
+      const maximumWidth = Math.max(MIN_FRACTION, 2 * Math.min(center, 1 - center));
+      const width = Math.min(frame.height * desiredAspect / current.baseAspect, maximumWidth);
+      const height = width * current.baseAspect / desiredAspect;
+      const verticalFactor = height / frame.height;
+      if (handle === 'n') frame.y += frame.height - height;
+      frame.height = height;
+      if (handle === 'n') media.y += media.height * (1 - verticalFactor);
+      media.height *= verticalFactor;
+      const factor = width / frame.width;
+      frame.x = center - width / 2;
+      frame.width = width;
+      media.width *= factor;
+      media.x = mediaCenter - media.width / 2;
+    }
+    return normalizeModel({ frame, media, baseAspect: current.baseAspect });
+  }
+
   function modelsMatch(first, second, tolerance = 0.0001) {
     if (!first || !second) return first === second;
     const a = normalizeModel(first);
@@ -210,6 +282,8 @@
     cornerResizeOrigin,
     alignedFrameOffset,
     resizePreviewRect,
+    restoreFrameAfterPresentation,
+    constrainFrameAspect,
     modelsMatch
   });
 })();

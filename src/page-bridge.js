@@ -3,6 +3,11 @@
 
   const CONTENT_SOURCE = 'wechat-mp-source-layout:content';
   const PAGE_SOURCE = 'wechat-mp-source-layout:page';
+  const CONTENT_CONFLICT_CODE = 'MPSE_CONTENT_CONFLICT';
+  const JSAPI_TIMEOUT_CODE = 'MPSE_JSAPI_TIMEOUT';
+  const WRITE_UNCERTAIN_CODE = 'MPSE_WRITE_UNCERTAIN';
+  const SET_CONFIRM_TIMEOUT_MS = 5000;
+  const EDITOR_INPUT_IDLE_MS = 160;
 
   if (window.__MP_SOURCE_EDITOR_BRIDGE_INSTALLED__) {
     return;
@@ -13,11 +18,14 @@
     if (!error) {
       return { message: '未知错误' };
     }
-    return {
+    const payload = {
       name: error.name || 'Error',
       message: error.message || String(error),
       stack: error.stack || ''
     };
+    if (error.code) payload.code = String(error.code);
+    if (error.mode) payload.mode = String(error.mode);
+    return payload;
   }
 
   function normalizeContentResponse(response) {
@@ -47,8 +55,8 @@
     return null;
   }
 
-  function invokeMpEditor(apiName, apiParam, timeoutMs = 10000) {
-    const api = getMpEditorApi();
+  function invokeMpEditor(apiName, apiParam, timeoutMs = 10000, apiOverride = null) {
+    const api = apiOverride || getMpEditorApi();
     if (!api) {
       return Promise.reject(new Error('页面中没有检测到 __MP_Editor_JSAPI__'));
     }
@@ -58,7 +66,9 @@
       const timer = timeoutMs > 0 ? window.setTimeout(() => {
         if (settled) return;
         settled = true;
-        reject(new Error(`${apiName} 调用超时`));
+        const error = new Error(`${apiName} 调用超时`);
+        error.code = JSAPI_TIMEOUT_CODE;
+        reject(error);
       }, timeoutMs) : 0;
 
       const finish = (fn, value) => {
@@ -146,8 +156,7 @@
     return candidates[0] ? candidates[0].node : null;
   }
 
-  function fallbackGetContent() {
-    const editor = findEditorElement();
+  function fallbackGetContent(editor = findEditorElement()) {
     if (!editor) {
       throw new Error('没有找到可编辑正文区域');
     }
@@ -175,8 +184,7 @@
     editor.dispatchEvent(new view.Event('blur', { bubbles: true }));
   }
 
-  function fallbackSetContent(content) {
-    const editor = findEditorElement();
+  function fallbackSetContent(content, editor = findEditorElement()) {
     if (!editor) {
       throw new Error('没有找到可编辑正文区域');
     }
@@ -202,43 +210,196 @@
     return { mode: 'dom-fallback' };
   }
 
-  async function getContent() {
-    try {
-      const response = await invokeMpEditor('mp_editor_get_content');
-      return {
-        content: normalizeContentResponse(response),
-        mode: 'mp-editor-jsapi'
-      };
-    } catch (apiError) {
-      const fallback = fallbackGetContent();
-      fallback.apiError = asErrorPayload(apiError);
-      return fallback;
+  async function getContent(options = {}) {
+    const api = options.api || getMpEditorApi();
+    if (api) {
+      try {
+        const response = await invokeMpEditor('mp_editor_get_content', undefined, options.timeoutMs || 10000, api);
+        return {
+          content: normalizeContentResponse(response),
+          mode: 'mp-editor-jsapi'
+        };
+      } catch (apiError) {
+        if (options.allowFallback === false) throw apiError;
+        const fallback = fallbackGetContent();
+        fallback.apiError = asErrorPayload(apiError);
+        return fallback;
+      }
+    }
+    return fallbackGetContent();
+  }
+
+  const trackedInputDocuments = new WeakSet();
+  let editorInputEpoch = 0;
+  let editorInputTimer = 0;
+  let resolveEditorInputIdle = null;
+  let editorInputIdle = Promise.resolve();
+  let compositionActive = false;
+  let resolveCompositionEnd = null;
+  let compositionEnd = Promise.resolve();
+
+  function isEditorInputEvent(event, doc) {
+    if (event && event.isTrusted === false) return false;
+    let target = event && event.target;
+    if (target && target.nodeType !== Node.ELEMENT_NODE) target = target.parentElement;
+    if (!target) return doc.designMode === 'on';
+    if (target.isContentEditable) return true;
+    return Boolean(target.closest && target.closest('[contenteditable="true"], body[contenteditable="true"]'));
+  }
+
+  function noteEditorInput() {
+    editorInputEpoch += 1;
+    if (editorInputTimer) window.clearTimeout(editorInputTimer);
+    if (resolveEditorInputIdle) resolveEditorInputIdle();
+    editorInputIdle = new Promise((resolve) => {
+      resolveEditorInputIdle = resolve;
+      editorInputTimer = window.setTimeout(() => {
+        editorInputTimer = 0;
+        resolveEditorInputIdle = null;
+        resolve();
+      }, EDITOR_INPUT_IDLE_MS);
+    });
+  }
+
+  function beginComposition() {
+    if (!compositionActive) {
+      compositionActive = true;
+      compositionEnd = new Promise((resolve) => {
+        resolveCompositionEnd = resolve;
+      });
+    }
+    noteEditorInput();
+  }
+
+  function endComposition() {
+    if (compositionActive) {
+      compositionActive = false;
+      const resolve = resolveCompositionEnd;
+      resolveCompositionEnd = null;
+      if (resolve) resolve();
+    }
+    noteEditorInput();
+  }
+
+  function ensureEditorInputTracking() {
+    for (const doc of getAccessibleDocuments()) {
+      if (!doc || trackedInputDocuments.has(doc)) continue;
+      trackedInputDocuments.add(doc);
+      for (const type of ['beforeinput', 'input', 'paste', 'drop', 'cut']) {
+        doc.addEventListener(type, (event) => {
+          if (isEditorInputEvent(event, doc)) noteEditorInput();
+        }, true);
+      }
+      doc.addEventListener('compositionstart', (event) => {
+        if (isEditorInputEvent(event, doc)) beginComposition();
+      }, true);
+      doc.addEventListener('compositionupdate', (event) => {
+        if (isEditorInputEvent(event, doc)) noteEditorInput();
+      }, true);
+      doc.addEventListener('compositionend', (event) => {
+        if (isEditorInputEvent(event, doc)) endComposition();
+      }, true);
     }
   }
 
-  async function setContent(content) {
-    if (!getMpEditorApi()) return fallbackSetContent(content);
-    const response = await invokeMpEditor('mp_editor_set_content', { content }, 0);
+  async function waitForEditorInputIdle() {
+    ensureEditorInputTracking();
+    for (;;) {
+      if (compositionActive) {
+        await compositionEnd;
+        continue;
+      }
+      const epoch = editorInputEpoch;
+      const idle = editorInputIdle;
+      await idle;
+      if (!compositionActive && !editorInputTimer && epoch === editorInputEpoch) return epoch;
+    }
+  }
+
+  function adapterConflict(mode) {
+    const error = contentConflict(mode);
+    error.message = '正文编辑器模式在写入前已发生变化，请重试';
+    return error;
+  }
+
+  function uncertainWrite() {
+    const error = new Error('微信编辑器没有确认本次写入结果，请刷新页面后再继续编辑');
+    error.code = WRITE_UNCERTAIN_CODE;
+    return error;
+  }
+
+  let writeStateUncertain = false;
+
+  async function setContent(content, expectedContent = null, expectedMode = '') {
+    if (writeStateUncertain) throw uncertainWrite();
+    await waitForEditorInputIdle();
+    if (writeStateUncertain) throw uncertainWrite();
+    const api = getMpEditorApi();
+    const mode = expectedMode || (api ? 'mp-editor-jsapi' : 'dom-fallback');
+    if (mode === 'mp-editor-jsapi' && !api) throw adapterConflict('dom-fallback');
+    if (mode === 'dom-fallback' && api) throw adapterConflict('mp-editor-jsapi');
+
+    const editor = mode === 'dom-fallback' ? findEditorElement() : null;
+    if (mode === 'dom-fallback' && !editor) throw new Error('没有找到可编辑正文区域');
+    const validationEpoch = editorInputEpoch;
+    if (typeof expectedContent === 'string') {
+      const current = mode === 'mp-editor-jsapi'
+        ? await getContent({ api, allowFallback: false, timeoutMs: 2000 })
+        : fallbackGetContent(editor);
+      if (current.content !== expectedContent || validationEpoch !== editorInputEpoch
+        || compositionActive || editorInputTimer) {
+        throw contentConflict(current.mode);
+      }
+    }
+
+    if (mode === 'dom-fallback') {
+      if (editor.isConnected === false) throw contentConflict('dom-fallback');
+      return fallbackSetContent(content, editor);
+    }
+    if (getMpEditorApi() !== api) throw adapterConflict(getMpEditorApi() ? 'mp-editor-jsapi' : 'dom-fallback');
+    const setEpoch = editorInputEpoch;
+    let response;
+    try {
+      response = await invokeMpEditor('mp_editor_set_content', { content }, SET_CONFIRM_TIMEOUT_MS, api);
+    } catch (error) {
+      if (error && error.code === JSAPI_TIMEOUT_CODE) {
+        writeStateUncertain = true;
+        throw uncertainWrite();
+      }
+      throw error;
+    }
+    if (setEpoch !== editorInputEpoch || compositionActive || editorInputTimer) {
+      throw contentConflict('mp-editor-jsapi');
+    }
     return {
       response,
       mode: 'mp-editor-jsapi'
     };
   }
 
+  function contentConflict(mode) {
+    const error = new Error('正文在写入前已发生变化，请基于最新内容重试');
+    error.code = CONTENT_CONFLICT_CODE;
+    error.mode = mode || 'unknown';
+    return error;
+  }
+
   let setContentQueue = Promise.resolve();
 
-  function enqueueSetContent(content) {
-    const operation = setContentQueue.catch(() => {}).then(() => setContent(content));
-    setContentQueue = operation;
-    return operation;
+  ensureEditorInputTracking();
+
+  function enqueueSetContent(content, expectedContent = null, expectedMode = '') {
+    const scheduled = setContentQueue.then(
+      () => setContent(content, expectedContent, expectedMode),
+      () => setContent(content, expectedContent, expectedMode)
+    );
+    setContentQueue = scheduled.then(() => undefined, () => undefined);
+    return scheduled;
   }
 
   async function waitForPendingSetContent() {
-    try {
-      await setContentQueue;
-    } catch (_) {
-      // A confirmed write failure does not make later reads unsafe.
-    }
+    await setContentQueue;
+    if (writeStateUncertain) throw uncertainWrite();
   }
 
   function postResponse(requestId, type, ok, data, error) {
@@ -277,7 +438,11 @@
 
       if (type === 'SET_CONTENT') {
         const html = payload && typeof payload.content === 'string' ? payload.content : '';
-        const result = await enqueueSetContent(html);
+        const expectedContent = payload && typeof payload.expectedContent === 'string'
+          ? payload.expectedContent
+          : null;
+        const expectedMode = payload && typeof payload.expectedMode === 'string' ? payload.expectedMode : '';
+        const result = await enqueueSetContent(html, expectedContent, expectedMode);
         postResponse(requestId, 'SET_CONTENT_RESULT', true, result);
         return;
       }
