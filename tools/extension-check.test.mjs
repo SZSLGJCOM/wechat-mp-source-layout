@@ -168,7 +168,7 @@ test('image controls separate panel state from persisted edits', () => {
 test('image geometry previews defer editor writes until the gesture ends', () => {
   const imageTools = readText('src/image-tools.js');
   const css = readText('src/overlay.css');
-  const geometry = imageTools.match(/function updateGeometryGesture\(event\) \{[\s\S]*?\n  \}\n\n  function zoomCrop/);
+  const geometry = imageTools.match(/function updateGeometryGesture\(event, scope\) \{[\s\S]*?\n  \}\n\n  function zoomCrop/);
 
   assert.ok(geometry, 'geometry update function must exist');
   assert.match(imageTools, /function getTopClientPoint\(event\)/);
@@ -177,21 +177,33 @@ test('image geometry previews defer editor writes until the gesture ends', () =>
   assert.doesNotMatch(imageTools, /requestAnimationFrame\(positionTools\)/);
   assert.match(imageTools, /addEventListener\('pointercancel', onDocumentPointerUp, true\)/);
   assert.match(imageTools, /capturePointer\(image, event\.pointerId\)/);
-  assert.match(css, /#mpse-img2-box \.mpse-img2-handle/);
-  assert.match(css, /width: 26px !important/);
+  assert.match(imageTools, /function updateGeometryOverlay\(interaction, preview\)/);
+  assert.match(css, /\.mpse-img2-handle\.mpse-visible/);
+  assert.match(css, /width: 38px !important/);
 });
 
-test('image selection follows the visible editor area and crop entry uses pointer presses', () => {
+test('image selection follows the visible editor area and crop entry has native fallback', () => {
   const imageTools = readText('src/image-tools.js');
   const css = readText('src/overlay.css');
 
   assert.match(imageTools, /function isSelectionVisible\(image, rect\)/);
   assert.match(imageTools, /function getFrameContentRect\(frame\)/);
   assert.match(imageTools, /function isRepeatedImagePress\(image, event\)/);
-  assert.doesNotMatch(imageTools, /function onDocumentDoubleClick\(/);
-  assert.doesNotMatch(imageTools, /addEventListener\('dblclick', onDocumentDoubleClick/);
+  assert.match(imageTools, /function onDocumentDoubleClick\(event\)/);
+  assert.match(imageTools, /addEventListener\('dblclick', onDocumentDoubleClick, true\)/);
+  assert.match(imageTools, /function toggleCropMode\(image\)/);
   assert.match(imageTools, /setToolElementsOffscreen\(true\)/);
   assert.match(css, /#mpse-img2-menu\.mpse-offscreen/);
+});
+
+test('crop edges preserve physical container dimensions and gesture commits are deferred', () => {
+  const imageTools = readText('src/image-tools.js');
+
+  assert.match(imageTools, /dataset\.mpseCropBaseWidth/);
+  assert.match(imageTools, /function setLayoutWidthPercent\(image, width/);
+  assert.match(imageTools, /width: `\$\{\(baseWidth \* crop\.width\)/);
+  assert.match(imageTools, /function deferContentCommitForGesture\(\)/);
+  assert.match(imageTools, /if \(state\.isDragging\) return;/);
 });
 
 test('image appearance effects are reversible and follow the crop container', () => {

@@ -1,11 +1,12 @@
 (() => {
   'use strict';
 
-  const VERSION = 'v0.9.7';
+  const VERSION = 'v0.9.8';
   const MENU_ID = 'mpse-img2-menu';
   const PANEL_ID = 'mpse-img2-panel';
   const BOX_ID = 'mpse-img2-box';
   const BADGE_ID = 'mpse-img2-badge';
+  const HANDLE_CLASS = 'mpse-img2-handle';
   const CROP_ATTR = 'data-mpse-image-crop';
   const BOUND_FLAG = '__mpseImageToolsV094Bound__';
   const GENERIC_BOUND_ATTR = 'data-mpse-image-tools-bound';
@@ -75,7 +76,8 @@
     needsCommit: false,
     lastSnapshot: null,
     positionFrame: 0,
-    lastImagePress: null
+    lastImagePress: null,
+    lastCropToggleAt: 0
   };
 
   function isMpHost() {
@@ -297,7 +299,7 @@
 
   function isExtensionElement(node) {
     if (!node || !node.closest) return false;
-    return Boolean(node.closest(`#${MENU_ID}, #${PANEL_ID}, #${BOX_ID}, #${BADGE_ID}, #mpse-svg2-panel, #mpse-svg2-pick-button, #mpse-svgb-menu, #mpse-svgb-panel, #mpse-svgb-box, #mpse-svgb-badge, #mpse-inline-panel, #mpse-toolbar-button, #mpse-floating-button`));
+    return Boolean(node.closest(`#${MENU_ID}, #${PANEL_ID}, #${BOX_ID}, #${BADGE_ID}, .${HANDLE_CLASS}, #mpse-svg2-panel, #mpse-svg2-pick-button, #mpse-svgb-menu, #mpse-svgb-panel, #mpse-svgb-box, #mpse-svgb-badge, #mpse-inline-panel, #mpse-toolbar-button, #mpse-floating-button`));
   }
 
   function findEditableRoot(node) {
@@ -618,23 +620,49 @@
     if (box) return box;
     box = document.createElement('div');
     box.id = BOX_ID;
-    const handles = [
+    document.body.appendChild(box);
+    return box;
+  }
+
+  function getImageHandles() {
+    return Array.from(document.querySelectorAll(`.${HANDLE_CLASS}`));
+  }
+
+  function createHandles() {
+    const definitions = [
       ['nw', '左上角缩放'], ['n', '顶部裁切'], ['ne', '右上角缩放'], ['e', '右侧裁切'],
       ['se', '右下角缩放'], ['s', '底部裁切'], ['sw', '左下角缩放'], ['w', '左侧裁切']
     ];
-    box.innerHTML = handles.map(([handle, label]) => `<button type="button" class="mpse-img2-handle mpse-img2-handle-${handle}" data-mpse-image-handle="${handle}" aria-label="${label}" title="${label}"></button>`).join('');
-    box.addEventListener('pointerdown', (event) => {
-      const handle = event.target.closest('[data-mpse-image-handle]');
-      if (!handle) return;
-      stopUiEvent(event);
-      beginGeometryGesture(handle.dataset.mpseImageHandle, event, handle);
-    }, true);
-    box.addEventListener('pointermove', onDocumentPointerMove, true);
-    box.addEventListener('pointerup', onDocumentPointerUp, true);
-    box.addEventListener('pointercancel', onDocumentPointerUp, true);
-    box.addEventListener('lostpointercapture', onDocumentPointerUp, true);
-    document.body.appendChild(box);
-    return box;
+    for (const [handle, label] of definitions) {
+      const id = `mpse-img2-handle-${handle}`;
+      let button = document.getElementById(id);
+      if (button) continue;
+      button = document.createElement('button');
+      button.id = id;
+      button.type = 'button';
+      button.className = `${HANDLE_CLASS} ${HANDLE_CLASS}-${handle}`;
+      button.dataset.mpseImageHandle = handle;
+      button.setAttribute('aria-label', label);
+      button.title = label;
+      button.addEventListener('pointerdown', onHandlePointerDown, true);
+      button.addEventListener('pointercancel', onHandlePointerCancel, true);
+      button.addEventListener('lostpointercapture', onHandlePointerCancel, true);
+      document.body.appendChild(button);
+    }
+  }
+
+  function positionHandles(rect) {
+    const positions = {
+      nw: [rect.left, rect.top], n: [(rect.left + rect.right) / 2, rect.top], ne: [rect.right, rect.top], e: [rect.right, (rect.top + rect.bottom) / 2],
+      se: [rect.right, rect.bottom], s: [(rect.left + rect.right) / 2, rect.bottom], sw: [rect.left, rect.bottom], w: [rect.left, (rect.top + rect.bottom) / 2]
+    };
+    for (const handle of getImageHandles()) {
+      const point = positions[handle.dataset.mpseImageHandle];
+      if (!point) continue;
+      handle.style.left = `${point[0]}px`;
+      handle.style.top = `${point[1]}px`;
+      handle.classList.add('mpse-visible');
+    }
   }
 
   function createBadge() {
@@ -651,6 +679,7 @@
       const element = document.getElementById(id);
       if (element) element.remove();
     }
+    for (const handle of getImageHandles()) handle.remove();
   }
 
   function absorbUiEvent(event) {
@@ -736,6 +765,19 @@
     return Boolean(crop && (crop.x > 0.0001 || crop.y > 0.0001 || crop.width < 0.9999 || crop.height < 0.9999));
   }
 
+  function readCropBaseWidth(image) {
+    const host = getCropContainer(image);
+    const stored = Number(host && host.dataset.mpseCropBaseWidth);
+    if (Number.isFinite(stored)) return clamp(stored, 4, 2500);
+    return readLayoutWidthPercent(image);
+  }
+
+  function setCropBaseWidth(image, value) {
+    const host = getCropContainer(image);
+    if (!host) return;
+    host.dataset.mpseCropBaseWidth = clamp(value, 4, 2500).toFixed(4);
+  }
+
   function normalizeCropState(next) {
     const width = clamp(next.width, 0.04, 1);
     const height = clamp(next.height, 0.04, 1);
@@ -752,6 +794,7 @@
     const host = getCropContainer(image);
     if (!host) return null;
     const crop = normalizeCropState(next);
+    const baseWidth = readCropBaseWidth(image);
     host.dataset.mpseCropX = crop.x.toFixed(6);
     host.dataset.mpseCropY = crop.y.toFixed(6);
     host.dataset.mpseCropWidth = crop.width.toFixed(6);
@@ -760,6 +803,8 @@
 
     const aspect = crop.sourceAspect * crop.width / crop.height;
     setStyles(host, {
+      width: `${(baseWidth * crop.width).toFixed(4)}%`,
+      'max-width': '100%',
       display: 'block',
       position: 'relative',
       overflow: 'hidden',
@@ -799,12 +844,10 @@
     const sourceAspect = image.naturalWidth && image.naturalHeight
       ? image.naturalWidth / image.naturalHeight
       : Math.max(0.05, rect.width / Math.max(1, rect.height));
-    const declaredWidth = image.style.getPropertyValue('width');
-    const width = /%\s*$/.test(declaredWidth)
-      ? declaredWidth
-      : `${clamp(rect.width / Math.max(1, availableWidth) * 100, 4, 100)}%`;
+    const baseWidth = clamp(rect.width / Math.max(1, availableWidth) * 100, 4, 100);
     const host = image.ownerDocument.createElement('span');
     host.setAttribute(CROP_ATTR, '1');
+    host.dataset.mpseCropBaseWidth = baseWidth.toFixed(4);
     copyLayoutStyles(image, host);
     image.parentNode.insertBefore(host, image);
     host.appendChild(image);
@@ -813,7 +856,7 @@
       image.style.removeProperty(prop);
     }
     setStyles(host, {
-      width,
+      width: `${baseWidth.toFixed(4)}%`,
       'max-width': '100%',
       display: 'block',
       position: 'relative',
@@ -831,10 +874,12 @@
     const host = getCropContainer(image);
     if (!host || !host.parentNode) return image;
     const parent = host.parentNode;
+    const baseWidth = readCropBaseWidth(image);
     for (const prop of ['position', 'left', 'top', 'height', 'max-width', 'display', 'margin-left', 'margin-right', 'margin-top', 'margin-bottom', 'width', 'vertical-align']) {
       image.style.removeProperty(prop);
     }
     copyLayoutStyles(host, image);
+    setStyles(image, { width: `${baseWidth.toFixed(4)}%`, 'max-width': '100%', display: 'block' });
     parent.insertBefore(image, host);
     host.remove();
     renderAppearance(image);
@@ -862,12 +907,18 @@
     return clamp(rect.width / Math.max(1, available) * 100, 4, 100);
   }
 
-  function setLayoutWidthFromPixels(image, widthPx, available = getAvailableImageWidth(image)) {
+  function setLayoutWidthPercent(image, width, available = getAvailableImageWidth(image)) {
     const host = getLayoutHost(image);
     if (!host) return false;
-    const width = clamp(widthPx / Math.max(1, available) * 100, 4, 100);
-    if (Math.abs(readLayoutWidthPercent(image, available) - width) < 0.01) return false;
-    setStyles(host, { width: `${width.toFixed(3)}%`, 'max-width': '100%', display: 'block' });
+    const visualWidth = clamp(width, 4, 100);
+    if (Math.abs(readLayoutWidthPercent(image, available) - visualWidth) < 0.01) return false;
+    const crop = readCropState(image);
+    if (crop) {
+      setCropBaseWidth(image, visualWidth / Math.max(0.04, crop.width));
+      writeCropState(image, crop);
+      return true;
+    }
+    setStyles(host, { width: `${visualWidth.toFixed(3)}%`, 'max-width': '100%', display: 'block' });
     return true;
   }
 
@@ -899,6 +950,19 @@
     return interaction.pointerId === event.pointerId;
   }
 
+  function interactionOwnsEvent(interaction, event, scope) {
+    if (!interaction || !matchesGeometryPointer(interaction, event)) return false;
+    if (!scope) return true;
+    if (interaction.scope !== scope) return false;
+    return scope === 'overlay' || !interaction.sourceDocument || (event.target && event.target.ownerDocument === interaction.sourceDocument);
+  }
+
+  function deferContentCommitForGesture() {
+    if (!state.commitTimer) return;
+    window.clearTimeout(state.commitTimer);
+    state.commitTimer = null;
+  }
+
   function queueGeometryPreview(interaction) {
     if (!interaction || interaction.frame) return;
     interaction.frame = window.requestAnimationFrame(() => {
@@ -921,11 +985,11 @@
     const image = state.image;
     if (!image || !image.isConnected) return;
     if (preview.kind === 'resize') {
-      setLayoutWidthFromPixels(image, preview.widthPx, interaction.availableWidth);
+      setLayoutWidthPercent(image, preview.widthPercent, interaction.availableWidth);
     } else {
       writeCropState(image, preview.crop);
     }
-    schedulePositionTools();
+    updateGeometryOverlay(interaction, preview);
   }
 
   function hasGeometryChanged(interaction, image) {
@@ -936,7 +1000,7 @@
     return !cropStatesMatch(readCropState(image), interaction.startCrop);
   }
 
-  function getCornerResizeWidth(interaction, point) {
+  function getCornerResizePreview(interaction, point) {
     const horizontalDirection = interaction.handle.includes('w') ? -1 : 1;
     const verticalDirection = interaction.handle.includes('n') ? -1 : 1;
     const horizontalDelta = horizontalDirection * (point.x - interaction.startX);
@@ -946,7 +1010,36 @@
     const scale = horizontalRatio >= verticalRatio
       ? 1 + horizontalDelta / Math.max(1, interaction.rect.width)
       : 1 + verticalDelta / Math.max(1, interaction.rect.height);
-    return Math.max(40, interaction.rect.width * scale);
+    const widthPercent = clamp(interaction.startWidthPercent * scale, 4, 100);
+    return { widthPercent, scale: widthPercent / Math.max(0.01, interaction.startWidthPercent) };
+  }
+
+  function getResizePreviewRect(interaction, preview) {
+    const width = interaction.rect.width * preview.scale;
+    const height = interaction.rect.height * preview.scale;
+    const left = interaction.handle.includes('w') ? interaction.rect.right - width : interaction.rect.left;
+    const top = interaction.handle.includes('n') ? interaction.rect.bottom - height : interaction.rect.top;
+    return { left, top, right: left + width, bottom: top + height, width, height };
+  }
+
+  function getCropPreviewRect(interaction, crop) {
+    const start = interaction.startCrop;
+    if (!start) return interaction.rect;
+    const width = interaction.rect.width * crop.width / Math.max(0.04, start.width);
+    const height = interaction.rect.height * crop.height / Math.max(0.04, start.height);
+    const left = interaction.handle === 'w' ? interaction.rect.right - width : interaction.rect.left;
+    const top = interaction.handle === 'n' ? interaction.rect.bottom - height : interaction.rect.top;
+    return { left, top, right: left + width, bottom: top + height, width, height };
+  }
+
+  function updateGeometryOverlay(interaction, preview) {
+    const box = document.getElementById(BOX_ID);
+    if (!box) return;
+    const rect = preview.kind === 'resize'
+      ? getResizePreviewRect(interaction, preview)
+      : getCropPreviewRect(interaction, preview.crop);
+    setStyles(box, { left: `${rect.left}px`, top: `${rect.top}px`, width: `${rect.width}px`, height: `${rect.height}px` });
+    positionHandles(rect);
   }
 
   function beginGeometryGesture(handle, event, captureTarget) {
@@ -963,8 +1056,11 @@
     }
     const target = getSelectionElement(image);
     const rect = getTopRect(target);
+    deferContentCommitForGesture();
     state.interaction = {
       kind: isCorner ? 'resize' : 'crop',
+      scope: 'overlay',
+      sourceDocument: document,
       handle,
       pointerId: event.pointerId,
       pointerTarget: captureTarget || event.target,
@@ -988,8 +1084,11 @@
     const point = getTopClientPoint(event);
     if (!point) return;
     const rect = getTopRect(result.host);
+    deferContentCommitForGesture();
     state.interaction = {
       kind: 'pan',
+      scope: 'source',
+      sourceDocument: image.ownerDocument,
       pointerId: event.pointerId,
       pointerTarget: image,
       startX: point.x,
@@ -1004,10 +1103,10 @@
     capturePointer(image, event.pointerId);
   }
 
-  function updateGeometryGesture(event) {
+  function updateGeometryGesture(event, scope) {
     const interaction = state.interaction;
     const image = state.image;
-    if (!interaction || !image || !image.isConnected || !matchesGeometryPointer(interaction, event)) return;
+    if (!interaction || !image || !image.isConnected || !interactionOwnsEvent(interaction, event, scope)) return;
     const point = getTopClientPoint(event);
     if (!point) return;
     const rect = interaction.rect;
@@ -1016,7 +1115,7 @@
     const dy = (point.y - interaction.startY) / rect.height;
 
     if (interaction.kind === 'resize') {
-      interaction.preview = { kind: 'resize', widthPx: getCornerResizeWidth(interaction, point) };
+      interaction.preview = { kind: 'resize', ...getCornerResizePreview(interaction, point) };
       queueGeometryPreview(interaction);
       return;
     }
@@ -1064,18 +1163,26 @@
     schedulePositionTools();
   }
 
-  function finishGeometryGesture(event) {
+  function finishGeometryGesture(event, scope) {
     const interaction = state.interaction;
-    if (!interaction || !matchesGeometryPointer(interaction, event)) return false;
+    if (!interaction || !interactionOwnsEvent(interaction, event, scope)) return false;
     flushGeometryPreview(interaction);
     const image = state.image;
     state.interaction = null;
     state.isDragging = false;
     releasePointer(interaction.pointerTarget, interaction.pointerId);
     const changed = hasGeometryChanged(interaction, image);
+    if (interaction.kind === 'crop' && changed && state.image) {
+      state.cropMode = true;
+      state.cropTransientHost = interaction.createdCrop || state.cropTransientHost;
+      createBox().classList.add('mpse-crop-mode');
+      setBadgeText('裁切模式：拖动图片，Ctrl + 滚轮缩放');
+    }
     if (interaction.createdCrop && !changed && !state.cropMode) state.image = unwrapCropContainer(image);
     if (changed && state.image) {
       markChanged(state.image, interaction.kind === 'pan' ? 'crop-pan' : interaction.kind, false);
+      scheduleContentCommit('drag-end');
+    } else if (state.needsCommit) {
       scheduleContentCommit('drag-end');
     }
     schedulePositionTools();
@@ -1585,7 +1692,8 @@
     if (effect === 'size') {
       const width = clamp(values.width, 10, 100);
       const align = values.align || 'center';
-      setStyles(layoutHost, { width: `${width}%`, 'max-width': '100%', display: 'block' });
+      setLayoutWidthPercent(image, width);
+      setStyles(layoutHost, { 'max-width': '100%', display: 'block' });
       if (!getCropContainer(image)) setStyle(image, 'height', 'auto');
       if (align === 'left') setStyles(layoutHost, { 'margin-left': '0', 'margin-right': 'auto' });
       if (align === 'center') setStyles(layoutHost, { 'margin-left': 'auto', 'margin-right': 'auto' });
@@ -1901,6 +2009,7 @@
   }
 
   async function commitSnapshotToEditor(reason) {
+    if (state.isDragging) return;
     if (state.commitInFlight) {
       state.queuedCommit = true;
       return;
@@ -1921,6 +2030,10 @@
       if (!result.changed) {
         console.warn('[公众号源码排版助手] image html sync skipped:', result.reason);
         setBadgeText('仅预览');
+        return;
+      }
+      if (state.isDragging) {
+        state.needsCommit = true;
         return;
       }
       await requestBridge('SET_CONTENT', { content: result.html }, 15000);
@@ -1987,6 +2100,7 @@
     state.identity = imageSignature(image);
     createMenu().classList.add('mpse-visible');
     createBox().classList.add('mpse-visible');
+    createHandles();
     createBadge().classList.add('mpse-visible');
     setToolElementsOffscreen(false);
     setButtonStates();
@@ -1999,6 +2113,7 @@
       const element = document.getElementById(id);
       if (element) element.classList.toggle('mpse-offscreen', offscreen);
     }
+    for (const handle of getImageHandles()) handle.classList.toggle('mpse-offscreen', offscreen);
   }
 
   function hideToolElements() {
@@ -2006,6 +2121,7 @@
       const element = document.getElementById(id);
       if (element) element.classList.remove('mpse-visible', 'mpse-offscreen');
     }
+    for (const handle of getImageHandles()) handle.classList.remove('mpse-visible', 'mpse-offscreen');
   }
 
   function hideTools() {
@@ -2033,13 +2149,13 @@
       if (state.identity) window.setTimeout(() => reacquireSelectedImage(state.identity), 0);
       return;
     }
+    if (state.interaction) return;
     const rect = getTopRect(getSelectionElement(image));
     if (rect.width < 1 || rect.height < 1) {
       setToolElementsOffscreen(true);
       return;
     }
     if (!isSelectionVisible(image, rect)) {
-      if (state.interaction) finishGeometryGesture();
       setToolElementsOffscreen(true);
       return;
     }
@@ -2047,6 +2163,7 @@
 
     setStyles(box, { left: `${rect.left}px`, top: `${rect.top}px`, width: `${rect.width}px`, height: `${rect.height}px` });
     box.classList.toggle('mpse-crop-mode', state.cropMode);
+    positionHandles(rect);
 
     const menuWidth = 54;
     const panelWidth = 238;
@@ -2086,9 +2203,36 @@
     const point = getTopClientPoint(event);
     const now = Date.now();
     const previous = state.lastImagePress;
-    state.lastImagePress = { image, time: now, x: point ? point.x : NaN, y: point ? point.y : NaN };
-    if (!previous || previous.image !== image || now - previous.time > 360 || !point) return false;
-    return Math.hypot(point.x - previous.x, point.y - previous.y) <= 14;
+    state.lastImagePress = { image, identity: imageSignature(image), time: now, x: point ? point.x : NaN, y: point ? point.y : NaN };
+    const sameImage = previous && (previous.image === image || scoreImageByIdentity(image, previous.identity) >= 600);
+    if (!sameImage || now - previous.time > 500 || !point) return false;
+    return Math.hypot(point.x - previous.x, point.y - previous.y) <= 28;
+  }
+
+  function toggleCropMode(image) {
+    const now = Date.now();
+    if (now - state.lastCropToggleAt < 420) return;
+    state.lastCropToggleAt = now;
+    if (state.interaction) finishGeometryGesture();
+    const wasCropMode = state.cropMode && state.identity
+      && (image === state.image || scoreImageByIdentity(image, state.identity) >= 600);
+    showToolsForImage(image);
+    if (wasCropMode) exitCropMode();
+    else enterCropMode(image);
+  }
+
+  function onHandlePointerDown(event) {
+    if (!event || event.button !== 0) return;
+    const handle = event.currentTarget;
+    if (!handle) return;
+    stopUiEvent(event);
+    state.lastImagePress = null;
+    if (state.interaction) finishGeometryGesture();
+    beginGeometryGesture(handle.dataset.mpseImageHandle, event, handle);
+  }
+
+  function onHandlePointerCancel(event) {
+    finishGeometryGesture(event, 'overlay');
   }
 
   function onDocumentPointer(event) {
@@ -2103,18 +2247,16 @@
     const image = findImageFromEvent(event);
     if (image) {
       const repeatedPress = isRepeatedImagePress(image, event);
-      const wasCropMode = state.cropMode && image === state.image;
-      event.preventDefault();
-      event.stopPropagation();
       if (repeatedPress) {
         state.lastImagePress = null;
-        if (state.interaction) finishGeometryGesture();
-        showToolsForImage(image);
-        if (wasCropMode) exitCropMode();
-        else enterCropMode(image);
+        event.preventDefault();
+        event.stopPropagation();
+        toggleCropMode(image);
         return;
       }
       if (state.cropMode && image === state.image && getCropContainer(image)) {
+        event.preventDefault();
+        event.stopPropagation();
         beginCropPan(image, event);
         return;
       }
@@ -2124,6 +2266,17 @@
 
     state.lastImagePress = null;
     hideTools();
+  }
+
+  function onDocumentDoubleClick(event) {
+    if (!event || !event.target || isExtensionElement(event.target)) return;
+    if (document.getElementById('mpse-inline-panel')) return;
+    const image = findImageFromEvent(event);
+    if (!image) return;
+    event.preventDefault();
+    event.stopPropagation();
+    state.lastImagePress = null;
+    toggleCropMode(image);
   }
 
   function onDocumentWheel(event) {
@@ -2136,11 +2289,11 @@
   }
 
   function onDocumentPointerMove(event) {
-    updateGeometryGesture(event);
+    updateGeometryGesture(event, 'source');
   }
 
   function onDocumentPointerUp(event) {
-    finishGeometryGesture(event);
+    finishGeometryGesture(event, 'source');
   }
 
   function onDocumentKeyDown(event) {
@@ -2165,6 +2318,7 @@
       }
       if (root) root.setAttribute(GENERIC_BOUND_ATTR, VERSION);
       doc.addEventListener('pointerdown', onDocumentPointer, true);
+      doc.addEventListener('dblclick', onDocumentDoubleClick, true);
       doc.addEventListener('pointermove', onDocumentPointerMove, true);
       doc.addEventListener('pointerup', onDocumentPointerUp, true);
       doc.addEventListener('pointercancel', onDocumentPointerUp, true);
@@ -2179,12 +2333,16 @@
 
   function onGlobalPointerUp(event) {
     if (state.interaction) {
-      finishGeometryGesture(event);
+      if (state.interaction.scope === 'overlay') finishGeometryGesture(event, 'overlay');
       return;
     }
     if (!state.isDragging) return;
     state.isDragging = false;
     if (state.needsCommit) scheduleContentCommit('drag-end');
+  }
+
+  function onGlobalPointerMove(event) {
+    updateGeometryGesture(event, 'overlay');
   }
 
   let bindTimer = 0;
@@ -2208,6 +2366,7 @@
     createMenu();
     createPanel();
     createBox();
+    createHandles();
     createBadge();
     bindDocuments();
 
@@ -2215,6 +2374,7 @@
     observer.observe(document.documentElement, { childList: true, subtree: true });
 
     window.setInterval(scheduleBindDocuments, 1500);
+    window.addEventListener('pointermove', onGlobalPointerMove, true);
     window.addEventListener('pointerup', onGlobalPointerUp, true);
     window.addEventListener('pointercancel', onGlobalPointerUp, true);
     window.addEventListener('mouseup', onGlobalPointerUp, true);
