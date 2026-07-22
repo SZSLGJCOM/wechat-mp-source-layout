@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const VERSION = 'v0.10.0';
+  const VERSION = 'v0.10.1';
   const CONTENT_SOURCE = 'wechat-mp-source-layout:content';
   const PAGE_SOURCE = 'wechat-mp-source-layout:page';
   const CONTENT_CONFLICT_CODE = 'MPSE_CONTENT_CONFLICT';

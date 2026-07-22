@@ -222,7 +222,7 @@ test('image property ownership includes every positioned presentation property',
   assert.match(imageControls, /restoreInlineStyles\(image, base\.imageStyles\)/);
 });
 
-test('crop layout preserves host flow and image-only positioning exactly', () => {
+test('crop layout normalizes visual transforms before creating its host', () => {
   const imageTools = readText('src/image-tools.js');
   const capture = imageTools.match(/function captureCropLayout\(image\) \{[\s\S]*?\n  \}\n\n  function readCropLayout/);
   const ensure = imageTools.match(/function ensureCropContainer\(image\) \{[\s\S]*?\n  \}\n\n  function unwrapCropContainer/);
@@ -233,6 +233,8 @@ test('crop layout preserves host flow and image-only positioning exactly', () =>
   assert.match(capture[0], /const styles = captureInlineStyles\(image, props\)/);
   assert.match(capture[0], /const hostStyles = Object\.fromEntries\(hostProps\.map/);
   assert.match(ensure[0], /host\.dataset\.mpseCropLayout = JSON\.stringify\(layout\)/);
+  assert.match(ensure[0], /imagePresentation\.normalizeCropLayout\(layout\)/);
+  assert.match(ensure[0], /imagePresentation\.positionCropHost\(host, presentationRect, getTopRect\)/);
   assert.match(unwrap[0], /restoreInlineStyles\(image, layout\.styles\)/);
   assert.match(unwrap[0], /'position', 'left', 'top', 'right', 'bottom'[\s\S]*?'translate', 'scale'/);
 });

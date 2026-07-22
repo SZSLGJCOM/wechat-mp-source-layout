@@ -11,7 +11,7 @@
 
 ## 版本与更新
 
-当前版本：`v0.10`
+当前版本：`v0.10.1`
 
 [查看更新日志](CHANGELOG.md) · [GitHub Releases](https://github.com/SZSLGJCOM/wechat-mp-source-layout/releases)
 

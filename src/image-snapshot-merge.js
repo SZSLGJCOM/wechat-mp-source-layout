@@ -31,7 +31,8 @@
     'transform', 'transform-origin', 'translate', 'scale', 'object-fit'
   ];
   const cropHost = [
-    ...layout, ...frame, 'position', 'aspect-ratio', 'line-height', 'transform', 'transform-origin'
+    ...layout, ...frame, 'position', 'aspect-ratio', 'line-height',
+    'transform', 'transform-origin', 'translate', 'scale'
   ];
   const cropCreateImage = Array.from(new Set([...cropImage, ...Object.values(appearance).flat()]));
   const cropCreateHost = Array.from(new Set([...cropHost, ...Object.values(appearance).flat()]));

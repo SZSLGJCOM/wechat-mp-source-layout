@@ -22,7 +22,7 @@ test('repository exposes one-command extension verification', () => {
   assert.equal(pkg.scripts?.check, 'node tools/verify-extension.mjs');
   assert.equal(
     pkg.scripts?.test,
-    'node --test tools/release-contracts.test.mjs tools/image-interaction-contracts.test.mjs tools/image-geometry.test.mjs tools/image-state-contracts.test.mjs tools/bridge-client.test.mjs tools/page-bridge.test.mjs'
+    'node --test tools/release-contracts.test.mjs tools/image-interaction-contracts.test.mjs tools/image-geometry.test.mjs tools/image-presentation.test.mjs tools/image-state-contracts.test.mjs tools/bridge-client.test.mjs tools/page-bridge.test.mjs'
   );
   assert.equal(pkg.scripts?.package, 'node tools/package-extension.mjs');
 
@@ -45,7 +45,7 @@ test('release version and ASCII package folder stay consistent', () => {
   const releaseVersion = manifest.version_name || manifest.version;
 
   assert.equal(pkg.version, manifest.version);
-  assert.equal(releaseVersion, '0.10');
+  assert.equal(releaseVersion, '0.10.1');
   assert.ok(readme.includes(`当前版本：\`v${releaseVersion}\``));
   assert.ok(changelog.includes(`## v${releaseVersion} ·`));
   assert.ok(bridgeClient.includes(`const VERSION = 'v${manifest.version}';`));
@@ -75,6 +75,7 @@ test('content scripts load the shared bridge client before dependent modules', (
     'src/bridge-client.js',
     'src/content.js',
     'src/image-geometry.js',
+    'src/image-presentation.js',
     'src/image-controls.js',
     'src/image-snapshot-merge.js',
     'src/image-tools.js',
@@ -160,13 +161,15 @@ test('real image snapshots own only the properties changed by the current operat
   assert.equal(size.imgStylePatch['box-shadow'], undefined);
 
   const host = new FakeElement('span', { 'data-mpse-image-crop': '1' }, {
-    width: '52%', opacity: '0.6', filter: 'brightness(90%)', 'box-shadow': '0 4px 9px #000'
+    width: '52%', translate: '40px 10px', opacity: '0.6', filter: 'brightness(90%)', 'box-shadow': '0 4px 9px #000'
   });
   const opacity = snapshotMerge.createSnapshot({ identity, image, cropHost: host, reason: 'opacity' });
   assert.deepEqual(Object.keys(opacity.hostStylePatch), ['opacity']);
   assert.equal(opacity.hostDataAction, 'none');
 
   const crop = snapshotMerge.createSnapshot({ identity, image, cropHost: host, reason: 'crop' });
+  assert.equal(crop.hostStylePatch.translate.value, '40px 10px');
+  assert.ok(crop.hostStylePatch.scale, 'crop host must own the normalized scale property');
   for (const property of ['opacity', 'filter', 'box-shadow', 'outline', 'mask-image']) {
     assert.equal(crop.hostStylePatch[property], undefined, `${property} is not owned by crop geometry`);
   }
@@ -372,6 +375,7 @@ test('public release files avoid internal release-log wording', () => {
     'docs/wechat-interface-notes.md',
     'src/content.js',
     'src/image-geometry.js',
+    'src/image-presentation.js',
     'src/image-controls.js',
     'src/image-snapshot-merge.js',
     'src/image-tools.js',
@@ -392,6 +396,7 @@ test('production comments are concise and professional', () => {
   for (const file of [
     'src/content.js',
     'src/image-geometry.js',
+    'src/image-presentation.js',
     'src/image-controls.js',
     'src/image-snapshot-merge.js',
     'src/image-tools.js',

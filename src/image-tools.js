@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const VERSION = 'v0.10.0';
+  const VERSION = 'v0.10.1';
   const MENU_ID = 'mpse-img2-menu';
   const PANEL_ID = 'mpse-img2-panel';
   const BOX_ID = 'mpse-img2-box';
@@ -15,6 +15,7 @@
   const VERSION_ATTR = 'data-mpse-image-tools-version';
   const bridgeClient = window.__MPSE_BRIDGE_CLIENT__;
   const imageGeometry = window.__MPSE_IMAGE_GEOMETRY__;
+  const imagePresentation = window.__MPSE_IMAGE_PRESENTATION__;
   const snapshotMerge = window.__MPSE_IMAGE_SNAPSHOT_MERGE__;
   const injectBridge = bridgeClient && typeof bridgeClient.inject === 'function'
     ? bridgeClient.inject
@@ -27,6 +28,7 @@
     : () => Promise.reject(new Error('扩展桥接客户端未加载，请刷新页面后重试'));
 
   if (!imageGeometry) throw new Error('图片几何模块未加载，请刷新页面后重试');
+  if (!imagePresentation) throw new Error('图片展示模块未加载，请刷新页面后重试');
   if (!snapshotMerge) throw new Error('图片写回合并模块未加载，请刷新页面后重试');
 
   const MANAGED_DATA_KEYS = [
@@ -131,8 +133,6 @@
   function getDataString(image, name, fallback) {
     return image && image.dataset && image.dataset[name] ? image.dataset[name] : fallback;
   }
-
-
   function clampInt(value, min, max, fallback = min) {
     const n = Number(value);
     if (!Number.isFinite(n)) return fallback;
@@ -158,8 +158,6 @@
     return fallback;
   }
 
-
-
   function readFrameDocument(frame) {
     try {
       return frame.contentDocument || null;
@@ -167,9 +165,6 @@
       return null;
     }
   }
-
-
-
   function getAccessibleDocuments() {
     const docs = [document];
     const frames = Array.from(document.querySelectorAll('iframe'));
@@ -1177,17 +1172,21 @@
       : null;
     const circlePresentation = suspendImageCirclePresentation(image);
     const rect = image.getBoundingClientRect();
+    const presentationRect = getTopRect(image);
     const sourceMetrics = readDecorationMetrics(image, 100);
     const horizontalDecoration = sourceMetrics.paddingLeft + sourceMetrics.paddingRight
       + sourceMetrics.borderLeftWidth + sourceMetrics.borderRightWidth;
     const verticalDecoration = sourceMetrics.paddingTop + sourceMetrics.paddingBottom
       + sourceMetrics.borderTopWidth + sourceMetrics.borderBottomWidth;
-    const layoutWidth = Math.max(1, (image.offsetWidth || rect.width) - horizontalDecoration);
-    const layoutHeight = Math.max(1, (image.offsetHeight || rect.height) - verticalDecoration);
+    const presentationSize = imagePresentation.scaleContentSize((image.offsetWidth || rect.width) - horizontalDecoration,
+      (image.offsetHeight || rect.height) - verticalDecoration, image.style.getPropertyValue('scale'));
+    const layoutWidth = presentationSize.width;
+    const layoutHeight = presentationSize.height;
     const availableWidth = getAvailableImageWidth(image);
     const baseAspect = Math.max(0.05, layoutWidth / Math.max(1, layoutHeight));
     const baseWidth = clamp(layoutWidth / Math.max(1, availableWidth) * 100, 4, 100);
     const layout = captureCropLayout(image);
+    imagePresentation.normalizeCropLayout(layout);
     layout.baseWidth = baseWidth;
     layout.baseHeightPx = layoutHeight;
     layout.decoration = { ...sourceMetrics, baseWidth };
@@ -1212,6 +1211,8 @@
       media: { x: 0, y: 0, width: 1, height: 1 },
       baseAspect
     });
+    layout.hostStyles.translate = { value: imagePresentation.positionCropHost(host, presentationRect, getTopRect), priority: 'important' };
+    writeCropLayout(image, layout);
     clearFrameAppearance(image);
     renderCropAppearance(image);
     if (circlePresentation && circleDiameter !== null && image.dataset.mpseCircleOn === '1') {
