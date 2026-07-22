@@ -1,11 +1,13 @@
 (() => {
   'use strict';
 
-  const VERSION = 'v0.9.6';
+  const VERSION = 'v0.9.10';
   const CONTENT_SOURCE = 'wechat-mp-source-layout:content';
   const PAGE_SOURCE = 'wechat-mp-source-layout:page';
 
-  if (window.__MPSE_BRIDGE_CLIENT__ && window.__MPSE_BRIDGE_CLIENT__.version === VERSION) return;
+  if (window.__MPSE_BRIDGE_CLIENT__
+    && window.__MPSE_BRIDGE_CLIENT__.version === VERSION
+    && typeof window.__MPSE_BRIDGE_CLIENT__.mutateContent === 'function') return;
 
   function getExtensionResourceUrl(path) {
     try {
@@ -75,10 +77,61 @@
     });
   }
 
+  let contentOperationQueue = Promise.resolve();
+
+  function enqueueContentOperation(operation) {
+    const scheduled = contentOperationQueue.then(operation, operation);
+    contentOperationQueue = scheduled.then(() => undefined, () => undefined);
+    return scheduled;
+  }
+
+  function readContent(timeoutMs = 15000) {
+    return enqueueContentOperation(() => requestBridge('GET_CONTENT', {}, timeoutMs));
+  }
+
+  function writeContent(content, timeoutMs = 15000) {
+    const html = typeof content === 'string' ? content : '';
+    return enqueueContentOperation(() => requestBridge('SET_CONTENT', { content: html }, timeoutMs));
+  }
+
+  function normalizeMutationResult(result, currentContent) {
+    if (result == null || (typeof result === 'object' && result.changed === false)) {
+      return { changed: false, content: currentContent, value: result };
+    }
+    if (typeof result === 'string') {
+      return { changed: result !== currentContent, content: result, value: result };
+    }
+    if (typeof result === 'object') {
+      const content = typeof result.content === 'string'
+        ? result.content
+        : (typeof result.html === 'string' ? result.html : null);
+      if (content === null) throw new TypeError('Content mutation result must include content');
+      return { changed: content !== currentContent, content, value: result };
+    }
+    throw new TypeError('Content mutator must return a string or an object containing content');
+  }
+
+  function mutateContent(mutator, timeoutMs = 15000) {
+    if (typeof mutator !== 'function') return Promise.reject(new TypeError('Content mutator must be a function'));
+    return enqueueContentOperation(async () => {
+      const read = await requestBridge('GET_CONTENT', {}, timeoutMs);
+      const currentContent = typeof read.content === 'string' ? read.content : '';
+      const mutation = normalizeMutationResult(await mutator(read), currentContent);
+      if (!mutation.changed) {
+        return { changed: false, content: currentContent, read, write: null, value: mutation.value };
+      }
+      const write = await requestBridge('SET_CONTENT', { content: mutation.content }, timeoutMs);
+      return { changed: true, content: mutation.content, read, write, value: mutation.value };
+    });
+  }
+
   window.__MPSE_BRIDGE_CLIENT__ = Object.freeze({
     version: VERSION,
     inject: injectBridge,
     request: requestBridge,
+    readContent,
+    writeContent,
+    mutateContent,
     getResourceUrl: getExtensionResourceUrl
   });
 })();

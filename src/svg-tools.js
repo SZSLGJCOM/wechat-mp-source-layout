@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const VERSION = 'v0.9.6';
+  const VERSION = 'v0.9.10';
   const MENU_ID = 'mpse-img2-menu';
   const PANEL_ID = 'mpse-svg2-panel';
   const PICK_BUTTON_ID = 'mpse-svg2-pick-button';
@@ -12,8 +12,8 @@
   const VERSION_ATTR = 'data-mpse-svg-tools-version';
   const MAX_SELECTED_IMAGES = 9;
   const bridgeClient = window.__MPSE_BRIDGE_CLIENT__;
-  const requestBridge = bridgeClient && typeof bridgeClient.request === 'function'
-    ? bridgeClient.request
+  const mutateEditorContent = bridgeClient && typeof bridgeClient.mutateContent === 'function'
+    ? bridgeClient.mutateContent
     : () => Promise.reject(new Error('扩展桥接客户端未加载，请刷新页面后重试'));
 
   const state = {
@@ -719,11 +719,12 @@
     try {
       const values = collectPanelValues(panel);
       const items = state.selected.slice(0, MAX_SELECTED_IMAGES);
-      const current = await requestBridge('GET_CONTENT', {}, 15000);
-      const content = typeof current.content === 'string' ? current.content : '';
-      const result = insertSvgIntoHtml(content, items, values);
-      if (!result.changed) throw new Error(`没有定位到选中的图片：${result.reason}`);
-      await requestBridge('SET_CONTENT', { content: result.html }, 15000);
+      await mutateEditorContent((current) => {
+        const content = typeof current.content === 'string' ? current.content : '';
+        const result = insertSvgIntoHtml(content, items, values);
+        if (!result.changed) throw new Error(`没有定位到选中的图片：${result.reason}`);
+        return result.html;
+      }, 15000);
       if (generateButton) generateButton.textContent = '已生成';
       window.setTimeout(() => {
         clearSelection();

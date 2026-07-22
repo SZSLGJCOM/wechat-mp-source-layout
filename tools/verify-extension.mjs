@@ -72,8 +72,22 @@ function checkManifest() {
 
 function checkPackaging() {
   const pkg = readJson('package.json');
+  const packager = readText('tools/package-extension.mjs');
   assert(pkg?.scripts?.package === 'node tools/package-extension.mjs', 'package command is required');
   assertFile('tools/package-extension.mjs');
+  assert(/releaseSlug = 'gongzhonghao-yuanma-paiban-zhushou'/.test(packager), 'package folder must use the ASCII product slug');
+}
+
+function checkVersionConsistency() {
+  const manifest = readJson('manifest.json');
+  const pkg = readJson('package.json');
+  if (!manifest || !pkg) return;
+  const version = manifest.version;
+  assert(pkg.version === version, 'package.json and manifest.json versions must match');
+  assert(readText('README.md').includes(`当前版本：\`v${version}\``), 'README current version must match manifest.json');
+  assert(readText('CHANGELOG.md').includes(`## v${version} ·`), 'CHANGELOG must include the current version');
+  assert(readText('src/bridge-client.js').includes(`const VERSION = 'v${version}';`), 'bridge-client version must match manifest.json');
+  assert(readText('src/image-tools.js').includes(`const VERSION = 'v${version}';`), 'image-tools version must match manifest.json');
 }
 
 function checkLicense() {
@@ -126,6 +140,7 @@ function checkProductWording() {
     'CHANGELOG.md',
     'docs/wechat-interface-notes.md',
     'src/content.js',
+    'src/image-geometry.js',
     'src/image-tools.js',
     'src/svg-tools.js',
     'src/svg-block-tools.js',
@@ -140,6 +155,7 @@ function checkProductWording() {
 function checkCommentHygiene() {
   for (const file of [
     'src/content.js',
+    'src/image-geometry.js',
     'src/image-tools.js',
     'src/page-bridge.js',
     'src/svg-tools.js',
@@ -167,6 +183,7 @@ function checkJavaScriptSyntax() {
 
 checkManifest();
 checkPackaging();
+checkVersionConsistency();
 checkLicense();
 checkBridgeCentralization();
 checkProductWording();

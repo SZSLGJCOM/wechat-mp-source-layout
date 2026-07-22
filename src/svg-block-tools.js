@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const VERSION = 'v0.9.6';
+  const VERSION = 'v0.9.10';
   const PANEL_ID = 'mpse-svgb-panel';
   const BOX_ID = 'mpse-svgb-box';
   const BADGE_ID = 'mpse-svgb-badge';
@@ -10,8 +10,8 @@
   const VERSION_ATTR = 'data-mpse-svg-block-tools-version';
   const MAX_IMAGES = 9;
   const bridgeClient = window.__MPSE_BRIDGE_CLIENT__;
-  const requestBridge = bridgeClient && typeof bridgeClient.request === 'function'
-    ? bridgeClient.request
+  const mutateEditorContent = bridgeClient && typeof bridgeClient.mutateContent === 'function'
+    ? bridgeClient.mutateContent
     : () => Promise.reject(new Error('扩展桥接客户端未加载，请刷新页面后重试'));
 
   const state = {
@@ -668,16 +668,17 @@
     state.busy = true;
     setStatus('同步中…');
     try {
-      const current = await requestBridge('GET_CONTENT', {}, 15000);
-      const content = typeof current.content === 'string' ? current.content : '';
-      const parsed = parseHtml(content);
-      const root = parsed.root;
-      if (!root) throw new Error('无法解析正文 HTML');
-      const target = locateBlockInHtml(root, state.signature || getBlockSignature(state.block));
-      if (!target) throw new Error('没有在正文源码里定位到这个 SVG 块');
-      const result = mutator(target, parsed.doc, root);
-      if (!result || !result.changed) throw new Error((result && result.reason) || '没有改动');
-      await requestBridge('SET_CONTENT', { content: root.innerHTML }, 15000);
+      await mutateEditorContent((current) => {
+        const content = typeof current.content === 'string' ? current.content : '';
+        const parsed = parseHtml(content);
+        const root = parsed.root;
+        if (!root) throw new Error('无法解析正文 HTML');
+        const target = locateBlockInHtml(root, state.signature || getBlockSignature(state.block));
+        if (!target) throw new Error('没有在正文源码里定位到这个 SVG 块');
+        const result = mutator(target, parsed.doc, root);
+        if (!result || !result.changed) throw new Error((result && result.reason) || '没有改动');
+        return root.innerHTML;
+      }, 15000);
       setStatus(statusText || '已同步', 'ok');
       return true;
     } catch (error) {

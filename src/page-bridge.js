@@ -47,7 +47,7 @@
     return null;
   }
 
-  function invokeMpEditor(apiName, apiParam) {
+  function invokeMpEditor(apiName, apiParam, timeoutMs = 10000) {
     const api = getMpEditorApi();
     if (!api) {
       return Promise.reject(new Error('页面中没有检测到 __MP_Editor_JSAPI__'));
@@ -55,16 +55,16 @@
 
     return new Promise((resolve, reject) => {
       let settled = false;
-      const timer = window.setTimeout(() => {
+      const timer = timeoutMs > 0 ? window.setTimeout(() => {
         if (settled) return;
         settled = true;
         reject(new Error(`${apiName} 调用超时`));
-      }, 10000);
+      }, timeoutMs) : 0;
 
       const finish = (fn, value) => {
         if (settled) return;
         settled = true;
-        window.clearTimeout(timer);
+        if (timer) window.clearTimeout(timer);
         fn(value);
       };
 
@@ -117,12 +117,10 @@
 
   function findEditorElement() {
     const selectors = [
-      '#ueditor_0',
-      '#js_editorArea',
-      '#js_content',
-      '.rich_media_content',
-      '.ProseMirror',
-      '.ql-editor',
+      '#ueditor_0[contenteditable="true"]',
+      '#js_editorArea[contenteditable="true"]',
+      '.ProseMirror[contenteditable="true"]',
+      '.ql-editor[contenteditable="true"]',
       '[contenteditable="true"]',
       'body[contenteditable="true"]'
     ];
@@ -133,6 +131,7 @@
       for (const selector of selectors) {
         const nodes = Array.from(doc.querySelectorAll(selector));
         for (const node of nodes) {
+          if (!node.isContentEditable && node.getAttribute('contenteditable') !== 'true' && doc.designMode !== 'on') continue;
           if (!isVisibleElement(node)) continue;
           const rect = node.getBoundingClientRect();
           const html = node.innerHTML || '';
@@ -218,16 +217,27 @@
   }
 
   async function setContent(content) {
+    if (!getMpEditorApi()) return fallbackSetContent(content);
+    const response = await invokeMpEditor('mp_editor_set_content', { content }, 0);
+    return {
+      response,
+      mode: 'mp-editor-jsapi'
+    };
+  }
+
+  let setContentQueue = Promise.resolve();
+
+  function enqueueSetContent(content) {
+    const operation = setContentQueue.catch(() => {}).then(() => setContent(content));
+    setContentQueue = operation;
+    return operation;
+  }
+
+  async function waitForPendingSetContent() {
     try {
-      const response = await invokeMpEditor('mp_editor_set_content', { content });
-      return {
-        response,
-        mode: 'mp-editor-jsapi'
-      };
-    } catch (apiError) {
-      const fallback = fallbackSetContent(content);
-      fallback.apiError = asErrorPayload(apiError);
-      return fallback;
+      await setContentQueue;
+    } catch (_) {
+      // A confirmed write failure does not make later reads unsafe.
     }
   }
 
@@ -259,6 +269,7 @@
       }
 
       if (type === 'GET_CONTENT') {
+        await waitForPendingSetContent();
         const result = await getContent();
         postResponse(requestId, 'GET_CONTENT_RESULT', true, result);
         return;
@@ -266,7 +277,7 @@
 
       if (type === 'SET_CONTENT') {
         const html = payload && typeof payload.content === 'string' ? payload.content : '';
-        const result = await setContent(html);
+        const result = await enqueueSetContent(html);
         postResponse(requestId, 'SET_CONTENT_RESULT', true, result);
         return;
       }

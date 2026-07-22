@@ -2,15 +2,18 @@
   'use strict';
 
   const INLINE_ID = 'mpse-inline-panel';
-  const VERSION = 'v0.9.6';
+  const VERSION = 'v0.9.10';
   const TOOLBAR_BUTTON_ID = 'mpse-toolbar-button';
   const FLOATING_BUTTON_ID = 'mpse-floating-button';
   const bridgeClient = window.__MPSE_BRIDGE_CLIENT__;
   const injectBridge = bridgeClient && typeof bridgeClient.inject === 'function'
     ? bridgeClient.inject
     : () => false;
-  const requestBridge = bridgeClient && typeof bridgeClient.request === 'function'
-    ? bridgeClient.request
+  const readEditorContent = bridgeClient && typeof bridgeClient.readContent === 'function'
+    ? bridgeClient.readContent
+    : () => Promise.reject(new Error('Editor bridge client is unavailable'));
+  const writeEditorContent = bridgeClient && typeof bridgeClient.writeContent === 'function'
+    ? bridgeClient.writeContent
     : () => Promise.reject(new Error('扩展桥接客户端未加载，请刷新页面后重试'));
 
   let booted = false;
@@ -590,7 +593,7 @@
     showStatus('正在读取...');
 
     try {
-      const result = await requestBridge('GET_CONTENT');
+      const result = await readEditorContent();
       latestEditorMode = result.mode || 'unknown';
       lastLoadedHtml = typeof result.content === 'string' ? result.content : '';
       const visibleHtml = setEditorValue(textarea, lastLoadedHtml);
@@ -628,7 +631,7 @@
     showStatus('正在重新读取...');
 
     try {
-      const result = await requestBridge('GET_CONTENT');
+      const result = await readEditorContent();
       latestEditorMode = result.mode || 'unknown';
       lastLoadedHtml = typeof result.content === 'string' ? result.content : '';
       const visibleHtml = setEditorValue(textarea, lastLoadedHtml);
@@ -669,7 +672,7 @@
     showStatus('正在原样写回源码...');
 
     try {
-      const result = await requestBridge('SET_CONTENT', { content: html });
+      const result = await writeEditorContent(html);
       latestEditorMode = result.mode || latestEditorMode;
       lastLoadedHtml = html;
       markClean(html);

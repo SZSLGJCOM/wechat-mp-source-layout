@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const VERSION = 'v0.9.9';
+  const VERSION = 'v0.9.10';
   const MENU_ID = 'mpse-img2-menu';
   const PANEL_ID = 'mpse-img2-panel';
   const BOX_ID = 'mpse-img2-box';
@@ -10,7 +10,7 @@
   const HANDLE_CLASS = 'mpse-img2-handle';
   const CROP_ATTR = 'data-mpse-image-crop';
   const GEOMETRY_DRAG_THRESHOLD = 4;
-  const BOUND_FLAG = '__mpseImageToolsV094Bound__';
+  const BOUND_FLAG = '__mpseImageToolsBound__';
   const GENERIC_BOUND_ATTR = 'data-mpse-image-tools-bound';
   const VERSION_ATTR = 'data-mpse-image-tools-version';
   const bridgeClient = window.__MPSE_BRIDGE_CLIENT__;
@@ -18,8 +18,11 @@
   const injectBridge = bridgeClient && typeof bridgeClient.inject === 'function'
     ? bridgeClient.inject
     : () => false;
-  const requestBridge = bridgeClient && typeof bridgeClient.request === 'function'
-    ? bridgeClient.request
+  const readEditorContent = bridgeClient && typeof bridgeClient.readContent === 'function'
+    ? bridgeClient.readContent
+    : () => Promise.reject(new Error('扩展桥接客户端未加载，请刷新页面后重试'));
+  const mutateEditorContent = bridgeClient && typeof bridgeClient.mutateContent === 'function'
+    ? bridgeClient.mutateContent
     : () => Promise.reject(new Error('扩展桥接客户端未加载，请刷新页面后重试'));
 
   if (!imageGeometry) throw new Error('图片几何模块未加载，请刷新页面后重试');
@@ -36,6 +39,7 @@
     'mpseBrightness', 'mpseContrast', 'mpseSaturate', 'mpseGray', 'mpseRotate',
     'mpseShadowOn', 'mpseShadowX', 'mpseShadowY', 'mpseShadowBlur', 'mpseShadowSpread', 'mpseShadowOpacity', 'mpseShadowColor',
     'mpseBaseBoxShadow', 'mpseCircleOn', 'mpseCircleBase', 'mpseColorBase', 'mpseRotateBase', 'mpseFrameBase',
+    'mpseRadiusOn', 'mpseRadiusValue', 'mpseFrameOn',
     'mpseFeatherOn', 'mpseFeatherAmount', 'mpseFeatherBase',
     'mpseStrokeOn', 'mpseStrokeWidth', 'mpseStrokeColor', 'mpseStrokeOpacity', 'mpseStrokeBase',
     'mpseOpacityOn', 'mpseOpacityValue', 'mpseOpacityBase'
@@ -61,6 +65,13 @@
       props: ['opacity']
     }
   };
+  const FRAME_STYLE_PROPS = [
+    'border', 'border-top-width', 'border-right-width', 'border-bottom-width', 'border-left-width',
+    'border-top-style', 'border-right-style', 'border-bottom-style', 'border-left-style',
+    'border-top-color', 'border-right-color', 'border-bottom-color', 'border-left-color',
+    'padding', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left',
+    'background-color', 'border-radius', 'box-sizing'
+  ];
 
   const DEBUG = false;
 
@@ -81,7 +92,11 @@
     cropTransientHost: false,
     needsCommit: false,
     lastSnapshot: null,
+    pendingSnapshots: new Map(),
+    commitRetryCount: 0,
     positionFrame: 0,
+    pageObserver: null,
+    blockedByLayer: false,
     handleElements: [],
     gestureEpoch: 0,
     editRevision: 0,
@@ -97,9 +112,9 @@
 
   function isEditorLikePage() {
     if (!isMpHost()) return false;
-    if (/\/cgi-bin\/appmsg/.test(location.pathname)) return true;
-    if (document.querySelector('.edui-toolbar, .edui-editor, #js_editorArea, #ueditor_0, iframe[id*=ueditor], iframe[name*=ueditor], [contenteditable="true"]')) return true;
-    return false;
+    if (!/^\/cgi-bin\/appmsg(?:\/|$)/.test(location.pathname)) return false;
+    if (document.querySelector('.edui-toolbar, .edui-editor, #ueditor_0, iframe[id*=ueditor], iframe[name*=ueditor]')) return true;
+    return getAccessibleDocuments().some((doc) => Boolean(doc.querySelector('[contenteditable="true"], body[contenteditable="true"]')));
   }
 
   function escapeHtml(value) {
@@ -179,11 +194,13 @@
   }
 
   function readBorderWidth(image, fallback = 1) {
+    image = getAppearanceHost(image);
     if (!image || !image.style) return fallback;
     return parsePx(image.style.getPropertyValue('border-width') || image.style.getPropertyValue('border'), fallback);
   }
 
   function readBorderColor(image, fallback = '#e6e8eb') {
+    image = getAppearanceHost(image);
     if (!image || !image.style) return fallback;
     const direct = image.style.getPropertyValue('border-color');
     if (direct) return normalizeCssColorToHex(direct, fallback);
@@ -193,11 +210,13 @@
   }
 
   function readBackgroundColor(image, fallback = '#ffffff') {
+    image = getAppearanceHost(image);
     return normalizeCssColorToHex(image && image.style ? image.style.getPropertyValue('background-color') : '', fallback);
   }
 
   function readBoxShadow(image) {
-    const value = image && image.style ? image.style.getPropertyValue('box-shadow') : '';
+    const target = getAppearanceHost(image);
+    const value = target && target.style ? target.style.getPropertyValue('box-shadow') : '';
     const px = Array.from(String(value).matchAll(/(-?\d+(?:\.\d+)?)px/g)).map((m) => Number(m[1]));
     const color = String(value).match(/(rgba?\([^)]*\)|#[0-9a-f]{3,6})/i);
     return {
@@ -263,19 +282,18 @@
     const applied = new Set();
     if (!image || !image.style) return applied;
 
-    const radius = readStyleNumber(image, 'border-radius', 0);
+    const appearanceHost = getAppearanceHost(image);
+    const radius = readStyleNumber(appearanceHost, 'border-radius', 0);
     const width = image.style.getPropertyValue('width');
-    const top = readStyleNumber(image, 'margin-top', 0);
-    const bottom = readStyleNumber(image, 'margin-bottom', 0);
-    const shadow = image.style.getPropertyValue('box-shadow');
+    const cropLayout = getCropContainer(image) ? readCropLayout(image) : null;
+    const top = cropLayout ? parsePx(cropLayout.styles?.['margin-top']?.value, 0) : readStyleNumber(image, 'margin-top', 0);
+    const bottom = cropLayout ? parsePx(cropLayout.styles?.['margin-bottom']?.value, 0) : readStyleNumber(image, 'margin-bottom', 0);
+    const shadow = appearanceHost.style.getPropertyValue('box-shadow');
     const filter = image.style.getPropertyValue('filter');
     const transform = image.style.getPropertyValue('transform');
-    const border = image.style.getPropertyValue('border') || image.style.getPropertyValue('border-width');
-    const padding = readStyleNumber(image, 'padding', 0);
-    const bg = image.style.getPropertyValue('background-color');
     const objectFit = image.style.getPropertyValue('object-fit');
 
-    if (radius > 0 && !/999/.test(image.style.getPropertyValue('border-radius'))) applied.add('radius');
+    if (image.dataset.mpseRadiusOn === '1') applied.add('radius');
     if (width || hasNonEmptyStyle(image, 'max-width') || hasNonEmptyStyle(image, 'margin-left') || hasNonEmptyStyle(image, 'margin-right') || getCropContainer(image)) applied.add('size');
     if (top > 0 || bottom > 0) applied.add('spacing');
     if (image.dataset.mpseShadowOn === '1') applied.add('shadow');
@@ -286,7 +304,7 @@
     if (shadow && image.dataset.mpseShadowOn !== '1' && image.dataset.mpseGlowOn !== '1') applied.add('shadow');
     if (filter && !/^brightness\(100%\)\s+contrast\(100%\)\s+saturate\(100%\)$/i.test(filter.trim())) applied.add('color');
     if (readRotateAngle(image) !== 0) applied.add('rotate');
-    if (border || padding > 0 || bg) applied.add('frame');
+    if (image.dataset.mpseFrameOn === '1') applied.add('frame');
     if (getCaptionNode(image)) applied.add('caption');
     if (image.dataset.mpseCircleOn === '1' || ((radius >= 120 || /999/.test(image.style.getPropertyValue('border-radius')) || objectFit === 'cover') && hasNonEmptyStyle(image, 'height'))) applied.add('circle');
     return applied;
@@ -317,7 +335,7 @@
 
   function findEditableRoot(node) {
     if (!node || !node.closest) return null;
-    const direct = node.closest('[contenteditable="true"], body[contenteditable="true"], #js_editorArea, #js_content, .rich_media_content, .ProseMirror, .ql-editor');
+    const direct = node.closest('[contenteditable="true"], body[contenteditable="true"]');
     if (direct) return direct;
     const doc = node.ownerDocument;
     const frame = getFrameByDocument(doc);
@@ -346,7 +364,6 @@
       if (/ueditor|editor/i.test(text)) return true;
       if (frame.closest && frame.closest('.edui-editor-iframeholder, .edui-editor-body, .edui-editor')) return true;
     }
-    if (image.closest && image.closest('.edui-editor, .edui-editor-body, #js_editorArea, #js_content, .rich_media_content, [contenteditable="true"]')) return true;
     return false;
   }
 
@@ -372,6 +389,17 @@
     return image && image.getAttribute ? (image.getAttribute(name) || '') : '';
   }
 
+  function ensureImageEditId(image) {
+    let value = getAttr(image, 'data-mpse-image-id');
+    if (value) return value;
+    const random = globalThis.crypto?.randomUUID
+      ? globalThis.crypto.randomUUID()
+      : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    value = `img-${random}`;
+    image.setAttribute('data-mpse-image-id', value);
+    return value;
+  }
+
   function imageIndexInArticle(image) {
     const root = findEditableRoot(image);
     const list = root && root.querySelectorAll
@@ -381,9 +409,21 @@
     return idx >= 0 ? idx : 0;
   }
 
+  function editorScopeKey(image) {
+    const root = findEditableRoot(image);
+    if (!root) return '';
+    const frame = getFrameByDocument(image.ownerDocument);
+    const frameIndex = frame ? Array.from(document.querySelectorAll('iframe')).indexOf(frame) : -1;
+    const frameKey = frame ? (frame.id || frame.name || `iframe-${frameIndex}`) : 'top';
+    const rootKey = root.id || root.getAttribute('data-editor-id') || root.tagName.toLowerCase();
+    return `${frameKey}:${rootKey}`;
+  }
+
   function imageSignature(image) {
     return {
       index: imageIndexInArticle(image),
+      scopeKey: editorScopeKey(image),
+      editId: getAttr(image, 'data-mpse-image-id'),
       src: stableUrl(getAttr(image, 'src') || image.currentSrc || image.src),
       dataSrc: stableUrl(getAttr(image, 'data-src')),
       dataBackSrc: stableUrl(getAttr(image, 'data-backsrc')),
@@ -396,6 +436,24 @@
     };
   }
 
+  function imageIdentityKey(identity) {
+    if (!identity) return '';
+    const primary = identity.editId || identity.fileId || identity.dataSrc || identity.src || identity.dataBackSrc || identity.dataCropSrc
+      || `${identity.w || ''}:${identity.ratio || ''}:${identity.alt || ''}`;
+    const position = identity.editId ? 'stable' : (Number.isFinite(identity.index) ? identity.index : -1);
+    return `${identity.scopeKey || 'article'}:${position}:${primary}`;
+  }
+
+  function imageIdentitiesMatch(first, second) {
+    if (!first || !second) return false;
+    if (first.scopeKey && second.scopeKey && first.scopeKey !== second.scopeKey) return false;
+    if (first.editId && second.editId) return first.editId === second.editId;
+    if (first.index !== second.index) return false;
+    const keys = ['src', 'dataSrc', 'dataBackSrc', 'dataCropSrc', 'fileId'];
+    const comparable = keys.filter((key) => first[key] && second[key]);
+    return comparable.length === 0 || comparable.some((key) => first[key] === second[key]);
+  }
+
   function scoreImageByIdentity(candidate, identity) {
     if (!candidate || !identity) return 0;
     let score = 0;
@@ -403,11 +461,16 @@
     const dataSrc = stableUrl(candidate.getAttribute('data-src'));
     const dataBackSrc = stableUrl(candidate.getAttribute('data-backsrc'));
     const dataCropSrc = stableUrl(candidate.getAttribute('data-croporisrc'));
+    const editId = candidate.getAttribute('data-mpse-image-id') || '';
 
+    if (identity.editId && editId && identity.editId === editId) score += 5000;
     if (identity.dataSrc && dataSrc && identity.dataSrc === dataSrc) score += 1200;
     if (identity.src && src && identity.src === src) score += 900;
     if (identity.dataBackSrc && dataBackSrc && identity.dataBackSrc === dataBackSrc) score += 800;
     if (identity.dataCropSrc && dataCropSrc && identity.dataCropSrc === dataCropSrc) score += 700;
+    const identityUrls = [identity.src, identity.dataSrc, identity.dataBackSrc, identity.dataCropSrc].filter(Boolean);
+    const candidateUrls = [src, dataSrc, dataBackSrc, dataCropSrc].filter(Boolean);
+    if (identityUrls.some((url) => candidateUrls.includes(url))) score += 650;
     if (identity.fileId && (candidate.getAttribute('data-fileid') === identity.fileId || candidate.getAttribute('data-mediaid') === identity.fileId)) score += 600;
     if (identity.w && candidate.getAttribute('data-w') === identity.w) score += 50;
     if (identity.ratio && candidate.getAttribute('data-ratio') === identity.ratio) score += 50;
@@ -416,9 +479,24 @@
     return score;
   }
 
+  function identityHasPrimaryKey(identity) {
+    return Boolean(identity && (identity.editId || identity.src || identity.dataSrc || identity.dataBackSrc || identity.dataCropSrc || identity.fileId));
+  }
+
+  function exactIndexFallback(images, identity) {
+    if (!identity || identityHasPrimaryKey(identity) || !Number.isFinite(identity.index)) return null;
+    const candidate = images[identity.index];
+    return candidate && scoreImageByIdentity(candidate, identity) > 0 ? candidate : null;
+  }
+
   function locateImageInHtml(root, identity) {
     const images = Array.from(root.querySelectorAll('img'));
     if (!images.length) return null;
+    if (identity?.editId) {
+      const exact = images.find((image) => image.getAttribute('data-mpse-image-id') === identity.editId);
+      if (exact) return exact;
+      if (images.some((image) => image.hasAttribute('data-mpse-image-id'))) return null;
+    }
 
     let best = null;
     let bestScore = -1;
@@ -434,10 +512,8 @@
       }
     }
 
-    if (best && bestScore >= 50) return best;
-    if (Number.isFinite(identity && identity.index) && images[identity.index]) return images[identity.index];
-    if (images.length === 1) return images[0];
-    return best;
+    if (identityHasPrimaryKey(identity)) return best && bestScore >= 600 ? best : null;
+    return exactIndexFallback(images, identity);
   }
 
   function getTopRect(element) {
@@ -467,6 +543,11 @@
     const tolerance = 1;
     return inner.left >= outer.left - tolerance && inner.right <= outer.right + tolerance
       && inner.top >= outer.top - tolerance && inner.bottom <= outer.bottom + tolerance;
+  }
+
+  function rectsIntersect(first, second) {
+    return Boolean(first && second && first.right > second.left && first.left < second.right
+      && first.bottom > second.top && first.top < second.bottom);
   }
 
   function getViewportRect() {
@@ -650,6 +731,9 @@
     shield = document.createElement('div');
     shield.id = DRAG_SHIELD_ID;
     shield.setAttribute('aria-hidden', 'true');
+    shield.addEventListener('wheel', (event) => {
+      if (state.interaction) stopUiEvent(event);
+    }, { capture: true, passive: false });
     document.body.appendChild(shield);
     return shield;
   }
@@ -793,6 +877,17 @@
     }
   }
 
+  function transferInlineStyles(source, target, props) {
+    if (!source || !target) return;
+    for (const prop of props) {
+      const value = source.style.getPropertyValue(prop);
+      const priority = source.style.getPropertyPriority(prop);
+      if (value) target.style.setProperty(prop, value, priority);
+      else target.style.removeProperty(prop);
+      source.style.removeProperty(prop);
+    }
+  }
+
   function getVisualCarrier(image) {
     if (!image || !image.parentElement) return null;
     const parent = image.parentElement;
@@ -826,12 +921,21 @@
     if (!view || !element) return 'left';
     const style = view.getComputedStyle(element);
     const parentStyle = element.parentElement ? view.getComputedStyle(element.parentElement) : null;
+    const declaredLeft = element.style.getPropertyValue('margin-left');
+    const declaredRight = element.style.getPropertyValue('margin-right');
     if (style.float === 'right') return 'right';
-    if (style.marginLeft === 'auto' && style.marginRight === 'auto') return 'center';
-    if (style.marginLeft === 'auto') return 'right';
-    if (style.marginRight === 'auto') return 'left';
-    if (parentStyle && parentStyle.textAlign === 'center') return 'center';
-    if (parentStyle && parentStyle.textAlign === 'right') return 'right';
+    if (style.float === 'left') return 'left';
+    if (declaredLeft === 'auto' && declaredRight === 'auto') return 'center';
+    if (declaredLeft === 'auto') return 'right';
+    if (declaredRight === 'auto') return 'left';
+    const marginLeft = parseFloat(style.marginLeft || '0');
+    const marginRight = parseFloat(style.marginRight || '0');
+    if (style.display === 'block' && marginLeft > 1 && marginRight > 1 && Math.abs(marginLeft - marginRight) < 2) return 'center';
+    if (style.display === 'block' && marginLeft > 1 && marginRight <= 1) return 'right';
+    if (parentStyle && ['inline', 'inline-block'].includes(style.display)) {
+      if (parentStyle.textAlign === 'center') return 'center';
+      if (parentStyle.textAlign === 'right') return 'right';
+    }
     return 'left';
   }
 
@@ -839,13 +943,36 @@
     const view = image && image.ownerDocument && image.ownerDocument.defaultView;
     const computed = view && image ? view.getComputedStyle(image) : null;
     const computedDisplay = computed ? computed.display : 'block';
+    const alignment = detectHorizontalAlignment(image);
+    const props = [
+      'width', 'height', 'max-width', 'display', 'margin-left', 'margin-right',
+      'margin-top', 'margin-bottom', 'vertical-align', 'float', 'transform', 'transform-origin'
+    ];
+    const styles = captureInlineStyles(image, props);
+    const hostStyles = Object.fromEntries(Object.entries(styles).map(([key, entry]) => [key, { ...entry }]));
+    for (const property of ['margin-top', 'margin-bottom', 'vertical-align', 'float']) {
+      if (!hostStyles[property].value && computed) hostStyles[property] = { value: computed.getPropertyValue(property), priority: '' };
+    }
+    if (!hostStyles['margin-left'].value && !hostStyles['margin-right'].value) {
+      if (alignment === 'center') {
+        hostStyles['margin-left'] = { value: 'auto', priority: '' };
+        hostStyles['margin-right'] = { value: 'auto', priority: '' };
+      } else if (alignment === 'right') {
+        hostStyles['margin-left'] = { value: 'auto', priority: '' };
+        hostStyles['margin-right'] = { value: '0px', priority: '' };
+      } else if (computed) {
+        hostStyles['margin-left'] = { value: computed.marginLeft, priority: '' };
+        hostStyles['margin-right'] = { value: computed.marginRight, priority: '' };
+      }
+    }
     return {
-      alignment: detectHorizontalAlignment(image),
+      alignment,
       display: computedDisplay === 'inline' ? 'inline-block' : (computedDisplay === 'none' ? 'block' : computedDisplay),
-      styles: captureInlineStyles(image, [
-        'width', 'height', 'max-width', 'display', 'margin-left', 'margin-right',
-        'margin-top', 'margin-bottom', 'vertical-align', 'float'
-      ])
+      offsetX: 0,
+      offsetY: 0,
+      frameStyles: captureInlineStyles(image, FRAME_STYLE_PROPS),
+      hostStyles,
+      styles
     };
   }
 
@@ -854,22 +981,146 @@
     if (!host) return captureCropLayout(image);
     try {
       const layout = JSON.parse(host.dataset.mpseCropLayout || '{}');
-      if (layout && layout.styles && ['left', 'center', 'right'].includes(layout.alignment)) return layout;
+      if (layout && layout.styles && ['left', 'center', 'right'].includes(layout.alignment)) {
+        layout.offsetX = Number.isFinite(Number(layout.offsetX)) ? clamp(Number(layout.offsetX), -4, 4) : 0;
+        layout.offsetY = Number.isFinite(Number(layout.offsetY)) ? clamp(Number(layout.offsetY), -4, 4) : 0;
+        return layout;
+      }
     } catch (_) {
       // Invalid persisted layout metadata falls back to the current frame.
     }
     return {
       alignment: detectHorizontalAlignment(host),
       display: host.style.getPropertyValue('display') || 'block',
+      offsetX: 0,
+      offsetY: 0,
       styles: captureInlineStyles(host, [
         'width', 'height', 'max-width', 'display', 'margin-left', 'margin-right',
-        'margin-top', 'margin-bottom', 'vertical-align', 'float'
+        'margin-top', 'margin-bottom', 'vertical-align', 'float', 'transform', 'transform-origin'
       ])
     };
   }
 
-  function cropMarginTop(layout, offsetPercent) {
-    const entry = layout && layout.styles && layout.styles['margin-top'];
+  function writeCropLayout(image, layout) {
+    const host = getCropContainer(image);
+    if (!host || !layout) return;
+    host.dataset.mpseCropLayout = JSON.stringify(layout);
+  }
+
+  function readDecorationMetrics(element, baseWidth) {
+    const view = element?.ownerDocument?.defaultView;
+    const style = view && element ? view.getComputedStyle(element) : null;
+    const number = (property) => Math.max(0, parseFloat(style?.getPropertyValue(property) || '0') || 0);
+    const text = (property, fallback = '') => style?.getPropertyValue(property) || fallback;
+    return {
+      baseWidth: Math.max(0.01, Number(baseWidth) || 100),
+      paddingTop: number('padding-top'),
+      paddingRight: number('padding-right'),
+      paddingBottom: number('padding-bottom'),
+      paddingLeft: number('padding-left'),
+      borderTopWidth: number('border-top-width'),
+      borderRightWidth: number('border-right-width'),
+      borderBottomWidth: number('border-bottom-width'),
+      borderLeftWidth: number('border-left-width'),
+      borderTopStyle: text('border-top-style', 'none'),
+      borderRightStyle: text('border-right-style', 'none'),
+      borderBottomStyle: text('border-bottom-style', 'none'),
+      borderLeftStyle: text('border-left-style', 'none'),
+      borderTopColor: text('border-top-color', 'transparent'),
+      borderRightColor: text('border-right-color', 'transparent'),
+      borderBottomColor: text('border-bottom-color', 'transparent'),
+      borderLeftColor: text('border-left-color', 'transparent')
+    };
+  }
+
+  function applyCropDecorationScale(host, layout, baseWidth) {
+    if (!host || !layout) return;
+    if (!layout.decoration) layout.decoration = readDecorationMetrics(host, baseWidth);
+    const metrics = layout.decoration;
+    const factor = Math.max(0.01, baseWidth) / Math.max(0.01, Number(metrics.baseWidth) || baseWidth);
+    const scaled = (value) => `${(Math.max(0, Number(value) || 0) * factor).toFixed(3)}px`;
+    setStyles(host, {
+      'box-sizing': 'content-box',
+      'padding-top': scaled(metrics.paddingTop),
+      'padding-right': scaled(metrics.paddingRight),
+      'padding-bottom': scaled(metrics.paddingBottom),
+      'padding-left': scaled(metrics.paddingLeft),
+      'border-top-width': scaled(metrics.borderTopWidth),
+      'border-right-width': scaled(metrics.borderRightWidth),
+      'border-bottom-width': scaled(metrics.borderBottomWidth),
+      'border-left-width': scaled(metrics.borderLeftWidth),
+      'border-top-style': metrics.borderTopStyle,
+      'border-right-style': metrics.borderRightStyle,
+      'border-bottom-style': metrics.borderBottomStyle,
+      'border-left-style': metrics.borderLeftStyle,
+      'border-top-color': metrics.borderTopColor,
+      'border-right-color': metrics.borderRightColor,
+      'border-bottom-color': metrics.borderBottomColor,
+      'border-left-color': metrics.borderLeftColor
+    });
+  }
+
+  function refreshCropDecoration(image) {
+    const host = getCropContainer(image);
+    if (!host) return;
+    const layout = readCropLayout(image);
+    const baseWidth = readCropBaseWidth(image);
+    layout.decoration = readDecorationMetrics(host, baseWidth);
+    writeCropLayout(image, layout);
+  }
+
+  function getCropContentRect(image) {
+    const host = getCropContainer(image);
+    if (!host) return getTopRect(image);
+    const outer = getTopRect(host);
+    const local = host.getBoundingClientRect();
+    const style = host.ownerDocument.defaultView?.getComputedStyle(host);
+    const scaleX = outer.width / Math.max(1, local.width);
+    const scaleY = outer.height / Math.max(1, local.height);
+    const leftInset = (parseFloat(style?.borderLeftWidth || '0') + parseFloat(style?.paddingLeft || '0')) * scaleX;
+    const rightInset = (parseFloat(style?.borderRightWidth || '0') + parseFloat(style?.paddingRight || '0')) * scaleX;
+    const topInset = (parseFloat(style?.borderTopWidth || '0') + parseFloat(style?.paddingTop || '0')) * scaleY;
+    const bottomInset = (parseFloat(style?.borderBottomWidth || '0') + parseFloat(style?.paddingBottom || '0')) * scaleY;
+    const left = outer.left + leftInset;
+    const top = outer.top + topInset;
+    const width = Math.max(1, outer.width - leftInset - rightInset);
+    const height = Math.max(1, outer.height - topInset - bottomInset);
+    return { left, top, right: left + width, bottom: top + height, width, height };
+  }
+
+  function getCropDecorationSize(image) {
+    const host = getCropContainer(image);
+    const style = host?.ownerDocument?.defaultView?.getComputedStyle(host);
+    const number = (property) => Math.max(0, parseFloat(style?.getPropertyValue(property) || '0') || 0);
+    const left = number('padding-left') + number('border-left-width');
+    const right = number('padding-right') + number('border-right-width');
+    const top = number('padding-top') + number('border-top-width');
+    const bottom = number('padding-bottom') + number('border-bottom-width');
+    return { left, right, top, bottom, horizontal: left + right, vertical: top + bottom };
+  }
+
+  function transformAxisValue(percent, pixelAdjustment) {
+    const percentage = `${percent.toFixed(6)}%`;
+    if (Math.abs(pixelAdjustment) < 0.001) return percentage;
+    const sign = pixelAdjustment < 0 ? '-' : '+';
+    return `calc(${percentage} ${sign} ${Math.abs(pixelAdjustment).toFixed(3)}px)`;
+  }
+
+  function hasCropLayoutOffset(image) {
+    const layout = getCropContainer(image) ? readCropLayout(image) : null;
+    return Boolean(layout && (Math.abs(layout.offsetX) >= 0.0001 || Math.abs(layout.offsetY) >= 0.0001));
+  }
+
+  function setCropLayoutStyle(layout, property, value) {
+    if (!layout.styles) layout.styles = {};
+    layout.styles[property] = { value: String(value || ''), priority: value ? 'important' : '' };
+    if (!layout.hostStyles) layout.hostStyles = {};
+    layout.hostStyles[property] = { ...layout.styles[property] };
+  }
+
+  function cropOffsetMargin(layout, property, offsetPercent) {
+    const styles = layout && (layout.hostStyles || layout.styles);
+    const entry = styles && styles[property];
     const base = entry && String(entry.value || '').trim();
     if (Math.abs(offsetPercent) < 0.0001) return base || '';
     if (!base || /^0(?:[a-z%]+)?$/i.test(base) || base === 'auto') return `${offsetPercent.toFixed(5)}%`;
@@ -893,6 +1144,33 @@
     }
     const root = findEditableRoot(image);
     return root && root.getBoundingClientRect ? Math.max(1, root.getBoundingClientRect().width) : 1;
+  }
+
+  function getImageLayoutBounds(image) {
+    const host = getLayoutHost(image);
+    const view = host && host.ownerDocument && host.ownerDocument.defaultView;
+    let parent = host && host.parentElement;
+    while (parent && view) {
+      const style = view.getComputedStyle(parent);
+      if (style.display !== 'inline' && style.display !== 'contents') break;
+      parent = parent.parentElement;
+    }
+    if (!parent || !view) return null;
+    const localRect = parent.getBoundingClientRect();
+    const topRect = getTopRect(parent);
+    if (localRect.width < 1 || localRect.height < 1 || topRect.width < 1) return null;
+    const scaleX = topRect.width / localRect.width;
+    const scaleY = topRect.height / localRect.height;
+    const parentStyle = view.getComputedStyle(parent);
+    const paddingLeft = parseFloat(parentStyle.paddingLeft || '0');
+    const paddingRight = parseFloat(parentStyle.paddingRight || '0');
+    const paddingTop = parseFloat(parentStyle.paddingTop || '0');
+    const left = topRect.left + (parent.clientLeft + paddingLeft) * scaleX;
+    const right = topRect.left + (parent.clientLeft + parent.clientWidth - paddingRight) * scaleX;
+    let top = topRect.top + (parent.clientTop + paddingTop) * scaleY;
+    const previous = host.previousElementSibling;
+    if (previous) top = Math.max(top, getTopRect(previous).bottom);
+    return right > left ? { left, right, top, width: right - left } : null;
   }
 
   function readCropState(image) {
@@ -949,6 +1227,10 @@
     const baseWidth = readCropBaseWidth(image);
     const layout = readCropLayout(image);
     const { frame, media } = crop;
+    applyCropDecorationScale(host, layout, baseWidth);
+    writeCropLayout(image, layout);
+    const hostStyles = layout.hostStyles || layout.styles || {};
+    const decoration = getCropDecorationSize(image);
     host.dataset.mpseCropX = media.x.toFixed(6);
     host.dataset.mpseCropY = media.y.toFixed(6);
     host.dataset.mpseCropWidth = media.width.toFixed(6);
@@ -960,8 +1242,20 @@
     host.dataset.mpseCropAspect = crop.baseAspect.toFixed(6);
 
     const aspect = crop.baseAspect * frame.width / frame.height;
-    const transformX = imageGeometry.horizontalTransformPercent(frame, layout.alignment);
-    const topOffset = baseWidth * frame.y / crop.baseAspect;
+    const transformX = imageGeometry.horizontalTransformPercent(frame, layout.alignment)
+      + layout.offsetX / frame.width * 100;
+    const transformY = (frame.y + layout.offsetY) / frame.height * 100;
+    const flowOffset = baseWidth * (frame.y + layout.offsetY) / crop.baseAspect;
+    const marginTop = hostStyles['margin-top'];
+    const marginLeft = hostStyles['margin-left'];
+    const marginRight = hostStyles['margin-right'];
+    const verticalAlign = hostStyles['vertical-align'];
+    const floatValue = hostStyles.float;
+    const baseTransform = layout.styles?.transform?.value || '';
+    const baseTransformOrigin = layout.styles?.['transform-origin']?.value || 'center center';
+    const translation = Math.abs(transformX) < 0.0001 && Math.abs(transformY) < 0.0001
+      ? ''
+      : `translate3d(${transformAxisValue(transformX, -decoration.horizontal * transformX / 100)}, ${transformAxisValue(transformY, -decoration.vertical * transformY / 100)}, 0)`;
     setStyles(host, {
       width: `${(baseWidth * frame.width).toFixed(4)}%`,
       'max-width': '100%',
@@ -970,22 +1264,45 @@
       overflow: 'hidden',
       'aspect-ratio': aspect.toFixed(6),
       'line-height': '0',
-      'margin-top': cropMarginTop(layout, topOffset),
-      transform: Math.abs(transformX) < 0.0001 ? '' : `translate3d(${transformX.toFixed(6)}%, 0, 0)`,
+      'margin-left': marginLeft ? marginLeft.value : '',
+      'margin-right': marginRight ? marginRight.value : '',
+      'margin-top': marginTop ? marginTop.value : '',
+      'margin-bottom': cropOffsetMargin(layout, 'margin-bottom', flowOffset),
+      'vertical-align': verticalAlign ? verticalAlign.value : '',
+      float: floatValue ? floatValue.value : '',
+      transform: translation,
       'transform-origin': 'center center'
     });
+    const view = host.ownerDocument.defaultView;
+    const hostStyle = view ? view.getComputedStyle(host) : null;
+    const paddingLeft = parseFloat(hostStyle?.paddingLeft || '0');
+    const paddingRight = parseFloat(hostStyle?.paddingRight || '0');
+    const paddingTop = parseFloat(hostStyle?.paddingTop || '0');
+    const paddingBottom = parseFloat(hostStyle?.paddingBottom || '0');
+    const horizontalPadding = paddingLeft + paddingRight;
+    const verticalPadding = paddingTop + paddingBottom;
+    const leftPercent = -media.x / media.width * 100;
+    const topPercent = -media.y / media.height * 100;
+    const leftPixels = paddingLeft + media.x / media.width * horizontalPadding;
+    const topPixels = paddingTop + media.y / media.height * verticalPadding;
     setStyles(image, {
       position: 'absolute',
-      left: `${(-media.x / media.width * 100).toFixed(5)}%`,
-      top: `${(-media.y / media.height * 100).toFixed(5)}%`,
-      width: `${(100 / media.width).toFixed(5)}%`,
-      height: `${(100 / media.height).toFixed(5)}%`,
+      left: `calc(${leftPercent.toFixed(5)}% + ${leftPixels.toFixed(3)}px)`,
+      top: `calc(${topPercent.toFixed(5)}% + ${topPixels.toFixed(3)}px)`,
+      width: `calc(${(100 / media.width).toFixed(5)}% - ${(horizontalPadding / media.width).toFixed(3)}px)`,
+      height: `calc(${(100 / media.height).toFixed(5)}% - ${(verticalPadding / media.height).toFixed(3)}px)`,
       'max-width': 'none',
       display: 'block',
       'margin-left': '0',
       'margin-right': '0',
       'margin-top': '0',
-      'margin-bottom': '0'
+      'margin-bottom': '0',
+      border: '0',
+      padding: '0',
+      'background-color': 'transparent',
+      'box-sizing': 'border-box',
+      transform: baseTransform,
+      'transform-origin': baseTransformOrigin
     });
     return crop;
   }
@@ -996,26 +1313,36 @@
     if (!image || !image.parentNode) return { host: null, created: false };
 
     const rect = image.getBoundingClientRect();
+    const sourceMetrics = readDecorationMetrics(image, 100);
+    const horizontalDecoration = sourceMetrics.paddingLeft + sourceMetrics.paddingRight
+      + sourceMetrics.borderLeftWidth + sourceMetrics.borderRightWidth;
+    const verticalDecoration = sourceMetrics.paddingTop + sourceMetrics.paddingBottom
+      + sourceMetrics.borderTopWidth + sourceMetrics.borderBottomWidth;
+    const layoutWidth = Math.max(1, (image.offsetWidth || rect.width) - horizontalDecoration);
+    const layoutHeight = Math.max(1, (image.offsetHeight || rect.height) - verticalDecoration);
     const availableWidth = getAvailableImageWidth(image);
-    const baseAspect = Math.max(0.05, rect.width / Math.max(1, rect.height));
-    const baseWidth = clamp(rect.width / Math.max(1, availableWidth) * 100, 4, 100);
+    const baseAspect = Math.max(0.05, layoutWidth / Math.max(1, layoutHeight));
+    const baseWidth = clamp(layoutWidth / Math.max(1, availableWidth) * 100, 4, 100);
     const layout = captureCropLayout(image);
     layout.baseWidth = baseWidth;
-    layout.baseHeightPx = rect.height;
+    layout.baseHeightPx = layoutHeight;
+    layout.decoration = { ...sourceMetrics, baseWidth };
+    if (image.style.getPropertyValue('box-shadow')) captureBaseBoxShadow(image);
     const host = image.ownerDocument.createElement('span');
     host.setAttribute(CROP_ATTR, '1');
     host.dataset.mpseCropBaseWidth = baseWidth.toFixed(4);
     host.dataset.mpseCropLayout = JSON.stringify(layout);
-    restoreInlineStyles(host, layout.styles);
+    restoreInlineStyles(host, layout.hostStyles || layout.styles);
     host.style.removeProperty('height');
     image.parentNode.insertBefore(host, image);
     host.appendChild(image);
+    transferInlineStyles(image, host, FRAME_STYLE_PROPS);
+    applyCropDecorationScale(host, layout, baseWidth);
+    writeCropLayout(image, layout);
 
-    for (const prop of ['width', 'max-width', 'display', 'margin-left', 'margin-right', 'margin-top', 'margin-bottom', 'vertical-align', 'float', 'position', 'left', 'top', 'height']) {
+    for (const prop of ['width', 'max-width', 'display', 'margin-left', 'margin-right', 'margin-top', 'margin-bottom', 'vertical-align', 'float', 'position', 'left', 'top', 'height', 'transform', 'transform-origin']) {
       image.style.removeProperty(prop);
     }
-    const radius = image.style.getPropertyValue('border-radius');
-    if (radius) setStyle(host, 'border-radius', radius);
     writeCropState(image, {
       frame: { x: 0, y: 0, width: 1, height: 1 },
       media: { x: 0, y: 0, width: 1, height: 1 },
@@ -1031,6 +1358,10 @@
     const parent = host.parentNode;
     const baseWidth = readCropBaseWidth(image);
     const layout = readCropLayout(image);
+    const restoreOriginalFrame = Boolean(layout.frameStyles && !layout.frameChanged
+      && Number.isFinite(layout.baseWidth) && Math.abs(baseWidth - layout.baseWidth) < 0.01);
+    transferInlineStyles(host, image, FRAME_STYLE_PROPS);
+    if (restoreOriginalFrame) restoreInlineStyles(image, layout.frameStyles);
     for (const prop of ['position', 'left', 'top', 'height', 'max-width', 'display', 'margin-left', 'margin-right', 'margin-top', 'margin-bottom', 'width', 'vertical-align', 'float', 'translate', 'scale']) {
       image.style.removeProperty(prop);
     }
@@ -1045,13 +1376,25 @@
     parent.insertBefore(image, host);
     host.remove();
     renderAppearance(image);
+    if (image.dataset.mpseShadowOn !== '1' && image.dataset.mpseGlowOn !== '1') {
+      delete image.dataset.mpseBaseBoxShadow;
+    }
     return image;
   }
 
   function resetCrop() {
     const image = state.image;
     if (!image || !getCropContainer(image)) return;
-    state.image = unwrapCropContainer(image);
+    if (hasCropLayoutOffset(image)) {
+      const crop = readCropState(image);
+      writeCropState(image, {
+        frame: { x: 0, y: 0, width: 1, height: 1 },
+        media: { x: 0, y: 0, width: 1, height: 1 },
+        baseAspect: crop.baseAspect
+      });
+    } else {
+      state.image = unwrapCropContainer(image);
+    }
     state.cropMode = false;
     state.cropTransientHost = false;
     const box = document.getElementById(BOX_ID);
@@ -1115,6 +1458,33 @@
     return Boolean(interaction && matchesGeometryPointer(interaction, event));
   }
 
+  function deferGeometryFinish(event, forceCancel = false, closeSelection = false) {
+    const interaction = state.interaction;
+    if (!interaction || !state.commitInFlight || (state.image && state.image.isConnected)) return false;
+    const point = getTopClientPoint(event) || interaction.lastPoint;
+    if (point) {
+      interaction.lastPoint = point;
+      interaction.lastEvent = {
+        type: 'pointermove',
+        pointerId: interaction.pointerId,
+        clientX: point.x,
+        clientY: point.y,
+        target: document
+      };
+    }
+    interaction.pendingFinish = {
+      forceCancel: Boolean(interaction.pendingFinish?.forceCancel || forceCancel
+        || (event && (event.type === 'pointercancel' || event.type === 'lostpointercapture'))),
+      closeSelection: Boolean(interaction.pendingFinish?.closeSelection || closeSelection)
+    };
+    return true;
+  }
+
+  function finishOrDeferGeometry(event, forceCancel = false) {
+    if (deferGeometryFinish(event, forceCancel)) return true;
+    return finishGeometryGesture(event, forceCancel);
+  }
+
   function deferContentCommitForGesture() {
     if (!state.commitTimer) return;
     window.clearTimeout(state.commitTimer);
@@ -1154,9 +1524,9 @@
     if (!interaction || !image) return;
     interaction.previewTarget = getSelectionElement(image);
     interaction.targetPreviewStyles = captureInlineStyles(interaction.previewTarget, [
-      'scale', 'transform-origin', 'clip-path', 'overflow'
+      'transform', 'scale', 'transform-origin', 'clip-path', 'overflow'
     ]);
-    interaction.imagePreviewStyles = captureInlineStyles(image, ['translate']);
+    interaction.imagePreviewStyles = captureInlineStyles(image, ['transform', 'translate']);
   }
 
   function clearGeometryPreview(interaction, image = state.image) {
@@ -1172,34 +1542,63 @@
     positionHandles(rect);
   }
 
-  function resizePreviewRect(interaction, scale) {
-    const width = interaction.rect.width * scale;
-    const height = interaction.rect.height * scale;
-    const left = interaction.handle.includes('w') ? interaction.rect.right - width : interaction.rect.left;
-    const top = interaction.handle.includes('n') ? interaction.rect.bottom - height : interaction.rect.top;
-    return { left, top, right: left + width, bottom: top + height, width, height };
+  function applyCropLayoutOffset(image, desiredRect) {
+    const crop = readCropState(image);
+    const host = getCropContainer(image);
+    if (!crop || !host || !desiredRect) return;
+    const actualRect = getTopRect(host);
+    if (actualRect.width < 1 || actualRect.height < 1) return;
+    const layout = readCropLayout(image);
+    layout.offsetX = clamp(
+      layout.offsetX + (desiredRect.left - actualRect.left) * crop.frame.width / actualRect.width,
+      -4,
+      4
+    );
+    layout.offsetY = clamp(
+      layout.offsetY + (desiredRect.top - actualRect.top) * crop.frame.height / actualRect.height,
+      -4,
+      4
+    );
+    writeCropLayout(image, layout);
+    writeCropState(image, crop);
   }
 
   function applyGeometryPreview(interaction, preview, image) {
     const target = getSelectionElement(image);
     if (preview.kind === 'resize') {
-      const originX = interaction.handle.includes('w') ? 'right' : 'left';
-      const originY = interaction.handle.includes('n') ? 'bottom' : 'top';
-      setStyle(target, 'transform-origin', `${originX} ${originY}`);
-      setStyle(target, 'scale', String(preview.scale));
-      updateGeometryOverlayRect(resizePreviewRect(interaction, preview.scale));
+      const origin = interaction.resizeOrigin;
+      const baseTransform = interaction.targetPreviewStyles?.transform?.value || '';
+      setStyle(target, 'transform-origin', `${(origin.x * 100).toFixed(6)}% ${(origin.y * 100).toFixed(6)}%`);
+      setStyle(target, 'scale', '');
+      setStyle(target, 'transform', `${baseTransform} scale(${preview.scale})`.trim());
+      updateGeometryOverlayRect(imageGeometry.resizePreviewRect(interaction.rect, preview.scale, origin));
       return;
     }
 
     if (preview.kind === 'pan') {
       const deltaX = preview.crop.media.x - interaction.startCrop.media.x;
       const deltaY = preview.crop.media.y - interaction.startCrop.media.y;
-      setStyle(image, 'translate', `${(-deltaX * 100).toFixed(6)}% ${(-deltaY * 100).toFixed(6)}%`);
+      const baseTransform = interaction.imagePreviewStyles?.transform?.value || '';
+      setStyle(image, 'translate', '');
+      setStyle(image, 'transform', `translate3d(${(-deltaX * 100).toFixed(6)}%, ${(-deltaY * 100).toFixed(6)}%, 0) ${baseTransform}`.trim());
       updateGeometryOverlayRect(interaction.rect);
       return;
     }
 
-    const rect = imageGeometry.previewFrameRect(interaction.rect, interaction.startCrop.frame, preview.crop.frame);
+    const contentRect = imageGeometry.previewFrameRect(
+      interaction.contentRect || interaction.rect,
+      interaction.startCrop.frame,
+      preview.crop.frame
+    );
+    const startContent = interaction.contentRect || interaction.rect;
+    const rect = {
+      left: contentRect.left - (startContent.left - interaction.rect.left),
+      top: contentRect.top - (startContent.top - interaction.rect.top),
+      right: contentRect.right + (interaction.rect.right - startContent.right),
+      bottom: contentRect.bottom + (interaction.rect.bottom - startContent.bottom)
+    };
+    rect.width = rect.right - rect.left;
+    rect.height = rect.bottom - rect.top;
     const top = (rect.top - interaction.rect.top) / interaction.rect.height * 100;
     const right = (interaction.rect.right - rect.right) / interaction.rect.width * 100;
     const bottom = (interaction.rect.bottom - rect.bottom) / interaction.rect.height * 100;
@@ -1240,9 +1639,23 @@
     const verticalDelta = verticalDirection * (point.y - interaction.startY);
     const horizontalRatio = Math.abs(horizontalDelta / Math.max(1, interaction.rect.width));
     const verticalRatio = Math.abs(verticalDelta / Math.max(1, interaction.rect.height));
-    const scale = horizontalRatio >= verticalRatio
+    const requestedScale = horizontalRatio >= verticalRatio
       ? 1 + horizontalDelta / Math.max(1, interaction.rect.width)
       : 1 + verticalDelta / Math.max(1, interaction.rect.height);
+    const minimumScale = 4 / Math.max(4, interaction.startWidthPercent);
+    let maximumScale = 100 / Math.max(4, interaction.startWidthPercent);
+    const bounds = interaction.bounds;
+    if (bounds) {
+      const available = interaction.resizeOrigin.x < 0.5
+        ? bounds.right - interaction.rect.left
+        : interaction.rect.right - bounds.left;
+      maximumScale = Math.min(maximumScale, Math.max(minimumScale, available / Math.max(1, interaction.rect.width)));
+      if (interaction.resizeOrigin.y > 0.5) {
+        const verticalAvailable = interaction.rect.bottom - bounds.top;
+        maximumScale = Math.min(maximumScale, Math.max(minimumScale, verticalAvailable / Math.max(1, interaction.rect.height)));
+      }
+    }
+    const scale = clamp(requestedScale, minimumScale, maximumScale);
     const widthPercent = clamp(interaction.startWidthPercent * scale, 4, 100);
     return { widthPercent, scale: widthPercent / Math.max(0.01, interaction.startWidthPercent) };
   }
@@ -1263,6 +1676,26 @@
     interaction.createdCrop = result.created;
     interaction.startCrop = readCropState(image);
     interaction.rect = getTopRect(result.host);
+    interaction.contentRect = getCropContentRect(image);
+    interaction.startCropBaseWidth = readCropBaseWidth(image);
+    interaction.baseCanvasHeight = interaction.contentRect.height / Math.max(imageGeometry.MIN_FRACTION, interaction.startCrop.frame.height);
+    captureGeometryPreviewStyles(interaction, image);
+    return Boolean(interaction.startCrop);
+  }
+
+  function initializeResizeGesture(interaction, image) {
+    if (interaction.startCrop) return true;
+    const result = ensureCropContainer(image);
+    if (!result.host || !image.isConnected) return false;
+    interaction.createdCrop = result.created;
+    interaction.startCrop = readCropState(image);
+    interaction.rect = getTopRect(result.host);
+    interaction.contentRect = getCropContentRect(image);
+    interaction.startWidthPercent = readLayoutWidthPercent(image);
+    interaction.availableWidth = getAvailableImageWidth(image);
+    interaction.bounds = getImageLayoutBounds(image);
+    interaction.startCropBaseWidth = readCropBaseWidth(image);
+    interaction.baseCanvasHeight = interaction.contentRect.height / Math.max(imageGeometry.MIN_FRACTION, interaction.startCrop.frame.height);
     captureGeometryPreviewStyles(interaction, image);
     return Boolean(interaction.startCrop);
   }
@@ -1270,6 +1703,7 @@
   function beginGeometryGesture(handle, event, captureTarget) {
     const image = state.image;
     if (!image || !image.isConnected) return;
+    state.identity = imageSignature(image);
     const point = getTopClientPoint(event);
     if (!point) return;
     const isCorner = ['nw', 'ne', 'se', 'sw'].includes(handle);
@@ -1279,6 +1713,7 @@
     deferContentCommitForGesture();
     const interaction = {
       kind: isCorner ? 'resize' : 'crop',
+      identity: state.identity,
       handle,
       pointerId: event.pointerId,
       pointerTarget: captureTarget || event.target,
@@ -1286,11 +1721,13 @@
       startY: point.y,
       rect,
       startCrop,
+      contentRect: startCrop ? getCropContentRect(image) : rect,
       startCropBaseWidth: startCrop ? readCropBaseWidth(image) : null,
+      baseCanvasHeight: startCrop ? getCropContentRect(image).height / Math.max(imageGeometry.MIN_FRACTION, startCrop.frame.height) : null,
+      resizeOrigin: imageGeometry.cornerResizeOrigin(handle),
       startWidthPercent: readLayoutWidthPercent(image),
       availableWidth: getAvailableImageWidth(image),
-      fixedHeight: !startCrop && Boolean(target.style.getPropertyValue('height') && target.style.getPropertyValue('height') !== 'auto'),
-      sourceHeight: target.getBoundingClientRect().height,
+      bounds: getImageLayoutBounds(image),
       createdCrop: false,
       started: false,
       gestureEpoch: ++state.gestureEpoch,
@@ -1307,6 +1744,7 @@
   }
 
   function beginCropPan(image, event) {
+    state.identity = imageSignature(image);
     const result = ensureCropContainer(image);
     if (!result.host) return;
     const point = getTopClientPoint(event);
@@ -1315,12 +1753,14 @@
     deferContentCommitForGesture();
     const interaction = {
       kind: 'pan',
+      identity: state.identity,
       pointerId: event.pointerId,
       pointerTarget: image,
       startX: point.x,
       startY: point.y,
       rect,
       startCrop: readCropState(image),
+      contentRect: getCropContentRect(image),
       createdCrop: result.created,
       started: false,
       gestureEpoch: ++state.gestureEpoch,
@@ -1336,27 +1776,50 @@
     setInteractionCursor(interaction, 'grabbing');
   }
 
+  function getEdgeResizeConstraints(interaction) {
+    const baseWidth = Math.max(0.01, interaction.startCropBaseWidth || 100);
+    const minimumVisibleWidth = Math.max(4, 2400 / Math.max(1, interaction.availableWidth));
+    const decoration = getCropDecorationSize(state.image);
+    const maximumContentWidth = Math.max(24, interaction.availableWidth - decoration.horizontal) * 100
+      / Math.max(1, interaction.availableWidth);
+    return {
+      minWidth: minimumVisibleWidth / baseWidth,
+      maxWidth: maximumContentWidth / baseWidth,
+      minHeight: 24 / Math.max(24, interaction.baseCanvasHeight || interaction.rect.height),
+      maxHeight: 1,
+      horizontalMediaRatioFactor: 1,
+      verticalMediaRatioFactor: 1
+    };
+  }
+
   function updateGeometryGesture(event) {
     const interaction = state.interaction;
     const image = state.image;
-    if (!interaction || !image || !image.isConnected || !interactionOwnsEvent(interaction, event)) return;
+    if (!interaction || !interactionOwnsEvent(interaction, event)) return;
     const point = getTopClientPoint(event);
     if (!point) return;
     interaction.lastPoint = point;
+    interaction.lastEvent = event;
+    if (!image || !image.isConnected) return;
     let rect = interaction.rect;
     if (rect.width < 1 || rect.height < 1) return;
     if (!interaction.started) {
       const distance = Math.hypot(point.x - interaction.startX, point.y - interaction.startY);
       if (distance < GEOMETRY_DRAG_THRESHOLD) return;
       interaction.started = true;
+      if (interaction.kind === 'resize' && !initializeResizeGesture(interaction, image)) {
+        interaction.started = false;
+        return;
+      }
       if (interaction.kind === 'crop' && !initializeCropGesture(interaction, image)) {
         interaction.started = false;
         return;
       }
       rect = interaction.rect;
     }
-    const dx = (point.x - interaction.startX) / rect.width;
-    const dy = (point.y - interaction.startY) / rect.height;
+    const geometryRect = interaction.kind === 'resize' ? rect : (interaction.contentRect || rect);
+    const dx = (point.x - interaction.startX) / geometryRect.width;
+    const dy = (point.y - interaction.startY) / geometryRect.height;
 
     if (interaction.kind === 'resize') {
       interaction.preview = { kind: 'resize', ...getCornerResizePreview(interaction, point) };
@@ -1370,7 +1833,10 @@
       interaction.preview = { kind: 'pan', crop: imageGeometry.panMedia(start, dx, dy) };
     } else {
       const ratio = interaction.handle === 'e' || interaction.handle === 'w' ? dx : dy;
-      interaction.preview = { kind: 'crop', crop: imageGeometry.resizeFrameEdge(start, interaction.handle, ratio) };
+      interaction.preview = {
+        kind: 'crop',
+        crop: imageGeometry.resizeFrameEdge(start, interaction.handle, ratio, getEdgeResizeConstraints(interaction))
+      };
     }
     queueGeometryPreview(interaction);
   }
@@ -1379,10 +1845,12 @@
     const host = getCropContainer(image);
     const crop = readCropState(image);
     if (!host || !crop) return;
-    const rect = host.getBoundingClientRect();
+    const rect = getCropContentRect(image);
     if (rect.width < 1 || rect.height < 1) return;
-    const pointX = clamp((event.clientX - rect.left) / rect.width, 0, 1);
-    const pointY = clamp((event.clientY - rect.top) / rect.height, 0, 1);
+    const point = getTopClientPoint(event);
+    if (!point) return;
+    const pointX = clamp((point.x - rect.left) / rect.width, 0, 1);
+    const pointY = clamp((point.y - rect.top) / rect.height, 0, 1);
     const scale = event.deltaY < 0 ? 0.9 : 1.1;
     writeCropState(image, imageGeometry.zoomMedia(crop, scale, pointX, pointY));
     markChanged(image, 'crop-zoom');
@@ -1416,16 +1884,16 @@
     releasePointer(interaction.pointerTarget, interaction.pointerId);
     if (canceled) {
       state.image = restoreGeometryGesture(interaction, image);
+      if (state.needsCommit) scheduleContentCommit('gesture-cancel');
       schedulePositionTools();
       return true;
     }
     const changed = hasGeometryChanged(interaction, preview);
     if (changed && image && image.isConnected) {
       if (interaction.kind === 'resize') {
+        const desiredRect = imageGeometry.resizePreviewRect(interaction.rect, preview.scale, interaction.resizeOrigin);
         setLayoutWidthPercent(image, preview.widthPercent, interaction.availableWidth);
-        if (interaction.fixedHeight && !getCropContainer(image)) {
-          setStyle(image, 'height', `${(interaction.sourceHeight * preview.scale).toFixed(3)}px`);
-        }
+        applyCropLayoutOffset(image, desiredRect);
       } else {
         writeCropState(image, preview.crop);
       }
@@ -1463,11 +1931,12 @@
 
   function exitCropMode() {
     const image = state.image;
-    const shouldUnwrap = state.cropTransientHost && !state.needsCommit && image
-      && getCropContainer(image) && !hasCropAdjustment(image);
+    const shouldUnwrap = state.cropTransientHost && image
+      && getCropContainer(image) && !hasCropAdjustment(image) && !hasCropLayoutOffset(image);
+    const refreshSnapshot = Boolean(shouldUnwrap && state.lastSnapshot && state.lastSnapshot.cropHtml);
     if (shouldUnwrap) {
       state.image = unwrapCropContainer(image);
-      if (hasAppearanceEffects(state.image)) markChanged(state.image, 'crop-exit');
+      if (refreshSnapshot) markChanged(state.image, 'crop-exit');
     }
     state.cropMode = false;
     state.cropTransientHost = false;
@@ -1518,7 +1987,8 @@
 
   function captureBaseBoxShadow(image) {
     if (!image || image.dataset.mpseBaseBoxShadow !== undefined) return;
-    image.dataset.mpseBaseBoxShadow = image.style.getPropertyValue('box-shadow') || '';
+    const target = getAppearanceHost(image);
+    image.dataset.mpseBaseBoxShadow = target.style.getPropertyValue('box-shadow') || '';
   }
 
   function rebuildManagedBoxShadow(image) {
@@ -1549,7 +2019,17 @@
       shadows.push(`0 0 ${secondBlur}px ${Math.max(0, Math.round(spread / 2))}px ${rgba2}`);
     }
 
-    setStyle(image, 'box-shadow', shadows.join(', '));
+    const target = getAppearanceHost(image);
+    if (target !== image) setStyle(image, 'box-shadow', '');
+    setStyle(target, 'box-shadow', shadows.join(', '));
+  }
+
+  function restoreBaseBoxShadow(image) {
+    if (!image) return;
+    const target = getAppearanceHost(image);
+    if (target !== image) setStyle(image, 'box-shadow', '');
+    setStyle(target, 'box-shadow', image.dataset.mpseBaseBoxShadow || '');
+    delete image.dataset.mpseBaseBoxShadow;
   }
 
   function captureCircleBase(image) {
@@ -1609,6 +2089,32 @@
     delete image.dataset[key];
   }
 
+  function captureCropTransformBase(image, layout) {
+    if (image.dataset.mpseRotateBase !== undefined) return;
+    image.dataset.mpseRotateBase = JSON.stringify({
+      transform: layout.styles?.transform || { value: '', priority: '' },
+      'transform-origin': layout.styles?.['transform-origin'] || { value: '', priority: '' }
+    });
+  }
+
+  function restoreCropTransformBase(image) {
+    const crop = readCropState(image);
+    if (!crop) return false;
+    const layout = readCropLayout(image);
+    try {
+      const base = JSON.parse(image.dataset.mpseRotateBase || '{}');
+      layout.styles.transform = base.transform || { value: '', priority: '' };
+      layout.styles['transform-origin'] = base['transform-origin'] || { value: '', priority: '' };
+    } catch (_) {
+      layout.styles.transform = { value: '', priority: '' };
+      layout.styles['transform-origin'] = { value: '', priority: '' };
+    }
+    delete image.dataset.mpseRotateBase;
+    writeCropLayout(image, layout);
+    writeCropState(image, crop);
+    return true;
+  }
+
   function appearanceConfig(effect) {
     return APPEARANCE_EFFECTS[effect] || null;
   }
@@ -1616,10 +2122,6 @@
   function isAppearanceEnabled(image, effect) {
     const config = appearanceConfig(effect);
     return Boolean(config && image && image.dataset[config.activeKey] === '1');
-  }
-
-  function hasAppearanceEffects(image) {
-    return ['feather', 'stroke', 'opacity'].some((effect) => isAppearanceEnabled(image, effect));
   }
 
   function clearAppearanceProperties(target, props) {
@@ -1669,6 +2171,9 @@
         applyStyleBase(image, config.baseKey, config.props, image);
       }
     }
+    if (image.dataset.mpseBaseBoxShadow !== undefined
+      || image.dataset.mpseShadowOn === '1'
+      || image.dataset.mpseGlowOn === '1') rebuildManagedBoxShadow(image);
   }
 
   function clearAppearanceEffect(image, effect) {
@@ -1792,20 +2297,21 @@
 
   function buildPanelBody(effect, image) {
     const layoutHost = getLayoutHost(image);
-    const radius = readStyleNumber(image, 'border-radius', 12);
+    const cropLayout = getCropContainer(image) ? readCropLayout(image) : null;
+    const radius = image.dataset.mpseRadiusOn === '1' ? getDataNumber(image, 'mpseRadiusValue', 12) : 12;
     const layoutRect = layoutHost.getBoundingClientRect();
     const width = parsePercent(layoutHost.style.getPropertyValue('width'), clamp(layoutRect.width / Math.max(1, getAvailableImageWidth(image)) * 100, 4, 100));
-    const top = readStyleNumber(layoutHost, 'margin-top', 0);
-    const bottom = readStyleNumber(layoutHost, 'margin-bottom', 0);
+    const top = cropLayout ? parsePx(cropLayout.styles?.['margin-top']?.value, 0) : readStyleNumber(layoutHost, 'margin-top', 0);
+    const bottom = cropLayout ? parsePx(cropLayout.styles?.['margin-bottom']?.value, 0) : readStyleNumber(layoutHost, 'margin-bottom', 0);
     const shadowDefaults = readBoxShadow(image);
     const colorDefaults = readFilterValues(image);
 
     if (effect === 'radius') return range('圆角半径', 'radius', 0, 80, 1, radius, 'px');
     if (effect === 'size') {
-      let align = 'center';
-      if (layoutHost.style.getPropertyValue('margin-left') === '0px' || layoutHost.style.getPropertyValue('margin-left') === '0') align = 'left';
-      if (layoutHost.style.getPropertyValue('margin-right') === '0px' || layoutHost.style.getPropertyValue('margin-right') === '0') align = 'right';
-      const cropAction = getCropContainer(image)
+      let align = cropLayout?.alignment || 'center';
+      if (!cropLayout && (layoutHost.style.getPropertyValue('margin-left') === '0px' || layoutHost.style.getPropertyValue('margin-left') === '0')) align = 'left';
+      if (!cropLayout && (layoutHost.style.getPropertyValue('margin-right') === '0px' || layoutHost.style.getPropertyValue('margin-right') === '0')) align = 'right';
+      const cropAction = hasCropAdjustment(image)
         ? '<button type="button" class="mpse-img2-reset-crop" data-reset-crop>恢复裁切</button>'
         : '';
       return `${range('宽度', 'width', 10, 100, 1, width, '%')}${select('对齐', 'align', align)}${cropAction}`;
@@ -1945,6 +2451,13 @@
 
     if (effect === 'radius') {
       const r = clamp(values.radius, 0, 80);
+      if (r > 0) {
+        image.dataset.mpseRadiusOn = '1';
+        image.dataset.mpseRadiusValue = String(r);
+      } else {
+        delete image.dataset.mpseRadiusOn;
+        delete image.dataset.mpseRadiusValue;
+      }
       setStyles(image, { 'border-radius': `${r}px`, overflow: r > 0 ? 'hidden' : '', 'vertical-align': 'middle' });
       setCarrierStyles(image, getCropContainer(image)
         ? { 'border-radius': `${r}px`, overflow: 'hidden' }
@@ -1954,18 +2467,43 @@
     if (effect === 'size') {
       const width = clamp(values.width, 10, 100);
       const align = values.align || 'center';
+      const crop = readCropState(image);
+      if (crop) {
+        const layout = readCropLayout(image);
+        layout.alignment = align;
+        layout.display = 'block';
+        layout.offsetX = imageGeometry.alignedFrameOffset(crop.frame, align);
+        setCropLayoutStyle(layout, 'display', 'block');
+        setCropLayoutStyle(layout, 'margin-left', align === 'left' ? '0' : 'auto');
+        setCropLayoutStyle(layout, 'margin-right', align === 'right' ? '0' : 'auto');
+        writeCropLayout(image, layout);
+      }
       setLayoutWidthPercent(image, width);
-      setStyles(layoutHost, { 'max-width': '100%', display: 'block' });
-      if (!getCropContainer(image)) setStyle(image, 'height', 'auto');
-      if (align === 'left') setStyles(layoutHost, { 'margin-left': '0', 'margin-right': 'auto' });
-      if (align === 'center') setStyles(layoutHost, { 'margin-left': 'auto', 'margin-right': 'auto' });
-      if (align === 'right') setStyles(layoutHost, { 'margin-left': 'auto', 'margin-right': '0' });
+      if (crop) writeCropState(image, crop);
+      else {
+        setStyles(layoutHost, { 'max-width': '100%', display: 'block' });
+        setStyle(image, 'height', 'auto');
+        if (align === 'left') setStyles(layoutHost, { 'margin-left': '0', 'margin-right': 'auto' });
+        if (align === 'center') setStyles(layoutHost, { 'margin-left': 'auto', 'margin-right': 'auto' });
+        if (align === 'right') setStyles(layoutHost, { 'margin-left': 'auto', 'margin-right': '0' });
+      }
       const block = layoutHost.closest && layoutHost.closest('p,section,div,figure');
       if (block) setStyle(block, 'text-align', align);
     }
 
     if (effect === 'spacing') {
-      setStyles(layoutHost, { display: 'block', 'margin-top': `${clamp(values.top, 0, 120)}px`, 'margin-bottom': `${clamp(values.bottom, 0, 120)}px` });
+      const crop = readCropState(image);
+      if (crop) {
+        const layout = readCropLayout(image);
+        layout.display = 'block';
+        setCropLayoutStyle(layout, 'display', 'block');
+        setCropLayoutStyle(layout, 'margin-top', `${clamp(values.top, 0, 120)}px`);
+        setCropLayoutStyle(layout, 'margin-bottom', `${clamp(values.bottom, 0, 120)}px`);
+        writeCropLayout(image, layout);
+        writeCropState(image, crop);
+      } else {
+        setStyles(layoutHost, { display: 'block', 'margin-top': `${clamp(values.top, 0, 120)}px`, 'margin-bottom': `${clamp(values.bottom, 0, 120)}px` });
+      }
     }
 
     if (effect === 'shadow') {
@@ -2003,21 +2541,41 @@
 
     if (effect === 'rotate') {
       const angle = clamp(values.angle, -180, 180);
-      captureStyleBase(image, 'mpseRotateBase', ['transform', 'transform-origin']);
       image.dataset.mpseRotate = String(angle);
-      setStyles(image, { transform: `rotate(${angle}deg)`, 'transform-origin': 'center center' });
+      const crop = readCropState(image);
+      if (crop) {
+        const layout = readCropLayout(image);
+        captureCropTransformBase(image, layout);
+        layout.styles.transform = { value: `rotate(${angle}deg)`, priority: 'important' };
+        layout.styles['transform-origin'] = { value: 'center center', priority: 'important' };
+        writeCropLayout(image, layout);
+        writeCropState(image, crop);
+      } else {
+        captureStyleBase(image, 'mpseRotateBase', ['transform', 'transform-origin']);
+        setStyles(image, { transform: `rotate(${angle}deg)`, 'transform-origin': 'center center' });
+      }
     }
 
     if (effect === 'frame') {
       const borderWidth = clamp(values.borderWidth, 0, 20);
-      captureStyleBase(image, 'mpseFrameBase', ['border', 'padding', 'background-color', 'border-radius', 'box-sizing']);
-      setStyles(image, {
+      const target = getAppearanceHost(image);
+      image.dataset.mpseFrameOn = '1';
+      captureStyleBase(image, 'mpseFrameBase', FRAME_STYLE_PROPS, target);
+      if (target !== image) clearAppearanceProperties(image, FRAME_STYLE_PROPS);
+      setStyles(target, {
         border: borderWidth > 0 ? `${borderWidth}px solid ${values.borderColor || '#e6e8eb'}` : '',
         padding: `${clamp(values.padding, 0, 40)}px`,
         'background-color': values.backgroundColor || '#ffffff',
         'border-radius': `${clamp(values.radius, 0, 80)}px`,
-        'box-sizing': 'border-box'
+        'box-sizing': getCropContainer(image) ? 'content-box' : 'border-box'
       });
+      if (getCropContainer(image)) {
+        const layout = readCropLayout(image);
+        layout.frameChanged = true;
+        writeCropLayout(image, layout);
+        refreshCropDecoration(image);
+        writeCropState(image, readCropState(image));
+      }
     }
 
     if (effect === 'caption') updateCaption(image, values);
@@ -2042,21 +2600,31 @@
     if (!image || !image.isConnected || effect === 'size') return;
 
     if (effect === 'radius') {
+      delete image.dataset.mpseRadiusOn;
+      delete image.dataset.mpseRadiusValue;
       setStyles(image, { 'border-radius': '', overflow: '', 'vertical-align': '' });
       setCarrierStyles(image, getCropContainer(image)
         ? { 'border-radius': '' }
         : { 'border-radius': '', overflow: '' });
     }
     if (effect === 'spacing') {
-      setStyles(getLayoutHost(image), { 'margin-top': '', 'margin-bottom': '' });
+      const crop = readCropState(image);
+      if (crop) {
+        const layout = readCropLayout(image);
+        setCropLayoutStyle(layout, 'margin-top', '');
+        setCropLayoutStyle(layout, 'margin-bottom', '');
+        writeCropLayout(image, layout);
+        writeCropState(image, crop);
+      } else {
+        setStyles(getLayoutHost(image), { 'margin-top': '', 'margin-bottom': '' });
+      }
     }
     if (effect === 'shadow') {
       for (const key of ['mpseShadowOn', 'mpseShadowX', 'mpseShadowY', 'mpseShadowBlur', 'mpseShadowSpread', 'mpseShadowOpacity', 'mpseShadowColor']) delete image.dataset[key];
       if (image.dataset.mpseGlowOn === '1') {
         rebuildManagedBoxShadow(image);
       } else {
-        setStyle(image, 'box-shadow', image.dataset.mpseBaseBoxShadow || '');
-        delete image.dataset.mpseBaseBoxShadow;
+        restoreBaseBoxShadow(image);
       }
     }
     if (effect === 'glow') {
@@ -2064,8 +2632,7 @@
       if (image.dataset.mpseShadowOn === '1') {
         rebuildManagedBoxShadow(image);
       } else {
-        setStyle(image, 'box-shadow', image.dataset.mpseBaseBoxShadow || '');
-        delete image.dataset.mpseBaseBoxShadow;
+        restoreBaseBoxShadow(image);
       }
     }
     if (appearanceConfig(effect)) clearAppearanceEffect(image, effect);
@@ -2075,10 +2642,21 @@
     }
     if (effect === 'rotate') {
       delete image.dataset.mpseRotate;
-      restoreStyleBase(image, 'mpseRotateBase', ['transform', 'transform-origin']);
+      if (!restoreCropTransformBase(image)) {
+        restoreStyleBase(image, 'mpseRotateBase', ['transform', 'transform-origin']);
+      }
     }
     if (effect === 'frame') {
-      restoreStyleBase(image, 'mpseFrameBase', ['border', 'padding', 'background-color', 'border-radius', 'box-sizing']);
+      delete image.dataset.mpseFrameOn;
+      restoreStyleBase(image, 'mpseFrameBase', FRAME_STYLE_PROPS, getAppearanceHost(image));
+      if (getCropContainer(image)) {
+        setStyle(getCropContainer(image), 'box-sizing', 'content-box');
+        const layout = readCropLayout(image);
+        layout.frameChanged = true;
+        writeCropLayout(image, layout);
+        refreshCropDecoration(image);
+        writeCropState(image, readCropState(image));
+      }
     }
     if (effect === 'caption') {
       const caption = getCaptionNode(image);
@@ -2129,15 +2707,16 @@
     positionTools();
   }
 
-  function snapshotCurrentImage() {
-    const image = state.image;
+  function snapshotCurrentImage(image = state.image) {
     if (!image || !image.isConnected) return null;
+    const identity = imageSignature(image);
+    if (image === state.image) state.identity = identity;
     const cropHost = getCropContainer(image);
     const carrier = cropHost ? null : getVisualCarrier(image);
     const block = image.closest && image.closest('p,section,div,figure');
     const caption = getCaptionNode(image);
     return {
-      identity: state.identity || imageSignature(image),
+      identity,
       imgStyle: image.getAttribute('style') || '',
       imgData: MANAGED_DATA_KEYS.reduce((acc, key) => {
         if (image.dataset && image.dataset[key] !== undefined) acc[key] = image.dataset[key];
@@ -2153,12 +2732,14 @@
 
   function markChanged(image, reason, schedule = true) {
     if (!image || !image.ownerDocument) return;
+    ensureImageEditId(image);
     image.setAttribute('data-mpse-image-edited', '1');
-    const snapshot = snapshotCurrentImage();
+    const snapshot = snapshotCurrentImage(image);
     if (!snapshot) return;
     snapshot.revision = ++state.editRevision;
     snapshot.gestureEpoch = state.gestureEpoch;
     state.lastSnapshot = snapshot;
+    state.pendingSnapshots.set(imageIdentityKey(snapshot.identity), snapshot);
     state.needsCommit = true;
 
     if (DEBUG) console.info('[公众号源码排版助手] image style applied', reason || '', image.getAttribute('style') || '');
@@ -2199,7 +2780,11 @@
     const gestureEpoch = state.gestureEpoch;
     state.reacquireTimer = window.setTimeout(() => {
       state.reacquireTimer = null;
-      if (state.selectionRevision !== selectionRevision || state.gestureEpoch !== gestureEpoch || state.isDragging) return;
+      if (state.selectionRevision !== selectionRevision || state.gestureEpoch !== gestureEpoch) return;
+      if (state.isDragging) {
+        scheduleSelectedImageReacquire(identity, { ...options, delay: 120 });
+        return;
+      }
       if (options.snapshot && state.lastSnapshot !== options.snapshot) return;
       if (Number.isFinite(options.seq) && state.commitSeq !== options.seq) return;
       reacquireSelectedImage(identity);
@@ -2242,21 +2827,12 @@
     return replacementImage;
   }
 
-  function applySnapshotToHtml(content, snapshot) {
-    if (!snapshot || !snapshot.identity) return { html: content, changed: false, reason: 'no-snapshot' };
-    const parser = new DOMParser();
-    const doc = parser.parseFromString(`<div id="mpse-root">${content || ''}</div>`, 'text/html');
-    const root = doc.getElementById('mpse-root');
-    if (!root) return { html: content, changed: false, reason: 'parse-failed' };
-
-    let target = locateImageInHtml(root, snapshot.identity);
-    if (!target) return { html: content, changed: false, reason: 'image-not-found' };
-
+  function applySnapshotToTarget(target, root, snapshot) {
     target = applyCropSnapshot(target, root, snapshot);
-
     if (snapshot.imgStyle) target.setAttribute('style', snapshot.imgStyle);
     else target.removeAttribute('style');
     target.setAttribute('data-mpse-image-edited', '1');
+    if (snapshot.identity.editId) target.setAttribute('data-mpse-image-id', snapshot.identity.editId);
     copyManagedData(snapshot, target);
 
     const carrier = snapshot.cropHtml ? null : target.parentElement;
@@ -2269,9 +2845,36 @@
 
     const block = target.closest('p,section,div,figure');
     if (block && snapshot.blockStyle) block.setAttribute('style', snapshot.blockStyle);
-
     replaceOrRemoveCaption(target, root, snapshot);
+    return target;
+  }
+
+  function applySnapshotToHtml(content, snapshot) {
+    if (!snapshot || !snapshot.identity) return { html: content, changed: false, reason: 'no-snapshot' };
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(`<div id="mpse-root">${content || ''}</div>`, 'text/html');
+    const root = doc.getElementById('mpse-root');
+    if (!root) return { html: content, changed: false, reason: 'parse-failed' };
+
+    let target = locateImageInHtml(root, snapshot.identity);
+    if (!target) return { html: content, changed: false, reason: 'image-not-found' };
+
+    applySnapshotToTarget(target, root, snapshot);
     return { html: root.innerHTML, changed: true, reason: 'ok' };
+  }
+
+  function restoreLatestSnapshotInEditor(snapshot) {
+    if (!snapshot || !snapshot.identity) return null;
+    const target = findImageByIdentity(snapshot.identity);
+    const root = target && (findEditableRoot(target) || target.ownerDocument.body);
+    return target && root ? applySnapshotToTarget(target, root, snapshot) : null;
+  }
+
+  function recoverDisconnectedInteraction() {
+    if (!state.interaction || (state.image && state.image.isConnected)) return;
+    if (!rebaseInteractionAfterEditorWrite(state.identity || state.lastSnapshot?.identity)) {
+      finishGeometryGesture(undefined, true);
+    }
   }
 
   function cropWasPersisted(content, identity) {
@@ -2291,11 +2894,41 @@
       && Boolean(target.style.getPropertyValue('height'));
   }
 
-  function commitMatchesCurrentEdit(snapshot) {
-    return Boolean(snapshot && !state.isDragging && !state.interaction
-      && state.lastSnapshot === snapshot
-      && state.editRevision === snapshot.revision
-      && state.gestureEpoch === snapshot.gestureEpoch);
+  function pendingSnapshotBatch() {
+    return Array.from(state.pendingSnapshots.entries())
+      .map(([key, snapshot]) => ({ key, snapshot }))
+      .sort((first, second) => first.snapshot.revision - second.snapshot.revision);
+  }
+
+  function commitBatchIsCurrent(batch) {
+    return Boolean(batch.length && !state.isDragging && !state.interaction
+      && state.pendingSnapshots.size === batch.length
+      && batch.every(({ key, snapshot }) => state.pendingSnapshots.get(key) === snapshot));
+  }
+
+  function applySnapshotBatch(content, batch) {
+    let html = content;
+    for (const { key, snapshot } of batch) {
+      const result = applySnapshotToHtml(html, snapshot);
+      if (!result.changed) return { ...result, html, failedKey: key, failedSnapshot: snapshot };
+      html = result.html;
+    }
+    return { html, changed: true, reason: 'ok' };
+  }
+
+  function clearCommittedSnapshots(batch) {
+    for (const { key, snapshot } of batch) {
+      if (state.pendingSnapshots.get(key) === snapshot) state.pendingSnapshots.delete(key);
+    }
+    state.needsCommit = state.pendingSnapshots.size > 0;
+  }
+
+  function restorePendingSnapshotsInEditor() {
+    let restored = null;
+    for (const { snapshot } of pendingSnapshotBatch()) {
+      restored = restoreLatestSnapshotInEditor(snapshot) || restored;
+    }
+    return restored;
   }
 
   async function commitSnapshotToEditor(reason) {
@@ -2304,76 +2937,109 @@
       state.queuedCommit = true;
       return;
     }
-    if (!state.needsCommit || !state.lastSnapshot) return;
-    const snapshot = state.lastSnapshot;
-    state.needsCommit = false;
+    const batch = pendingSnapshotBatch();
+    if (!state.needsCommit || !batch.length) return;
     const seq = ++state.commitSeq;
     state.commitInFlight = true;
-    state.commitPhase = 'get';
+    state.commitPhase = 'queued';
     state.pendingCommitReason = '';
     let failed = false;
+    let allowRetry = true;
     setBadgeText('同步中…');
 
     try {
-      const current = await requestBridge('GET_CONTENT', {}, 15000);
-      if (!commitMatchesCurrentEdit(snapshot)) {
-        state.needsCommit = true;
-        return;
-      }
-      const content = typeof current.content === 'string' ? current.content : '';
-      const result = applySnapshotToHtml(content, snapshot);
+      const transaction = await mutateEditorContent((current) => {
+        state.commitPhase = 'get';
+        if (!commitBatchIsCurrent(batch)) return { changed: false, reason: 'stale-batch' };
+        const content = typeof current.content === 'string' ? current.content : '';
+        const mutation = applySnapshotBatch(content, batch);
+        if (mutation.changed) state.commitPhase = 'set';
+        return mutation;
+      }, 15000);
+      const current = transaction.read || {};
+      const result = transaction.value || { changed: false, reason: 'empty-transaction' };
+      if (result.reason === 'stale-batch') return;
       if (!result.changed) {
+        const missingWasRemoved = result.reason === 'image-not-found'
+          && result.failedKey
+          && !findImageByIdentity(result.failedSnapshot?.identity);
+        if (missingWasRemoved) {
+          if (state.pendingSnapshots.get(result.failedKey) === result.failedSnapshot) {
+            state.pendingSnapshots.delete(result.failedKey);
+          }
+          state.needsCommit = state.pendingSnapshots.size > 0;
+          state.commitRetryCount = 0;
+          allowRetry = state.needsCommit;
+          setBadgeText(state.needsCommit ? '等待同步' : '已同步');
+          return;
+        }
+        state.commitRetryCount += 1;
+        allowRetry = state.commitRetryCount < 3;
+        state.needsCommit = true;
         console.warn('[公众号源码排版助手] image html sync skipped:', result.reason);
         setBadgeText('仅预览');
         return;
       }
-      if (!commitMatchesCurrentEdit(snapshot)) {
-        state.needsCommit = true;
+      const remainedCurrent = commitBatchIsCurrent(batch);
+      const activeIdentity = state.identity;
+      const interactionIdentity = state.interaction?.identity || activeIdentity;
+      clearCommittedSnapshots(batch);
+      state.commitRetryCount = 0;
+
+      if (!remainedCurrent) {
+        restorePendingSnapshotsInEditor();
+        if (state.interaction && !rebaseInteractionAfterEditorWrite(interactionIdentity || batch[0].snapshot.identity)) {
+          finishGeometryGesture(undefined, true);
+        } else if (activeIdentity) {
+          scheduleSelectedImageReacquire(activeIdentity, { delay: 0 });
+        }
         return;
       }
-      state.commitPhase = 'set';
-      await requestBridge('SET_CONTENT', { content: result.html }, 15000);
-      if (!commitMatchesCurrentEdit(snapshot)) {
-        if (state.interaction) rebaseInteractionAfterEditorWrite(snapshot.identity);
-        else if (state.identity) scheduleSelectedImageReacquire(state.identity, { delay: 0 });
-        return;
-      }
+
+      if (state.identity) scheduleSelectedImageReacquire(state.identity, { delay: 0, seq });
+
       let cropPersisted = true;
-      if (snapshot.cropHtml) {
+      const cropSnapshots = batch.filter(({ snapshot }) => snapshot.cropHtml).map(({ snapshot }) => snapshot);
+      if (cropSnapshots.length) {
         try {
           state.commitPhase = 'verify';
-          const verification = await requestBridge('GET_CONTENT', {}, 15000);
-          cropPersisted = cropWasPersisted(verification.content, snapshot.identity);
+          const verification = await readEditorContent(15000);
+          cropPersisted = cropSnapshots.every((snapshot) => cropWasPersisted(verification.content, snapshot.identity));
         } catch (error) {
           console.warn('[公众号源码排版助手] image crop verification failed:', error);
         }
       }
-      if (seq === state.commitSeq && commitMatchesCurrentEdit(snapshot)) {
+      if (seq === state.commitSeq) {
         if (DEBUG) console.info('[公众号源码排版助手] image html synced', reason || '', current.mode || 'unknown');
         setBadgeText(cropPersisted ? '已同步' : '裁切未保留');
-        scheduleSelectedImageReacquire(snapshot.identity, { delay: 180, snapshot, seq });
       }
     } catch (error) {
       failed = true;
-      state.needsCommit = true;
+      state.needsCommit = state.pendingSnapshots.size > 0;
+      recoverDisconnectedInteraction();
       console.warn('[公众号源码排版助手] image html sync failed:', error);
       setBadgeText('同步失败');
     } finally {
       state.commitInFlight = false;
       state.commitPhase = '';
-      if (state.queuedCommit || (!failed && state.needsCommit)) {
+      if (state.queuedCommit || (!failed && allowRetry && state.needsCommit)) {
         state.queuedCommit = false;
         scheduleContentCommit('queued');
       }
     }
   }
 
-  function reacquireSelectedImage(identity = state.identity) {
-    if (!identity) return;
+  function findImageByIdentity(identity) {
+    if (!identity) return null;
     let best = null;
     let bestScore = -1;
     let bestDistance = Number.POSITIVE_INFINITY;
-    const list = getAllArticleImages();
+    const list = getAllArticleImages().filter((image) => !identity.scopeKey || editorScopeKey(image) === identity.scopeKey);
+    if (identity.editId) {
+      const exact = list.find((image) => getAttr(image, 'data-mpse-image-id') === identity.editId);
+      if (exact) return exact;
+      if (list.some((image) => getAttr(image, 'data-mpse-image-id'))) return null;
+    }
     const preferredIndex = Number.isFinite(identity.index) ? identity.index : 0;
     for (const [index, image] of list.entries()) {
       const asDom = {
@@ -2390,26 +3056,92 @@
         bestDistance = distance;
       }
     }
-    if (!best && list[identity.index]) best = list[identity.index];
+    if (identityHasPrimaryKey(identity)) return best && bestScore >= 600 ? best : null;
+    return exactIndexFallback(list, identity);
+  }
+
+  function reacquireSelectedImage(identity = state.identity) {
+    const best = findImageByIdentity(identity);
     if (best) {
       state.image = best;
       state.identity = imageSignature(best);
       if (state.cropMode && !getCropContainer(best)) exitCropMode();
+      revealToolElements();
       setButtonStates();
       refreshVisiblePanel();
       schedulePositionTools();
     }
+    return best;
   }
 
-  function showToolsForImage(image) {
-    if (state.cropMode && state.image && state.image !== image) exitCropMode();
+  function rebaseInteractionAfterEditorWrite(identity) {
+    const interaction = state.interaction;
+    if (!interaction) return false;
+    const image = findImageByIdentity(identity);
+    if (!image) return false;
+
+    if (interaction.frame) window.cancelAnimationFrame(interaction.frame);
+    clearGeometryPreview(interaction, state.image);
+    interaction.frame = 0;
+    interaction.preview = null;
+    interaction.appliedPreview = null;
+    interaction.started = false;
+    interaction.createdCrop = false;
     state.image = image;
     state.identity = imageSignature(image);
+    interaction.identity = state.identity;
+
+    if (interaction.kind === 'pan' || interaction.kind === 'resize') {
+      const result = ensureCropContainer(image);
+      if (!result.host) return false;
+      interaction.createdCrop = result.created;
+    }
+    const target = getSelectionElement(image);
+    interaction.rect = getTopRect(target);
+    interaction.startCrop = readCropState(image);
+    interaction.contentRect = interaction.startCrop ? getCropContentRect(image) : interaction.rect;
+    interaction.resizeOrigin = imageGeometry.cornerResizeOrigin(interaction.handle);
+    interaction.startWidthPercent = readLayoutWidthPercent(image);
+    interaction.availableWidth = getAvailableImageWidth(image);
+    interaction.bounds = getImageLayoutBounds(image);
+    interaction.startCropBaseWidth = interaction.startCrop ? readCropBaseWidth(image) : null;
+    interaction.baseCanvasHeight = interaction.startCrop
+      ? interaction.contentRect.height / Math.max(imageGeometry.MIN_FRACTION, interaction.startCrop.frame.height)
+      : null;
+    captureGeometryPreviewStyles(interaction, image);
+    if (interaction.lastEvent) updateGeometryGesture(interaction.lastEvent);
+    if (interaction.pendingFinish) {
+      const pending = interaction.pendingFinish;
+      interaction.pendingFinish = null;
+      finishGeometryGesture({
+        type: pending.forceCancel ? 'pointercancel' : 'pointerup',
+        pointerId: interaction.pointerId,
+        target: document
+      }, pending.forceCancel);
+      if (pending.closeSelection) {
+        hideTools();
+        return true;
+      }
+    }
+    revealToolElements();
+    return true;
+  }
+
+  function revealToolElements() {
     createMenu().classList.add('mpse-visible');
     createBox().classList.add('mpse-visible');
     createHandles();
     createBadge().classList.add('mpse-visible');
     setToolElementsOffscreen(false);
+  }
+
+  function showToolsForImage(image) {
+    cancelScheduledReacquire();
+    state.selectionRevision += 1;
+    if (state.cropMode && state.image && state.image !== image) exitCropMode();
+    state.image = image;
+    state.identity = imageSignature(image);
+    revealToolElements();
     setButtonStates();
     refreshVisiblePanel();
     positionTools();
@@ -2432,18 +3164,31 @@
     hideDragShield();
   }
 
-  function hideTools() {
+  function hideTools(force = false) {
+    if (!force && state.interaction && deferGeometryFinish(undefined, true, true)) {
+      setToolElementsOffscreen(true);
+      return;
+    }
     if (state.interaction) finishGeometryGesture(undefined, true);
     exitCropMode();
     state.image = null;
     state.identity = null;
     state.activePanel = null;
     state.isDragging = false;
+    state.blockedByLayer = false;
     state.lastImagePress = null;
+    cancelScheduledReacquire();
+    state.selectionRevision += 1;
     hideToolElements();
+    if (state.needsCommit) scheduleContentCommit('selection-close');
   }
 
   function positionTools() {
+    if (!isEditorLikePage()) {
+      if (state.image || state.interaction || state.isDragging) hideTools(true);
+      else hideToolElements();
+      return;
+    }
     const image = state.image;
     const menu = document.getElementById(MENU_ID);
     const panel = document.getElementById(PANEL_ID);
@@ -2454,15 +3199,23 @@
       return;
     }
     if (!image.isConnected) {
+      if (state.interaction) {
+        setToolElementsOffscreen(true);
+        return;
+      }
       hideToolElements();
-      if (state.identity) window.setTimeout(() => reacquireSelectedImage(state.identity), 0);
+      if (state.identity) scheduleSelectedImageReacquire(state.identity, { delay: 0 });
       return;
     }
-    if (state.interaction) return;
     if (hasBlockingEditorLayer()) {
+      state.blockedByLayer = true;
+      if (state.interaction) finishOrDeferGeometry(undefined, true);
+      else if (state.isDragging) endActiveDrag();
       setToolElementsOffscreen(true);
       return;
     }
+    state.blockedByLayer = false;
+    if (state.interaction) return;
     const rect = getTopRect(getSelectionElement(image));
     if (rect.width < 1 || rect.height < 1) {
       setToolElementsOffscreen(true);
@@ -2514,6 +3267,19 @@
       '.weui-desktop-dialog__wrp',
       '.weui-desktop-dialog_wrapper',
       '[class*="modal-mask"]',
+      '[class*="dialog__mask"]',
+      '[role="dialog"]'
+    ].join(',');
+    const viewport = getViewportRect();
+    const selectionRect = state.image?.isConnected ? getTopRect(getSelectionElement(state.image)) : null;
+    const globalSelector = [
+      'dialog[open]',
+      '[aria-modal="true"]',
+      '.weui-mask',
+      '.weui-desktop-mask',
+      '.weui-desktop-dialog__wrp',
+      '.weui-desktop-dialog_wrapper',
+      '[class*="modal-mask"]',
       '[class*="dialog__mask"]'
     ].join(',');
     for (const doc of getAccessibleDocuments()) {
@@ -2522,12 +3288,34 @@
       for (const element of doc.querySelectorAll(selector)) {
         if (isExtensionElement(element)) continue;
         const style = view.getComputedStyle(element);
-        if (style.display === 'none' || style.visibility === 'hidden' || style.pointerEvents === 'none') continue;
-        const rect = element.getBoundingClientRect();
-        if (rect.width > 120 && rect.height > 80) return true;
+        if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) <= 0.01) continue;
+        if (element.getAttribute('aria-hidden') === 'true') continue;
+        const rect = getTopRect(element);
+        if (rect.width <= 120 || rect.height <= 80 || !rectsIntersect(viewport, rect)) continue;
+        if (element.matches(globalSelector) || (selectionRect && rectsIntersect(selectionRect, rect))) return true;
       }
     }
     return false;
+  }
+
+  function monitorBlockingEditorLayer() {
+    if (!state.image) return;
+    if (!isEditorLikePage()) {
+      hideTools(true);
+      return;
+    }
+    const blocked = hasBlockingEditorLayer();
+    if (blocked) {
+      state.blockedByLayer = true;
+      if (state.interaction) finishOrDeferGeometry(undefined, true);
+      else if (state.isDragging) endActiveDrag();
+      setToolElementsOffscreen(true);
+      return;
+    }
+    if (state.blockedByLayer) {
+      state.blockedByLayer = false;
+      schedulePositionTools();
+    }
   }
 
   function findImageFromEvent(event) {
@@ -2570,12 +3358,16 @@
   }
 
   function onHandlePointerCancel(event) {
-    finishGeometryGesture(event, true);
+    finishOrDeferGeometry(event, true);
   }
 
   function onDocumentPointer(event) {
     if (!event || !event.target) return;
     if (event.type !== 'pointerdown' || event.button !== 0) return;
+    if (!isEditorLikePage()) {
+      hideTools(true);
+      return;
+    }
     if (isExtensionElement(event.target)) return;
     if (document.getElementById('mpse-inline-panel') || hasBlockingEditorLayer()) {
       hideTools();
@@ -2608,6 +3400,7 @@
 
   function onDocumentDoubleClick(event) {
     if (!event || !event.target || isExtensionElement(event.target)) return;
+    if (!isEditorLikePage()) return;
     if (document.getElementById('mpse-inline-panel') || hasBlockingEditorLayer()) return;
     const image = findImageFromEvent(event);
     if (!image) return;
@@ -2618,6 +3411,7 @@
   }
 
   function onDocumentWheel(event) {
+    if (!isEditorLikePage()) return;
     if (!state.cropMode || !event.ctrlKey || !event.target) return;
     const image = findImageFromEvent(event);
     if (!image || image !== state.image || !getCropContainer(image)) return;
@@ -2632,8 +3426,11 @@
   }
 
   function onDocumentPointerUp(event) {
+    if (event && event.type === 'lostpointercapture' && state.commitPhase === 'set'
+      && state.image && !state.image.isConnected) return;
     if (state.interaction) stopUiEvent(event);
-    finishGeometryGesture(event);
+    if (state.interaction) finishOrDeferGeometry(event);
+    else if (state.isDragging) endActiveDrag();
   }
 
   function onDocumentDragStart(event) {
@@ -2679,21 +3476,37 @@
       doc.addEventListener('selectstart', onDocumentSelectStart, true);
       doc.addEventListener('wheel', onDocumentWheel, { capture: true, passive: false });
       doc.addEventListener('keydown', onDocumentKeyDown, true);
-      doc.addEventListener('scroll', () => {
-        if (state.image) schedulePositionTools();
-      }, true);
+      doc.addEventListener('scroll', onEditorViewportChange, true);
+      if (doc.defaultView && doc.defaultView !== window) {
+        doc.defaultView.addEventListener('scroll', onEditorViewportChange, true);
+        doc.defaultView.addEventListener('resize', onEditorViewportChange);
+      }
     }
   }
 
   function onGlobalPointerUp(event) {
     if (state.interaction) {
       stopUiEvent(event);
-      finishGeometryGesture(event);
+      finishOrDeferGeometry(event);
       return;
     }
-    if (!state.isDragging) return;
+    endActiveDrag();
+  }
+
+  function endActiveDrag() {
+    if (!state.isDragging || state.interaction) return;
     state.isDragging = false;
     if (state.needsCommit) scheduleContentCommit('drag-end');
+    if (state.identity && (!state.image || !state.image.isConnected)) {
+      scheduleSelectedImageReacquire(state.identity, { delay: 0 });
+    } else if (state.image) {
+      schedulePositionTools();
+    }
+  }
+
+  function onEditorViewportChange() {
+    if (state.interaction) finishOrDeferGeometry(undefined, true);
+    else if (state.image) schedulePositionTools();
   }
 
   function onGlobalPointerMove(event) {
@@ -2728,21 +3541,34 @@
     createBadge();
     bindDocuments();
 
-    const observer = new MutationObserver(scheduleBindDocuments);
-    observer.observe(document.documentElement, { childList: true, subtree: true });
+    const observer = new MutationObserver((records) => {
+      const interactionTarget = state.interaction && state.image ? getSelectionElement(state.image) : null;
+      const relevant = records.some((record) => !isExtensionElement(record.target)
+        && (!state.interaction || (record.target !== state.image && record.target !== interactionTarget)));
+      if (!relevant) return;
+      scheduleBindDocuments();
+      if (state.image) schedulePositionTools();
+    });
+    observer.observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['class', 'style', 'open', 'aria-modal', 'aria-hidden']
+    });
+    state.pageObserver = observer;
 
     window.setInterval(scheduleBindDocuments, 1500);
+    window.setInterval(monitorBlockingEditorLayer, 250);
     window.addEventListener('pointermove', onGlobalPointerMove, true);
     window.addEventListener('pointerup', onGlobalPointerUp, true);
     window.addEventListener('pointercancel', onGlobalPointerUp, true);
     window.addEventListener('mouseup', onGlobalPointerUp, true);
-    window.addEventListener('blur', () => finishGeometryGesture(undefined, true), true);
-    window.addEventListener('resize', () => {
-      if (state.image) schedulePositionTools();
-    });
-    window.addEventListener('scroll', () => {
-      if (state.image) schedulePositionTools();
+    window.addEventListener('blur', () => {
+      if (state.interaction) finishOrDeferGeometry(undefined, true);
+      else endActiveDrag();
     }, true);
+    window.addEventListener('resize', onEditorViewportChange);
+    window.addEventListener('scroll', onEditorViewportChange, true);
 
     console.info(`[公众号源码排版助手] image tools ${VERSION} loaded`);
   }

@@ -14,6 +14,15 @@
 
 这些接口需要在微信公众号编辑页自身 JS 上下文中调用，公众号源码排版助手的 Chrome content script 需要注入 page-bridge 进入页面上下文。
 
+## 图片交互约束
+
+- 正文可能位于 UEditor iframe；图片坐标必须换算到顶层窗口，滚动监听也要同时绑定编辑文档和 iframe window。
+- `mp_editor_set_content` 会重建正文节点。图片手势不能长期持有旧 DOM 引用，回写完成后要按图片身份重新定位，并重放尚未提交的本地状态。
+- 原生图片拖放会与尺寸手柄争夺指针；图片操作期间需要阻止 `dragstart`，并用统一指针会话处理 `pointerup`、`pointercancel` 和 `lostpointercapture`。
+- 拖动期间只做合成层预览，松手后再进行正文布局写入，避免连续读取布局后立即写样式造成强制重排。
+
+相关规范：[Pointer Events](https://www.w3.org/TR/pointerevents/)、[HTML Drag and Drop](https://html.spec.whatwg.org/multipage/dnd.html)、[Chrome Content Scripts](https://developer.chrome.com/docs/extensions/develop/concepts/content-scripts)。
+
 ## 降级方案
 
 - ProseMirror / contenteditable DOM 写入；
