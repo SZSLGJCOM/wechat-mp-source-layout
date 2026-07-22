@@ -8,6 +8,7 @@ const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const manifest = JSON.parse(fs.readFileSync(path.join(rootDir, 'manifest.json'), 'utf8'));
 const productName = String(manifest.name || '').trim().replace(/[\\/:*?"<>|]/g, '');
 const version = String(manifest.version || '').trim();
+const releaseSlug = 'gongzhonghao-yuanma-paiban-zhushou';
 const packageFiles = ['manifest.json', 'src', 'icons', 'README.md', 'CHANGELOG.md', 'LICENSE'];
 
 if (!productName || !version) {
@@ -21,7 +22,7 @@ for (const file of packageFiles) {
 }
 
 const outputDir = path.join(rootDir, 'release');
-const archivePath = path.join(outputDir, `${productName}-v${version}.zip`);
+const archivePath = path.join(outputDir, `${releaseSlug}-v${version}.zip`);
 fs.mkdirSync(outputDir, { recursive: true });
 
 if (fs.existsSync(archivePath)) fs.rmSync(archivePath);
@@ -40,4 +41,4 @@ try {
   throw error;
 }
 
-console.info(`已生成 ${path.relative(rootDir, archivePath)}`);
+console.info(`已生成“${productName}”安装包：${path.relative(rootDir, archivePath)}`);
