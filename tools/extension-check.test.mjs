@@ -143,3 +143,20 @@ test('media tools only activate from direct media hits', () => {
   assert.doesNotMatch(svgBlockTools, /wrapper\.querySelector\('svg'\)/);
   assert.doesNotMatch(svgBlockTools, /doc\.elementsFromPoint\(event\.clientX, event\.clientY\)/);
 });
+
+test('image controls separate panel state from persisted edits', () => {
+  const imageTools = readText('src/image-tools.js');
+  const css = readText('src/overlay.css');
+
+  assert.match(imageTools, /activePanel: null/);
+  assert.doesNotMatch(imageTools, /effectMemory/);
+  assert.doesNotMatch(imageTools, /showPanel\(effect, true\)/);
+  assert.doesNotMatch(imageTools, /doc\.addEventListener\('click', onDocumentPointer/);
+  assert.match(imageTools, /function beginGeometryGesture\(/);
+  assert.match(imageTools, /function enterCropMode\(/);
+  assert.match(imageTools, /function applyCropSnapshot\(/);
+  assert.match(imageTools, /data-mpse-image-crop/);
+  assert.match(css, /\.mpse-img2-handle-nw/);
+  assert.match(css, /#mpse-img2-box\.mpse-crop-mode/);
+  assert.doesNotMatch(css, /mpse-active::after/);
+});

@@ -370,7 +370,8 @@
 #mpse-img2-box,
 #mpse-img2-badge,
 #mpse-img2-menu *,
-#mpse-img2-panel * {
+#mpse-img2-panel *,
+#mpse-img2-box * {
   box-sizing: border-box;
 }
 
@@ -434,10 +435,6 @@
   font-weight: 600;
 }
 
-#mpse-img2-menu button.mpse-active::after {
-  background: #fff;
-}
-
 #mpse-img2-panel {
   position: fixed;
   z-index: 2147483646;
@@ -479,6 +476,20 @@
 .mpse-img2-panel-head button:hover {
   background: #f5f7f9;
   color: #333;
+}
+
+.mpse-img2-panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.mpse-img2-panel-actions button[data-toggle-effect],
+.mpse-img2-panel-actions button[data-clear-effect] {
+  width: auto;
+  padding: 0 6px;
+  color: #07a852;
+  font-size: 11px;
 }
 
 .mpse-img2-panel-body {
@@ -528,6 +539,20 @@
   border-color: #07c160;
 }
 
+.mpse-img2-reset-crop {
+  width: 100%;
+  height: 30px;
+  margin: -2px 0 6px;
+  border: 1px solid #bdebd0;
+  border-radius: 8px;
+  background: #f2fff7;
+  color: #078a4d;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.mpse-img2-reset-crop:hover { background: #e3ffef; }
+
 .mpse-img2-inline {
   display: flex;
   align-items: center;
@@ -568,6 +593,50 @@
   display: block;
 }
 
+#mpse-img2-box.mpse-crop-mode {
+  border-color: #1976ff;
+  box-shadow: 0 0 0 3px rgba(25, 118, 255, 0.14);
+}
+
+#mpse-img2-box.mpse-crop-mode::after {
+  content: "裁切模式";
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 8px);
+  transform: translateX(-50%);
+  padding: 3px 8px;
+  border-radius: 10px;
+  background: #1976ff;
+  color: #fff;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", Arial, sans-serif;
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+}
+
+.mpse-img2-handle {
+  position: absolute;
+  z-index: 1;
+  width: 12px;
+  height: 12px;
+  padding: 0;
+  border: 1px solid #07c160;
+  border-radius: 50%;
+  background: #fff;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.mpse-crop-mode .mpse-img2-handle { border-color: #1976ff; }
+.mpse-img2-handle-nw { left: -7px; top: -7px; cursor: nwse-resize; }
+.mpse-img2-handle-n { left: 50%; top: -7px; transform: translateX(-50%); cursor: ns-resize; }
+.mpse-img2-handle-ne { right: -7px; top: -7px; cursor: nesw-resize; }
+.mpse-img2-handle-e { right: -7px; top: 50%; transform: translateY(-50%); cursor: ew-resize; }
+.mpse-img2-handle-se { right: -7px; bottom: -7px; cursor: nwse-resize; }
+.mpse-img2-handle-s { left: 50%; bottom: -7px; transform: translateX(-50%); cursor: ns-resize; }
+.mpse-img2-handle-sw { left: -7px; bottom: -7px; cursor: nesw-resize; }
+.mpse-img2-handle-w { left: -7px; top: 50%; transform: translateY(-50%); cursor: ew-resize; }
+
 #mpse-img2-badge {
   position: fixed;
   z-index: 2147483646;
@@ -598,6 +667,7 @@
 
 #mpse-img2-menu button,
 #mpse-img2-panel button,
+#mpse-img2-box button,
 #mpse-img2-panel input,
 #mpse-img2-panel select {
   pointer-events: auto !important;
