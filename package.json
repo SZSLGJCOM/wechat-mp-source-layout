@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "check": "node tools/verify-extension.mjs",
-    "test": "node --test tools/extension-check.test.mjs"
+    "test": "node --test tools/extension-check.test.mjs",
+    "package": "node tools/package-extension.mjs"
   }
 }

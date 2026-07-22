@@ -17,8 +17,8 @@
 
 ## 安装
 
-1. 打开 `chrome://extensions/`。
-2. 开启开发者模式。
-3. 加载已解压的扩展程序。
-4. 选择 `wechat-mp-source-layout` 文件夹。
+1. 在 [GitHub Releases](https://github.com/SZSLGJCOM/wechat-mp-source-layout/releases) 下载 `公众号源码排版助手-v*.zip` 并解压。
+2. 打开 `chrome://extensions/`。
+3. 开启开发者模式后，选择“加载已解压的扩展程序”。
+4. 选择解压后的“公众号源码排版助手”文件夹。
 5. 刷新微信公众号图文编辑页。

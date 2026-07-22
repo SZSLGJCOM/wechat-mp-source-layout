@@ -18,13 +18,16 @@ function readJson(relativePath) {
 test('repository exposes one-command extension verification', () => {
   const packagePath = path.join(rootDir, 'package.json');
   const verifierPath = path.join(rootDir, 'tools', 'verify-extension.mjs');
+  const packagerPath = path.join(rootDir, 'tools', 'package-extension.mjs');
 
   assert.equal(fs.existsSync(packagePath), true, 'package.json must exist');
   assert.equal(fs.existsSync(verifierPath), true, 'tools/verify-extension.mjs must exist');
+  assert.equal(fs.existsSync(packagerPath), true, 'tools/package-extension.mjs must exist');
 
   const pkg = readJson('package.json');
   assert.equal(pkg.scripts?.check, 'node tools/verify-extension.mjs');
   assert.match(pkg.scripts?.test || '', /node --test tools\/extension-check\.test\.mjs/);
+  assert.equal(pkg.scripts?.package, 'node tools/package-extension.mjs');
 
   const result = spawnSync(process.execPath, ['tools/verify-extension.mjs'], {
     cwd: rootDir,

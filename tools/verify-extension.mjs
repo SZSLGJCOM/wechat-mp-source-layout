@@ -70,6 +70,12 @@ function checkManifest() {
   for (const icon of Object.values(manifest.icons || {})) assertFile(icon);
 }
 
+function checkPackaging() {
+  const pkg = readJson('package.json');
+  assert(pkg?.scripts?.package === 'node tools/package-extension.mjs', 'package command is required');
+  assertFile('tools/package-extension.mjs');
+}
+
 function checkLicense() {
   const license = readText('LICENSE');
   const readme = readText('README.md');
@@ -160,6 +166,7 @@ function checkJavaScriptSyntax() {
 }
 
 checkManifest();
+checkPackaging();
 checkLicense();
 checkBridgeCentralization();
 checkProductWording();
