@@ -3,7 +3,7 @@
   "name": "公众号源码排版助手",
   "short_name": "源码排版",
   "description": "微信公众号图文编辑页 Chrome 扩展，支持 HTML 源码编辑、图片参数微调、多图 SVG 动效与成品复原管理。",
-  "version": "0.9.8",
+  "version": "0.9.9",
   "permissions": [],
   "host_permissions": [
     "https://mp.weixin.qq.com/*"

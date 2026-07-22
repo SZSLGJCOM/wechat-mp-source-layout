@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const VERSION = 'v0.9.8';
+  const VERSION = 'v0.9.9';
   const MENU_ID = 'mpse-img2-menu';
   const PANEL_ID = 'mpse-img2-panel';
   const BOX_ID = 'mpse-img2-box';
@@ -161,7 +161,9 @@
   }
 
   function readOpacityPercent(image, fallback = 100) {
-    const value = Number(image && image.style ? image.style.getPropertyValue('opacity') : NaN);
+    const raw = String(image && image.style ? image.style.getPropertyValue('opacity') : '').trim();
+    if (!raw) return fallback;
+    const value = Number(raw);
     return Number.isFinite(value) ? clampInt(value * 100, 0, 100, fallback) : fallback;
   }
 
@@ -319,7 +321,7 @@
     const rect = image.getBoundingClientRect();
     if (rect.width < 24 || rect.height < 24) return false;
     const style = image.ownerDocument.defaultView.getComputedStyle(image);
-    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+    if (style.display === 'none' || style.visibility === 'hidden') return false;
     return true;
   }
 

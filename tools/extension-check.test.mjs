@@ -218,3 +218,10 @@ test('image appearance effects are reversible and follow the crop container', ()
   assert.match(imageTools, /mask-image/);
   assert.match(imageTools, /outline-offset/);
 });
+
+test('transparent images remain selectable and opacity starts at 100%', () => {
+  const imageTools = readText('src/image-tools.js');
+
+  assert.match(imageTools, /function readOpacityPercent\(image, fallback = 100\) \{[\s\S]*?if \(!raw\) return fallback;/);
+  assert.doesNotMatch(imageTools, /style\.display === 'none' \|\| style\.visibility === 'hidden' \|\| style\.opacity === '0'/);
+});
