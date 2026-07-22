@@ -990,13 +990,6 @@
     return crop;
   }
 
-  function copyLayoutStyles(source, target) {
-    for (const prop of ['width', 'max-width', 'display', 'margin-left', 'margin-right', 'margin-top', 'margin-bottom', 'vertical-align']) {
-      const value = source.style.getPropertyValue(prop);
-      if (value) setStyle(target, prop, value);
-    }
-  }
-
   function ensureCropContainer(image) {
     const existing = getCropContainer(image);
     if (existing) return { host: existing, created: false };
@@ -1004,31 +997,30 @@
 
     const rect = image.getBoundingClientRect();
     const availableWidth = getAvailableImageWidth(image);
-    const sourceAspect = image.naturalWidth && image.naturalHeight
-      ? image.naturalWidth / image.naturalHeight
-      : Math.max(0.05, rect.width / Math.max(1, rect.height));
+    const baseAspect = Math.max(0.05, rect.width / Math.max(1, rect.height));
     const baseWidth = clamp(rect.width / Math.max(1, availableWidth) * 100, 4, 100);
+    const layout = captureCropLayout(image);
+    layout.baseWidth = baseWidth;
+    layout.baseHeightPx = rect.height;
     const host = image.ownerDocument.createElement('span');
     host.setAttribute(CROP_ATTR, '1');
     host.dataset.mpseCropBaseWidth = baseWidth.toFixed(4);
-    copyLayoutStyles(image, host);
+    host.dataset.mpseCropLayout = JSON.stringify(layout);
+    restoreInlineStyles(host, layout.styles);
+    host.style.removeProperty('height');
     image.parentNode.insertBefore(host, image);
     host.appendChild(image);
 
-    for (const prop of ['width', 'max-width', 'display', 'margin-left', 'margin-right', 'margin-top', 'margin-bottom', 'vertical-align', 'position', 'left', 'top', 'height']) {
+    for (const prop of ['width', 'max-width', 'display', 'margin-left', 'margin-right', 'margin-top', 'margin-bottom', 'vertical-align', 'float', 'position', 'left', 'top', 'height']) {
       image.style.removeProperty(prop);
     }
-    setStyles(host, {
-      width: `${baseWidth.toFixed(4)}%`,
-      'max-width': '100%',
-      display: 'block',
-      position: 'relative',
-      overflow: 'hidden',
-      'line-height': '0'
-    });
     const radius = image.style.getPropertyValue('border-radius');
     if (radius) setStyle(host, 'border-radius', radius);
-    writeCropState(image, { x: 0, y: 0, width: 1, height: 1, sourceAspect });
+    writeCropState(image, {
+      frame: { x: 0, y: 0, width: 1, height: 1 },
+      media: { x: 0, y: 0, width: 1, height: 1 },
+      baseAspect
+    });
     renderAppearance(image);
     return { host, created: true };
   }
@@ -1038,11 +1030,18 @@
     if (!host || !host.parentNode) return image;
     const parent = host.parentNode;
     const baseWidth = readCropBaseWidth(image);
-    for (const prop of ['position', 'left', 'top', 'height', 'max-width', 'display', 'margin-left', 'margin-right', 'margin-top', 'margin-bottom', 'width', 'vertical-align']) {
+    const layout = readCropLayout(image);
+    for (const prop of ['position', 'left', 'top', 'height', 'max-width', 'display', 'margin-left', 'margin-right', 'margin-top', 'margin-bottom', 'width', 'vertical-align', 'float', 'translate', 'scale']) {
       image.style.removeProperty(prop);
     }
-    copyLayoutStyles(host, image);
-    setStyles(image, { width: `${baseWidth.toFixed(4)}%`, 'max-width': '100%', display: 'block' });
+    restoreInlineStyles(image, layout.styles);
+    if (Number.isFinite(layout.baseWidth) && Math.abs(baseWidth - layout.baseWidth) >= 0.01) {
+      setStyle(image, 'width', `${baseWidth.toFixed(4)}%`);
+      const heightEntry = layout.styles && layout.styles.height;
+      if (heightEntry && heightEntry.value && heightEntry.value !== 'auto' && Number.isFinite(layout.baseHeightPx)) {
+        setStyle(image, 'height', `${(layout.baseHeightPx * baseWidth / layout.baseWidth).toFixed(3)}px`);
+      }
+    }
     parent.insertBefore(image, host);
     host.remove();
     renderAppearance(image);
@@ -1077,17 +1076,16 @@
     if (Math.abs(readLayoutWidthPercent(image, available) - visualWidth) < 0.01) return false;
     const crop = readCropState(image);
     if (crop) {
-      setCropBaseWidth(image, visualWidth / Math.max(0.04, crop.width));
+      setCropBaseWidth(image, visualWidth / Math.max(0.04, crop.frame.width));
       writeCropState(image, crop);
       return true;
     }
-    setStyles(host, { width: `${visualWidth.toFixed(3)}%`, height: 'auto', 'max-width': '100%', display: 'block' });
+    setStyle(host, 'width', `${visualWidth.toFixed(3)}%`);
     return true;
   }
 
   function cropStatesMatch(first, second) {
-    if (!first || !second) return first === second;
-    return ['x', 'y', 'width', 'height', 'sourceAspect'].every((key) => Math.abs(Number(first[key]) - Number(second[key])) < 0.0001);
+    return imageGeometry.modelsMatch(first, second);
   }
 
   function capturePointer(target, pointerId) {
@@ -1113,11 +1111,8 @@
     return interaction.pointerId === event.pointerId;
   }
 
-  function interactionOwnsEvent(interaction, event, scope) {
-    if (!interaction || !matchesGeometryPointer(interaction, event)) return false;
-    if (!scope) return true;
-    if (interaction.scope !== scope) return false;
-    return scope === 'overlay' || !interaction.sourceDocument || (event.target && event.target.ownerDocument === interaction.sourceDocument);
+  function interactionOwnsEvent(interaction, event) {
+    return Boolean(interaction && matchesGeometryPointer(interaction, event));
   }
 
   function deferContentCommitForGesture() {
@@ -1128,10 +1123,7 @@
 
   function setInteractionCursor(interaction, cursor) {
     if (!interaction) return;
-    if (interaction.scope === 'overlay') {
-      showDragShield(cursor);
-      return;
-    }
+    showDragShield(cursor);
     const target = interaction.pointerTarget;
     if (!target || !target.style) return;
     interaction.cursorBefore = {
@@ -1158,6 +1150,65 @@
     });
   }
 
+  function captureGeometryPreviewStyles(interaction, image) {
+    if (!interaction || !image) return;
+    interaction.previewTarget = getSelectionElement(image);
+    interaction.targetPreviewStyles = captureInlineStyles(interaction.previewTarget, [
+      'scale', 'transform-origin', 'clip-path', 'overflow'
+    ]);
+    interaction.imagePreviewStyles = captureInlineStyles(image, ['translate']);
+  }
+
+  function clearGeometryPreview(interaction, image = state.image) {
+    if (!interaction) return;
+    restoreInlineStyles(interaction.previewTarget, interaction.targetPreviewStyles);
+    restoreInlineStyles(image, interaction.imagePreviewStyles);
+  }
+
+  function updateGeometryOverlayRect(rect) {
+    const box = document.getElementById(BOX_ID);
+    if (!box || !rect) return;
+    positionSelectionBox(box, rect);
+    positionHandles(rect);
+  }
+
+  function resizePreviewRect(interaction, scale) {
+    const width = interaction.rect.width * scale;
+    const height = interaction.rect.height * scale;
+    const left = interaction.handle.includes('w') ? interaction.rect.right - width : interaction.rect.left;
+    const top = interaction.handle.includes('n') ? interaction.rect.bottom - height : interaction.rect.top;
+    return { left, top, right: left + width, bottom: top + height, width, height };
+  }
+
+  function applyGeometryPreview(interaction, preview, image) {
+    const target = getSelectionElement(image);
+    if (preview.kind === 'resize') {
+      const originX = interaction.handle.includes('w') ? 'right' : 'left';
+      const originY = interaction.handle.includes('n') ? 'bottom' : 'top';
+      setStyle(target, 'transform-origin', `${originX} ${originY}`);
+      setStyle(target, 'scale', String(preview.scale));
+      updateGeometryOverlayRect(resizePreviewRect(interaction, preview.scale));
+      return;
+    }
+
+    if (preview.kind === 'pan') {
+      const deltaX = preview.crop.media.x - interaction.startCrop.media.x;
+      const deltaY = preview.crop.media.y - interaction.startCrop.media.y;
+      setStyle(image, 'translate', `${(-deltaX * 100).toFixed(6)}% ${(-deltaY * 100).toFixed(6)}%`);
+      updateGeometryOverlayRect(interaction.rect);
+      return;
+    }
+
+    const rect = imageGeometry.previewFrameRect(interaction.rect, interaction.startCrop.frame, preview.crop.frame);
+    const top = (rect.top - interaction.rect.top) / interaction.rect.height * 100;
+    const right = (interaction.rect.right - rect.right) / interaction.rect.width * 100;
+    const bottom = (interaction.rect.bottom - rect.bottom) / interaction.rect.height * 100;
+    const left = (rect.left - interaction.rect.left) / interaction.rect.width * 100;
+    setStyle(target, 'overflow', 'visible');
+    setStyle(target, 'clip-path', `inset(${top.toFixed(6)}% ${right.toFixed(6)}% ${bottom.toFixed(6)}% ${left.toFixed(6)}%)`);
+    updateGeometryOverlayRect(rect);
+  }
+
   function flushGeometryPreview(interaction = state.interaction) {
     if (!interaction) return;
     if (interaction.frame) {
@@ -1170,20 +1221,16 @@
 
     const image = state.image;
     if (!image || !image.isConnected) return;
-    if (preview.kind === 'resize') {
-      setLayoutWidthPercent(image, preview.widthPercent, interaction.availableWidth);
-    } else {
-      writeCropState(image, preview.crop);
-    }
-    updateGeometryOverlay(image);
+    interaction.appliedPreview = preview;
+    applyGeometryPreview(interaction, preview, image);
   }
 
-  function hasGeometryChanged(interaction, image) {
-    if (!interaction || !image || !image.isConnected) return false;
+  function hasGeometryChanged(interaction, preview) {
+    if (!interaction || !preview) return false;
     if (interaction.kind === 'resize') {
-      return Math.abs(readLayoutWidthPercent(image, interaction.availableWidth) - interaction.startWidthPercent) >= 0.01;
+      return Math.abs(preview.widthPercent - interaction.startWidthPercent) >= 0.01;
     }
-    return !cropStatesMatch(readCropState(image), interaction.startCrop);
+    return !cropStatesMatch(preview.crop, interaction.startCrop);
   }
 
   function getCornerResizePreview(interaction, point) {
@@ -1197,7 +1244,7 @@
       ? 1 + horizontalDelta / Math.max(1, interaction.rect.width)
       : 1 + verticalDelta / Math.max(1, interaction.rect.height);
     const widthPercent = clamp(interaction.startWidthPercent * scale, 4, 100);
-    return { widthPercent };
+    return { widthPercent, scale: widthPercent / Math.max(0.01, interaction.startWidthPercent) };
   }
 
   function updateGeometryOverlay(image = state.image) {
@@ -1216,6 +1263,7 @@
     interaction.createdCrop = result.created;
     interaction.startCrop = readCropState(image);
     interaction.rect = getTopRect(result.host);
+    captureGeometryPreviewStyles(interaction, image);
     return Boolean(interaction.startCrop);
   }
 
@@ -1231,8 +1279,6 @@
     deferContentCommitForGesture();
     const interaction = {
       kind: isCorner ? 'resize' : 'crop',
-      scope: 'overlay',
-      sourceDocument: document,
       handle,
       pointerId: event.pointerId,
       pointerTarget: captureTarget || event.target,
@@ -1241,15 +1287,19 @@
       rect,
       startCrop,
       startCropBaseWidth: startCrop ? readCropBaseWidth(image) : null,
-      startLayoutStyles: captureInlineStyles(target, ['width', 'height', 'max-width', 'display']),
       startWidthPercent: readLayoutWidthPercent(image),
       availableWidth: getAvailableImageWidth(image),
+      fixedHeight: !startCrop && Boolean(target.style.getPropertyValue('height') && target.style.getPropertyValue('height') !== 'auto'),
+      sourceHeight: target.getBoundingClientRect().height,
       createdCrop: false,
       started: false,
       gestureEpoch: ++state.gestureEpoch,
       preview: null,
+      appliedPreview: null,
       frame: 0
     };
+    cancelScheduledReacquire();
+    captureGeometryPreviewStyles(interaction, image);
     state.interaction = interaction;
     state.isDragging = true;
     capturePointer(captureTarget || event.target, event.pointerId);
@@ -1265,8 +1315,6 @@
     deferContentCommitForGesture();
     const interaction = {
       kind: 'pan',
-      scope: 'source',
-      sourceDocument: image.ownerDocument,
       pointerId: event.pointerId,
       pointerTarget: image,
       startX: point.x,
@@ -1277,20 +1325,24 @@
       started: false,
       gestureEpoch: ++state.gestureEpoch,
       preview: null,
+      appliedPreview: null,
       frame: 0
     };
+    cancelScheduledReacquire();
+    captureGeometryPreviewStyles(interaction, image);
     state.interaction = interaction;
     state.isDragging = true;
     capturePointer(image, event.pointerId);
     setInteractionCursor(interaction, 'grabbing');
   }
 
-  function updateGeometryGesture(event, scope) {
+  function updateGeometryGesture(event) {
     const interaction = state.interaction;
     const image = state.image;
-    if (!interaction || !image || !image.isConnected || !interactionOwnsEvent(interaction, event, scope)) return;
+    if (!interaction || !image || !image.isConnected || !interactionOwnsEvent(interaction, event)) return;
     const point = getTopClientPoint(event);
     if (!point) return;
+    interaction.lastPoint = point;
     let rect = interaction.rect;
     if (rect.width < 1 || rect.height < 1) return;
     if (!interaction.started) {
@@ -1314,24 +1366,12 @@
 
     const start = interaction.startCrop;
     if (!start) return;
-    const next = { ...start };
-    const cropDx = dx * start.width;
-    const cropDy = dy * start.height;
     if (interaction.kind === 'pan') {
-      next.x = start.x - dx * start.width;
-      next.y = start.y - dy * start.height;
-    } else if (interaction.handle === 'e') {
-      next.width = start.width + cropDx;
-    } else if (interaction.handle === 'w') {
-      next.x = start.x + cropDx;
-      next.width = start.width - cropDx;
-    } else if (interaction.handle === 's') {
-      next.height = start.height + cropDy;
-    } else if (interaction.handle === 'n') {
-      next.y = start.y + cropDy;
-      next.height = start.height - cropDy;
+      interaction.preview = { kind: 'pan', crop: imageGeometry.panMedia(start, dx, dy) };
+    } else {
+      const ratio = interaction.handle === 'e' || interaction.handle === 'w' ? dx : dy;
+      interaction.preview = { kind: 'crop', crop: imageGeometry.resizeFrameEdge(start, interaction.handle, ratio) };
     }
-    interaction.preview = { kind: 'crop', crop: normalizeCropState(next) };
     queueGeometryPreview(interaction);
   }
 
@@ -1344,38 +1384,21 @@
     const pointX = clamp((event.clientX - rect.left) / rect.width, 0, 1);
     const pointY = clamp((event.clientY - rect.top) / rect.height, 0, 1);
     const scale = event.deltaY < 0 ? 0.9 : 1.1;
-    const width = clamp(crop.width * scale, 0.04, 1);
-    const height = clamp(crop.height * scale, 0.04, 1);
-    writeCropState(image, {
-      ...crop,
-      width,
-      height,
-      x: crop.x + crop.width * pointX - width * pointX,
-      y: crop.y + crop.height * pointY - height * pointY
-    });
+    writeCropState(image, imageGeometry.zoomMedia(crop, scale, pointX, pointY));
     markChanged(image, 'crop-zoom');
     schedulePositionTools();
   }
 
   function restoreGeometryGesture(interaction, image) {
+    clearGeometryPreview(interaction, image);
     if (!interaction || !image || !image.isConnected) return image;
-    if (interaction.kind === 'resize') {
-      if (interaction.startCrop && getCropContainer(image)) {
-        setCropBaseWidth(image, interaction.startCropBaseWidth);
-        writeCropState(image, interaction.startCrop);
-        return image;
-      }
-      restoreInlineStyles(getLayoutHost(image), interaction.startLayoutStyles);
-      return image;
-    }
     if (interaction.createdCrop && getCropContainer(image)) return unwrapCropContainer(image);
-    if (interaction.startCrop) writeCropState(image, interaction.startCrop);
     return image;
   }
 
-  function finishGeometryGesture(event, scope, forceCancel = false) {
+  function finishGeometryGesture(event, forceCancel = false) {
     const interaction = state.interaction;
-    if (!interaction || !interactionOwnsEvent(interaction, event, scope)) return false;
+    if (!interaction || !interactionOwnsEvent(interaction, event)) return false;
     const canceled = forceCancel || Boolean(event && (event.type === 'pointercancel' || event.type === 'lostpointercapture'));
     if (canceled) {
       if (interaction.frame) window.cancelAnimationFrame(interaction.frame);
@@ -1385,6 +1408,8 @@
       flushGeometryPreview(interaction);
     }
     let image = state.image;
+    const preview = interaction.appliedPreview;
+    clearGeometryPreview(interaction, image);
     state.interaction = null;
     state.isDragging = false;
     restoreInteractionCursor(interaction);
@@ -1394,7 +1419,18 @@
       schedulePositionTools();
       return true;
     }
-    const changed = hasGeometryChanged(interaction, image);
+    const changed = hasGeometryChanged(interaction, preview);
+    if (changed && image && image.isConnected) {
+      if (interaction.kind === 'resize') {
+        setLayoutWidthPercent(image, preview.widthPercent, interaction.availableWidth);
+        if (interaction.fixedHeight && !getCropContainer(image)) {
+          setStyle(image, 'height', `${(interaction.sourceHeight * preview.scale).toFixed(3)}px`);
+        }
+      } else {
+        writeCropState(image, preview.crop);
+      }
+      updateGeometryOverlay(image);
+    }
     if (interaction.kind === 'crop' && changed && state.image) {
       state.cropMode = true;
       state.cropTransientHost = interaction.createdCrop || state.cropTransientHost;
@@ -2143,11 +2179,31 @@
       return;
     }
 
-    const delay = reason === 'drag-end' ? 0 : 360;
+    const delay = reason === 'drag-end' ? 420 : 360;
     state.commitTimer = window.setTimeout(() => {
       state.commitTimer = null;
       commitSnapshotToEditor(state.pendingCommitReason);
     }, delay);
+  }
+
+  function cancelScheduledReacquire() {
+    if (!state.reacquireTimer) return;
+    window.clearTimeout(state.reacquireTimer);
+    state.reacquireTimer = null;
+  }
+
+  function scheduleSelectedImageReacquire(identity, options = {}) {
+    if (!identity) return;
+    cancelScheduledReacquire();
+    const selectionRevision = state.selectionRevision;
+    const gestureEpoch = state.gestureEpoch;
+    state.reacquireTimer = window.setTimeout(() => {
+      state.reacquireTimer = null;
+      if (state.selectionRevision !== selectionRevision || state.gestureEpoch !== gestureEpoch || state.isDragging) return;
+      if (options.snapshot && state.lastSnapshot !== options.snapshot) return;
+      if (Number.isFinite(options.seq) && state.commitSeq !== options.seq) return;
+      reacquireSelectedImage(identity);
+    }, Math.max(0, Number(options.delay) || 0));
   }
 
   function copyManagedData(source, target) {
@@ -2223,7 +2279,16 @@
     const doc = parser.parseFromString(`<div id="mpse-root">${content || ''}</div>`, 'text/html');
     const root = doc.getElementById('mpse-root');
     const target = root && locateImageInHtml(root, identity);
-    return Boolean(target && getCropContainer(target));
+    const host = target && getCropContainer(target);
+    if (!host) return false;
+    return host.style.getPropertyValue('position') === 'relative'
+      && host.style.getPropertyValue('overflow') === 'hidden'
+      && Boolean(host.style.getPropertyValue('aspect-ratio'))
+      && target.style.getPropertyValue('position') === 'absolute'
+      && Boolean(target.style.getPropertyValue('left'))
+      && Boolean(target.style.getPropertyValue('top'))
+      && Boolean(target.style.getPropertyValue('width'))
+      && Boolean(target.style.getPropertyValue('height'));
   }
 
   function commitMatchesCurrentEdit(snapshot) {
@@ -2244,6 +2309,7 @@
     state.needsCommit = false;
     const seq = ++state.commitSeq;
     state.commitInFlight = true;
+    state.commitPhase = 'get';
     state.pendingCommitReason = '';
     let failed = false;
     setBadgeText('同步中…');
@@ -2265,10 +2331,17 @@
         state.needsCommit = true;
         return;
       }
+      state.commitPhase = 'set';
       await requestBridge('SET_CONTENT', { content: result.html }, 15000);
+      if (!commitMatchesCurrentEdit(snapshot)) {
+        if (state.interaction) rebaseInteractionAfterEditorWrite(snapshot.identity);
+        else if (state.identity) scheduleSelectedImageReacquire(state.identity, { delay: 0 });
+        return;
+      }
       let cropPersisted = true;
       if (snapshot.cropHtml) {
         try {
+          state.commitPhase = 'verify';
           const verification = await requestBridge('GET_CONTENT', {}, 15000);
           cropPersisted = cropWasPersisted(verification.content, snapshot.identity);
         } catch (error) {
@@ -2278,7 +2351,7 @@
       if (seq === state.commitSeq && commitMatchesCurrentEdit(snapshot)) {
         if (DEBUG) console.info('[公众号源码排版助手] image html synced', reason || '', current.mode || 'unknown');
         setBadgeText(cropPersisted ? '已同步' : '裁切未保留');
-        window.setTimeout(() => reacquireSelectedImage(snapshot.identity), 180);
+        scheduleSelectedImageReacquire(snapshot.identity, { delay: 180, snapshot, seq });
       }
     } catch (error) {
       failed = true;
@@ -2287,6 +2360,7 @@
       setBadgeText('同步失败');
     } finally {
       state.commitInFlight = false;
+      state.commitPhase = '';
       if (state.queuedCommit || (!failed && state.needsCommit)) {
         state.queuedCommit = false;
         scheduleContentCommit('queued');
@@ -2359,7 +2433,7 @@
   }
 
   function hideTools() {
-    if (state.interaction) finishGeometryGesture(undefined, undefined, true);
+    if (state.interaction) finishGeometryGesture(undefined, true);
     exitCropMode();
     state.image = null;
     state.identity = null;
@@ -2496,7 +2570,7 @@
   }
 
   function onHandlePointerCancel(event) {
-    finishGeometryGesture(event, 'overlay');
+    finishGeometryGesture(event, true);
   }
 
   function onDocumentPointer(event) {
@@ -2553,13 +2627,13 @@
   }
 
   function onDocumentPointerMove(event) {
-    if (state.interaction && state.interaction.scope === 'source') stopUiEvent(event);
-    updateGeometryGesture(event, 'source');
+    if (state.interaction) stopUiEvent(event);
+    updateGeometryGesture(event);
   }
 
   function onDocumentPointerUp(event) {
-    if (state.interaction && state.interaction.scope === 'source') stopUiEvent(event);
-    finishGeometryGesture(event, 'source');
+    if (state.interaction) stopUiEvent(event);
+    finishGeometryGesture(event);
   }
 
   function onDocumentDragStart(event) {
@@ -2613,10 +2687,8 @@
 
   function onGlobalPointerUp(event) {
     if (state.interaction) {
-      if (state.interaction.scope === 'overlay') {
-        stopUiEvent(event);
-        finishGeometryGesture(event, 'overlay');
-      }
+      stopUiEvent(event);
+      finishGeometryGesture(event);
       return;
     }
     if (!state.isDragging) return;
@@ -2625,8 +2697,8 @@
   }
 
   function onGlobalPointerMove(event) {
-    if (state.interaction && state.interaction.scope === 'overlay') stopUiEvent(event);
-    updateGeometryGesture(event, 'overlay');
+    if (state.interaction) stopUiEvent(event);
+    updateGeometryGesture(event);
   }
 
   let bindTimer = 0;
@@ -2664,7 +2736,7 @@
     window.addEventListener('pointerup', onGlobalPointerUp, true);
     window.addEventListener('pointercancel', onGlobalPointerUp, true);
     window.addEventListener('mouseup', onGlobalPointerUp, true);
-    window.addEventListener('blur', () => finishGeometryGesture(undefined, undefined, true), true);
+    window.addEventListener('blur', () => finishGeometryGesture(undefined, true), true);
     window.addEventListener('resize', () => {
       if (state.image) schedulePositionTools();
     });
