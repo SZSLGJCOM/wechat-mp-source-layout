@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const VERSION = 'v0.9.5';
+  const VERSION = 'v0.9.6';
   const MENU_ID = 'mpse-img2-menu';
   const PANEL_ID = 'mpse-img2-panel';
   const BOX_ID = 'mpse-img2-box';
@@ -49,7 +49,8 @@
     cropMode: false,
     cropTransientHost: false,
     needsCommit: false,
-    lastSnapshot: null
+    lastSnapshot: null,
+    positionFrame: 0
   };
 
   function isMpHost() {
@@ -391,14 +392,50 @@
       return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height };
     }
     const frameRect = frame.getBoundingClientRect();
+    const frameWidth = Math.max(1, frame.clientWidth || frameRect.width);
+    const frameHeight = Math.max(1, frame.clientHeight || frameRect.height);
+    const scaleX = frameRect.width / frameWidth;
+    const scaleY = frameRect.height / frameHeight;
+    const left = frameRect.left + frame.clientLeft * scaleX + rect.left * scaleX;
+    const top = frameRect.top + frame.clientTop * scaleY + rect.top * scaleY;
     return {
-      left: frameRect.left + rect.left,
-      top: frameRect.top + rect.top,
-      right: frameRect.left + rect.right,
-      bottom: frameRect.top + rect.bottom,
-      width: rect.width,
-      height: rect.height
+      left,
+      top,
+      right: left + rect.width * scaleX,
+      bottom: top + rect.height * scaleY,
+      width: rect.width * scaleX,
+      height: rect.height * scaleY
     };
+  }
+
+  function getTopClientPoint(event) {
+    const x = Number(event && event.clientX);
+    const y = Number(event && event.clientY);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+
+    const sourceDocument = event.target && event.target.ownerDocument;
+    if (!sourceDocument || sourceDocument === document) return { x, y };
+
+    const frame = getFrameByDocument(sourceDocument);
+    if (!frame) return null;
+    const frameRect = frame.getBoundingClientRect();
+    const sourceWindow = sourceDocument.defaultView;
+    const frameWidth = Math.max(1, (sourceWindow && sourceWindow.innerWidth) || frame.clientWidth || frameRect.width);
+    const frameHeight = Math.max(1, (sourceWindow && sourceWindow.innerHeight) || frame.clientHeight || frameRect.height);
+    const scaleX = frameRect.width / frameWidth;
+    const scaleY = frameRect.height / frameHeight;
+    return {
+      x: frameRect.left + frame.clientLeft * scaleX + x * scaleX,
+      y: frameRect.top + frame.clientTop * scaleY + y * scaleY
+    };
+  }
+
+  function schedulePositionTools() {
+    if (state.positionFrame) return;
+    state.positionFrame = window.requestAnimationFrame(() => {
+      state.positionFrame = 0;
+      positionTools();
+    });
   }
 
   function createMenu() {
@@ -500,15 +537,21 @@
     if (box) return box;
     box = document.createElement('div');
     box.id = BOX_ID;
-    box.innerHTML = [
-      'nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'
-    ].map((handle) => `<button type="button" class="mpse-img2-handle mpse-img2-handle-${handle}" data-mpse-image-handle="${handle}" aria-label="${handle}"></button>`).join('');
+    const handles = [
+      ['nw', '左上角缩放'], ['n', '顶部裁切'], ['ne', '右上角缩放'], ['e', '右侧裁切'],
+      ['se', '右下角缩放'], ['s', '底部裁切'], ['sw', '左下角缩放'], ['w', '左侧裁切']
+    ];
+    box.innerHTML = handles.map(([handle, label]) => `<button type="button" class="mpse-img2-handle mpse-img2-handle-${handle}" data-mpse-image-handle="${handle}" aria-label="${label}" title="${label}"></button>`).join('');
     box.addEventListener('pointerdown', (event) => {
       const handle = event.target.closest('[data-mpse-image-handle]');
       if (!handle) return;
       stopUiEvent(event);
-      beginGeometryGesture(handle.dataset.mpseImageHandle, event);
+      beginGeometryGesture(handle.dataset.mpseImageHandle, event, handle);
     }, true);
+    box.addEventListener('pointermove', onDocumentPointerMove, true);
+    box.addEventListener('pointerup', onDocumentPointerUp, true);
+    box.addEventListener('pointercancel', onDocumentPointerUp, true);
+    box.addEventListener('lostpointercapture', onDocumentPointerUp, true);
     document.body.appendChild(box);
     return box;
   }
@@ -715,20 +758,110 @@
     const box = document.getElementById(BOX_ID);
     if (box) box.classList.remove('mpse-crop-mode');
     markChanged(state.image, 'crop-reset');
-    window.requestAnimationFrame(positionTools);
+    schedulePositionTools();
   }
 
-  function setLayoutWidthFromPixels(image, widthPx) {
+  function readLayoutWidthPercent(image, available = getAvailableImageWidth(image)) {
     const host = getLayoutHost(image);
-    if (!host) return;
-    const available = getAvailableImageWidth(image);
-    const width = clamp(widthPx / Math.max(1, available) * 100, 4, 100);
-    setStyles(host, { width: `${width.toFixed(3)}%`, 'max-width': '100%', display: 'block' });
+    if (!host) return 100;
+    const declared = host.style.getPropertyValue('width');
+    if (/%\s*$/.test(declared)) return clamp(parsePercent(declared, 100), 4, 100);
+    const rect = host.getBoundingClientRect();
+    return clamp(rect.width / Math.max(1, available) * 100, 4, 100);
   }
 
-  function beginGeometryGesture(handle, event) {
+  function setLayoutWidthFromPixels(image, widthPx, available = getAvailableImageWidth(image)) {
+    const host = getLayoutHost(image);
+    if (!host) return false;
+    const width = clamp(widthPx / Math.max(1, available) * 100, 4, 100);
+    if (Math.abs(readLayoutWidthPercent(image, available) - width) < 0.01) return false;
+    setStyles(host, { width: `${width.toFixed(3)}%`, 'max-width': '100%', display: 'block' });
+    return true;
+  }
+
+  function cropStatesMatch(first, second) {
+    if (!first || !second) return first === second;
+    return ['x', 'y', 'width', 'height', 'sourceAspect'].every((key) => Math.abs(Number(first[key]) - Number(second[key])) < 0.0001);
+  }
+
+  function capturePointer(target, pointerId) {
+    if (!target || !Number.isFinite(pointerId) || !target.setPointerCapture) return;
+    try {
+      target.setPointerCapture(pointerId);
+    } catch (_) {
+      // Pointer capture can be unavailable across editor frames.
+    }
+  }
+
+  function releasePointer(target, pointerId) {
+    if (!target || !Number.isFinite(pointerId) || !target.releasePointerCapture) return;
+    try {
+      if (!target.hasPointerCapture || target.hasPointerCapture(pointerId)) target.releasePointerCapture(pointerId);
+    } catch (_) {
+      // Pointer capture may already have been released by the browser.
+    }
+  }
+
+  function matchesGeometryPointer(interaction, event) {
+    if (!interaction || !event || !Number.isFinite(interaction.pointerId) || !Number.isFinite(event.pointerId)) return true;
+    return interaction.pointerId === event.pointerId;
+  }
+
+  function queueGeometryPreview(interaction) {
+    if (!interaction || interaction.frame) return;
+    interaction.frame = window.requestAnimationFrame(() => {
+      interaction.frame = 0;
+      if (state.interaction !== interaction) return;
+      flushGeometryPreview(interaction);
+    });
+  }
+
+  function flushGeometryPreview(interaction = state.interaction) {
+    if (!interaction) return;
+    if (interaction.frame) {
+      window.cancelAnimationFrame(interaction.frame);
+      interaction.frame = 0;
+    }
+    const preview = interaction.preview;
+    if (!preview) return;
+    interaction.preview = null;
+
     const image = state.image;
     if (!image || !image.isConnected) return;
+    if (preview.kind === 'resize') {
+      setLayoutWidthFromPixels(image, preview.widthPx, interaction.availableWidth);
+    } else {
+      writeCropState(image, preview.crop);
+    }
+    schedulePositionTools();
+  }
+
+  function hasGeometryChanged(interaction, image) {
+    if (!interaction || !image || !image.isConnected) return false;
+    if (interaction.kind === 'resize') {
+      return Math.abs(readLayoutWidthPercent(image, interaction.availableWidth) - interaction.startWidthPercent) >= 0.01;
+    }
+    return !cropStatesMatch(readCropState(image), interaction.startCrop);
+  }
+
+  function getCornerResizeWidth(interaction, point) {
+    const horizontalDirection = interaction.handle.includes('w') ? -1 : 1;
+    const verticalDirection = interaction.handle.includes('n') ? -1 : 1;
+    const horizontalDelta = horizontalDirection * (point.x - interaction.startX);
+    const verticalDelta = verticalDirection * (point.y - interaction.startY);
+    const horizontalRatio = Math.abs(horizontalDelta / Math.max(1, interaction.rect.width));
+    const verticalRatio = Math.abs(verticalDelta / Math.max(1, interaction.rect.height));
+    const scale = horizontalRatio >= verticalRatio
+      ? 1 + horizontalDelta / Math.max(1, interaction.rect.width)
+      : 1 + verticalDelta / Math.max(1, interaction.rect.height);
+    return Math.max(40, interaction.rect.width * scale);
+  }
+
+  function beginGeometryGesture(handle, event, captureTarget) {
+    const image = state.image;
+    if (!image || !image.isConnected) return;
+    const point = getTopClientPoint(event);
+    if (!point) return;
     const isCorner = ['nw', 'ne', 'se', 'sw'].includes(handle);
     let createdCrop = false;
     if (!isCorner) {
@@ -741,57 +874,58 @@
     state.interaction = {
       kind: isCorner ? 'resize' : 'crop',
       handle,
-      sourceDocument: document,
-      startX: event.clientX,
-      startY: event.clientY,
+      pointerId: event.pointerId,
+      pointerTarget: captureTarget || event.target,
+      startX: point.x,
+      startY: point.y,
       rect,
       startCrop: readCropState(image),
+      startWidthPercent: readLayoutWidthPercent(image),
+      availableWidth: getAvailableImageWidth(image),
       createdCrop,
-      changed: false
+      preview: null,
+      frame: 0
     };
     state.isDragging = true;
-    if (event.currentTarget && event.currentTarget.setPointerCapture) {
-      try {
-        event.currentTarget.setPointerCapture(event.pointerId);
-      } catch (_) {
-        // Pointer capture is optional across editor iframes.
-      }
-    }
+    capturePointer(captureTarget || event.target, event.pointerId);
   }
 
   function beginCropPan(image, event) {
     const result = ensureCropContainer(image);
     if (!result.host) return;
-    const rect = result.host.getBoundingClientRect();
+    const point = getTopClientPoint(event);
+    if (!point) return;
+    const rect = getTopRect(result.host);
     state.interaction = {
       kind: 'pan',
-      sourceDocument: image.ownerDocument,
-      startX: event.clientX,
-      startY: event.clientY,
+      pointerId: event.pointerId,
+      pointerTarget: image,
+      startX: point.x,
+      startY: point.y,
       rect,
       startCrop: readCropState(image),
       createdCrop: result.created,
-      changed: false
+      preview: null,
+      frame: 0
     };
     state.isDragging = true;
+    capturePointer(image, event.pointerId);
   }
 
   function updateGeometryGesture(event) {
     const interaction = state.interaction;
     const image = state.image;
-    if (!interaction || !image || !image.isConnected || event.target.ownerDocument !== interaction.sourceDocument) return;
+    if (!interaction || !image || !image.isConnected || !matchesGeometryPointer(interaction, event)) return;
+    const point = getTopClientPoint(event);
+    if (!point) return;
     const rect = interaction.rect;
     if (rect.width < 1 || rect.height < 1) return;
-    const dx = (event.clientX - interaction.startX) / rect.width;
-    const dy = (event.clientY - interaction.startY) / rect.height;
+    const dx = (point.x - interaction.startX) / rect.width;
+    const dy = (point.y - interaction.startY) / rect.height;
 
     if (interaction.kind === 'resize') {
-      const horizontalDirection = interaction.handle.includes('w') ? -1 : 1;
-      const nextWidth = Math.max(40, rect.width + horizontalDirection * (event.clientX - interaction.startX));
-      setLayoutWidthFromPixels(image, nextWidth);
-      interaction.changed = true;
-      markChanged(image, 'resize');
-      window.requestAnimationFrame(positionTools);
+      interaction.preview = { kind: 'resize', widthPx: getCornerResizeWidth(interaction, point) };
+      queueGeometryPreview(interaction);
       return;
     }
 
@@ -812,10 +946,8 @@
       next.y = start.y + dy;
       next.height = start.height - dy;
     }
-    writeCropState(image, next);
-    interaction.changed = true;
-    markChanged(image, interaction.kind === 'pan' ? 'crop-pan' : 'crop');
-    window.requestAnimationFrame(positionTools);
+    interaction.preview = { kind: 'crop', crop: normalizeCropState(next) };
+    queueGeometryPreview(interaction);
   }
 
   function zoomCrop(image, event) {
@@ -837,17 +969,24 @@
       y: crop.y + crop.height * pointY - height * pointY
     });
     markChanged(image, 'crop-zoom');
-    window.requestAnimationFrame(positionTools);
+    schedulePositionTools();
   }
 
   function finishGeometryGesture(event) {
     const interaction = state.interaction;
-    if (!interaction) return false;
-    if (event && event.target && event.target.ownerDocument !== interaction.sourceDocument) return false;
+    if (!interaction || !matchesGeometryPointer(interaction, event)) return false;
+    flushGeometryPreview(interaction);
+    const image = state.image;
     state.interaction = null;
     state.isDragging = false;
-    if (interaction.createdCrop && !interaction.changed && !state.cropMode) unwrapCropContainer(state.image);
-    if (interaction.changed && state.needsCommit) scheduleContentCommit('drag-end');
+    releasePointer(interaction.pointerTarget, interaction.pointerId);
+    const changed = hasGeometryChanged(interaction, image);
+    if (interaction.createdCrop && !changed && !state.cropMode) state.image = unwrapCropContainer(image);
+    if (changed && state.image) {
+      markChanged(state.image, interaction.kind === 'pan' ? 'crop-pan' : interaction.kind, false);
+      scheduleContentCommit('drag-end');
+    }
+    schedulePositionTools();
     return true;
   }
 
@@ -858,7 +997,7 @@
     state.cropTransientHost = result.created;
     createBox().classList.add('mpse-crop-mode');
     setBadgeText('裁切模式：拖动图片，Ctrl + 滚轮缩放');
-    window.requestAnimationFrame(positionTools);
+    schedulePositionTools();
   }
 
   function exitCropMode() {
@@ -869,7 +1008,7 @@
     if (box) box.classList.remove('mpse-crop-mode');
     const badge = document.getElementById(BADGE_ID);
     if (badge && /裁切/.test(badge.textContent || '')) badge.textContent = '';
-    window.requestAnimationFrame(positionTools);
+    schedulePositionTools();
   }
 
   function setCarrierStyles(image, styles) {
@@ -1277,7 +1416,7 @@
 
     markChanged(image, effect);
     setButtonStates();
-    window.requestAnimationFrame(positionTools);
+    schedulePositionTools();
   }
 
   function clearEffect(effect) {
@@ -1332,7 +1471,7 @@
 
     markChanged(image, `clear-${effect}`);
     setButtonStates();
-    window.requestAnimationFrame(positionTools);
+    schedulePositionTools();
   }
 
   function updateCaption(image, values) {
@@ -1400,7 +1539,7 @@
     }
   }
 
-  function markChanged(image, reason) {
+  function markChanged(image, reason, schedule = true) {
     if (!image || !image.ownerDocument) return;
     image.setAttribute('data-mpse-image-edited', '1');
     state.lastSnapshot = snapshotCurrentImage();
@@ -1414,7 +1553,7 @@
     }
 
     if (DEBUG) console.info('[公众号源码排版助手] image style applied', reason || '', image.getAttribute('style') || '');
-    scheduleContentCommit(reason);
+    if (schedule) scheduleContentCommit(reason);
   }
 
   function setBadgeText(text) {
@@ -1588,7 +1727,7 @@
       if (state.cropMode && !getCropContainer(best)) exitCropMode();
       setButtonStates();
       refreshVisiblePanel();
-      window.requestAnimationFrame(positionTools);
+      schedulePositionTools();
     }
   }
 
@@ -1688,9 +1827,9 @@
 
     const image = findImageFromEvent(event);
     if (image) {
-      event.preventDefault();
       event.stopPropagation();
       if (state.cropMode && image === state.image && getCropContainer(image)) {
+        event.preventDefault();
         beginCropPan(image, event);
         return;
       }
@@ -1758,10 +1897,12 @@
       doc.addEventListener('dblclick', onDocumentDoubleClick, true);
       doc.addEventListener('pointermove', onDocumentPointerMove, true);
       doc.addEventListener('pointerup', onDocumentPointerUp, true);
+      doc.addEventListener('pointercancel', onDocumentPointerUp, true);
+      doc.addEventListener('lostpointercapture', onDocumentPointerUp, true);
       doc.addEventListener('wheel', onDocumentWheel, { capture: true, passive: false });
       doc.addEventListener('keydown', onDocumentKeyDown, true);
       doc.addEventListener('scroll', () => {
-        if (state.image) window.requestAnimationFrame(positionTools);
+        if (state.image) schedulePositionTools();
       }, true);
     }
   }
@@ -1805,12 +1946,14 @@
 
     window.setInterval(scheduleBindDocuments, 1500);
     window.addEventListener('pointerup', onGlobalPointerUp, true);
+    window.addEventListener('pointercancel', onGlobalPointerUp, true);
     window.addEventListener('mouseup', onGlobalPointerUp, true);
+    window.addEventListener('blur', () => finishGeometryGesture(), true);
     window.addEventListener('resize', () => {
-      if (state.image) window.requestAnimationFrame(positionTools);
+      if (state.image) schedulePositionTools();
     });
     window.addEventListener('scroll', () => {
-      if (state.image) window.requestAnimationFrame(positionTools);
+      if (state.image) schedulePositionTools();
     }, true);
 
     console.info(`[公众号源码排版助手] image tools ${VERSION} loaded`);

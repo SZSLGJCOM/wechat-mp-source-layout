@@ -164,3 +164,19 @@ test('image controls separate panel state from persisted edits', () => {
   assert.match(css, /#mpse-img2-box\.mpse-crop-mode/);
   assert.doesNotMatch(css, /mpse-active::after/);
 });
+
+test('image geometry previews defer editor writes until the gesture ends', () => {
+  const imageTools = readText('src/image-tools.js');
+  const css = readText('src/overlay.css');
+  const geometry = imageTools.match(/function updateGeometryGesture\(event\) \{[\s\S]*?\n  \}\n\n  function zoomCrop/);
+
+  assert.ok(geometry, 'geometry update function must exist');
+  assert.match(imageTools, /function getTopClientPoint\(event\)/);
+  assert.match(imageTools, /function queueGeometryPreview\(interaction\)/);
+  assert.doesNotMatch(geometry[0], /markChanged\(|scheduleContentCommit\(/);
+  assert.doesNotMatch(imageTools, /requestAnimationFrame\(positionTools\)/);
+  assert.match(imageTools, /addEventListener\('pointercancel', onDocumentPointerUp, true\)/);
+  assert.match(imageTools, /capturePointer\(image, event\.pointerId\)/);
+  assert.match(css, /#mpse-img2-box \.mpse-img2-handle/);
+  assert.match(css, /width: 26px !important/);
+});
