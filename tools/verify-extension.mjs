@@ -111,12 +111,13 @@ function checkProductWording() {
   const readme = readText('README.md');
   const css = readText('src/overlay.css');
 
-  assert(!/v\d+\.\d+\.\d+/i.test(readme), 'README should avoid historical version headings');
-  assert(!/更新|自检|旧版|开发阶段/.test(readme), 'README should avoid release-log or development wording');
+  assert(/\[查看更新日志\]\(CHANGELOG\.md\)/.test(readme), 'README should link to the changelog');
+  assert(!/自检|旧版|开发阶段/.test(readme), 'README should avoid internal development wording');
   assert(!/\/\*\s*v\d+\.\d+\.\d+/i.test(css), 'overlay.css should avoid historical version comments');
 
   for (const file of [
     'README.md',
+    'CHANGELOG.md',
     'docs/wechat-interface-notes.md',
     'src/content.js',
     'src/image-tools.js',
@@ -124,7 +125,7 @@ function checkProductWording() {
     'src/svg-block-tools.js',
     'src/overlay.css'
   ]) {
-    assert(!/自检|旧版|开发阶段|v\d+\.\d+\.\d+ 生成|旧 SVG/.test(readText(file)), `${file} contains internal release wording`);
+    assert(!/自检|旧版|开发阶段|v\d+\.\d+\.\d+ 生成|旧 SVG/.test(readText(file)), `${file} contains internal development wording`);
   }
 
   assert(!fs.existsSync(resolvePath('docs/self-check-v0.9.4.md')), 'docs/self-check-v0.9.4.md should not be published');

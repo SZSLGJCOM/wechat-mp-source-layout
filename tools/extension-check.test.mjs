@@ -85,18 +85,19 @@ test('bridge request implementation is centralized in bridge-client', () => {
   }
 });
 
-test('README and stylesheet avoid historical version churn', () => {
+test('README presents product updates without internal development wording', () => {
   const readme = readText('README.md');
   const css = readText('src/overlay.css');
 
-  assert.doesNotMatch(readme, /v\d+\.\d+\.\d+/i);
-  assert.doesNotMatch(readme, /更新|自检|旧版|开发阶段/);
+  assert.match(readme, /\[查看更新日志\]\(CHANGELOG\.md\)/);
+  assert.doesNotMatch(readme, /自检|旧版|开发阶段/);
   assert.doesNotMatch(css, /\/\*\s*v\d+\.\d+\.\d+/i);
 });
 
 test('public release files avoid internal release-log wording', () => {
   const publicFiles = [
     'README.md',
+    'CHANGELOG.md',
     'docs/wechat-interface-notes.md',
     'src/content.js',
     'src/image-tools.js',
