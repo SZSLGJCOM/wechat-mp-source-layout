@@ -180,3 +180,29 @@ test('image geometry previews defer editor writes until the gesture ends', () =>
   assert.match(css, /#mpse-img2-box \.mpse-img2-handle/);
   assert.match(css, /width: 26px !important/);
 });
+
+test('image selection follows the visible editor area and crop entry uses pointer presses', () => {
+  const imageTools = readText('src/image-tools.js');
+  const css = readText('src/overlay.css');
+
+  assert.match(imageTools, /function isSelectionVisible\(image, rect\)/);
+  assert.match(imageTools, /function getFrameContentRect\(frame\)/);
+  assert.match(imageTools, /function isRepeatedImagePress\(image, event\)/);
+  assert.doesNotMatch(imageTools, /function onDocumentDoubleClick\(/);
+  assert.doesNotMatch(imageTools, /addEventListener\('dblclick', onDocumentDoubleClick/);
+  assert.match(imageTools, /setToolElementsOffscreen\(true\)/);
+  assert.match(css, /#mpse-img2-menu\.mpse-offscreen/);
+});
+
+test('image appearance effects are reversible and follow the crop container', () => {
+  const imageTools = readText('src/image-tools.js');
+
+  assert.match(imageTools, /const APPEARANCE_EFFECTS = \{/);
+  assert.match(imageTools, /function getAppearanceHost\(image\)/);
+  assert.match(imageTools, /function renderAppearance\(image\)/);
+  assert.match(imageTools, /mpseFeatherOn/);
+  assert.match(imageTools, /mpseStrokeOn/);
+  assert.match(imageTools, /mpseOpacityOn/);
+  assert.match(imageTools, /mask-image/);
+  assert.match(imageTools, /outline-offset/);
+});

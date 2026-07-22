@@ -387,6 +387,8 @@
   border-radius: 12px;
   background: rgba(255, 255, 255, 0.96);
   box-shadow: 0 8px 26px rgba(15, 35, 55, 0.14);
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", Arial, sans-serif;
 }
 
@@ -444,7 +446,9 @@
   border-radius: 12px;
   background: #fff;
   box-shadow: 0 10px 34px rgba(15, 35, 55, 0.16);
-  overflow: hidden;
+  max-height: calc(100vh - 16px);
+  overflow-x: hidden;
+  overflow-y: auto;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", Arial, sans-serif;
 }
 
@@ -675,6 +679,14 @@
 
 #mpse-img2-badge.mpse-visible {
   display: block;
+}
+
+#mpse-img2-menu.mpse-offscreen,
+#mpse-img2-panel.mpse-offscreen,
+#mpse-img2-box.mpse-offscreen,
+#mpse-img2-badge.mpse-offscreen {
+  visibility: hidden !important;
+  pointer-events: none !important;
 }
 
 

@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const VERSION = 'v0.9.6';
+  const VERSION = 'v0.9.7';
   const MENU_ID = 'mpse-img2-menu';
   const PANEL_ID = 'mpse-img2-panel';
   const BOX_ID = 'mpse-img2-box';
@@ -29,8 +29,32 @@
     'mpseGlowOn', 'mpseGlowBlur', 'mpseGlowSpread', 'mpseGlowOpacity', 'mpseGlowColor',
     'mpseBrightness', 'mpseContrast', 'mpseSaturate', 'mpseGray', 'mpseRotate',
     'mpseShadowOn', 'mpseShadowX', 'mpseShadowY', 'mpseShadowBlur', 'mpseShadowSpread', 'mpseShadowOpacity', 'mpseShadowColor',
-    'mpseBaseBoxShadow', 'mpseCircleOn', 'mpseCircleBase', 'mpseColorBase', 'mpseRotateBase', 'mpseFrameBase'
+    'mpseBaseBoxShadow', 'mpseCircleOn', 'mpseCircleBase', 'mpseColorBase', 'mpseRotateBase', 'mpseFrameBase',
+    'mpseFeatherOn', 'mpseFeatherAmount', 'mpseFeatherBase',
+    'mpseStrokeOn', 'mpseStrokeWidth', 'mpseStrokeColor', 'mpseStrokeOpacity', 'mpseStrokeBase',
+    'mpseOpacityOn', 'mpseOpacityValue', 'mpseOpacityBase'
   ];
+
+  const APPEARANCE_EFFECTS = {
+    feather: {
+      activeKey: 'mpseFeatherOn',
+      baseKey: 'mpseFeatherBase',
+      valueKeys: ['mpseFeatherAmount'],
+      props: ['mask-image', '-webkit-mask-image', 'mask-size', '-webkit-mask-size', 'mask-repeat', '-webkit-mask-repeat', 'mask-position', '-webkit-mask-position']
+    },
+    stroke: {
+      activeKey: 'mpseStrokeOn',
+      baseKey: 'mpseStrokeBase',
+      valueKeys: ['mpseStrokeWidth', 'mpseStrokeColor', 'mpseStrokeOpacity'],
+      props: ['outline', 'outline-offset']
+    },
+    opacity: {
+      activeKey: 'mpseOpacityOn',
+      baseKey: 'mpseOpacityBase',
+      valueKeys: ['mpseOpacityValue'],
+      props: ['opacity']
+    }
+  };
 
   const DEBUG = false;
 
@@ -50,7 +74,8 @@
     cropTransientHost: false,
     needsCommit: false,
     lastSnapshot: null,
-    positionFrame: 0
+    positionFrame: 0,
+    lastImagePress: null
   };
 
   function isMpHost() {
@@ -131,6 +156,11 @@
 
   function readStyleNumber(image, prop, fallback = 0) {
     return parsePx(image && image.style ? image.style.getPropertyValue(prop) : '', fallback);
+  }
+
+  function readOpacityPercent(image, fallback = 100) {
+    const value = Number(image && image.style ? image.style.getPropertyValue('opacity') : NaN);
+    return Number.isFinite(value) ? clampInt(value * 100, 0, 100, fallback) : fallback;
   }
 
   function readBorderWidth(image, fallback = 1) {
@@ -235,6 +265,9 @@
     if (top > 0 || bottom > 0) applied.add('spacing');
     if (image.dataset.mpseShadowOn === '1') applied.add('shadow');
     if (image.dataset.mpseGlowOn === '1') applied.add('glow');
+    if (image.dataset.mpseFeatherOn === '1') applied.add('feather');
+    if (image.dataset.mpseStrokeOn === '1') applied.add('stroke');
+    if (image.dataset.mpseOpacityOn === '1') applied.add('opacity');
     if (shadow && image.dataset.mpseShadowOn !== '1' && image.dataset.mpseGlowOn !== '1') applied.add('shadow');
     if (filter && !/^brightness\(100%\)\s+contrast\(100%\)\s+saturate\(100%\)$/i.test(filter.trim())) applied.add('color');
     if (readRotateAngle(image) !== 0) applied.add('rotate');
@@ -408,6 +441,51 @@
     };
   }
 
+  function rectContains(outer, inner) {
+    const tolerance = 1;
+    return inner.left >= outer.left - tolerance && inner.right <= outer.right + tolerance
+      && inner.top >= outer.top - tolerance && inner.bottom <= outer.bottom + tolerance;
+  }
+
+  function getViewportRect() {
+    return { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight };
+  }
+
+  function getFrameContentRect(frame) {
+    const rect = frame.getBoundingClientRect();
+    const width = Math.max(1, frame.clientWidth || rect.width);
+    const height = Math.max(1, frame.clientHeight || rect.height);
+    const scaleX = rect.width / width;
+    const scaleY = rect.height / height;
+    const left = rect.left + frame.clientLeft * scaleX;
+    const top = rect.top + frame.clientTop * scaleY;
+    return { left, top, right: left + width * scaleX, bottom: top + height * scaleY };
+  }
+
+  function isClippingAncestor(element) {
+    const view = element && element.ownerDocument && element.ownerDocument.defaultView;
+    if (!view || !element) return false;
+    const style = view.getComputedStyle(element);
+    return /(?:hidden|clip|auto|scroll)/.test(`${style.overflow} ${style.overflowX} ${style.overflowY}`);
+  }
+
+  function isSelectionVisible(image, rect) {
+    if (!rectContains(getViewportRect(), rect)) return false;
+    const frame = getFrameByDocument(image.ownerDocument);
+    if (frame && !rectContains(getFrameContentRect(frame), rect)) return false;
+
+    const selection = getSelectionElement(image);
+    for (let parent = selection.parentElement; parent && parent !== image.ownerDocument.documentElement; parent = parent.parentElement) {
+      if (isClippingAncestor(parent) && !rectContains(getTopRect(parent), rect)) return false;
+    }
+    if (frame) {
+      for (let parent = frame.parentElement; parent && parent !== document.documentElement; parent = parent.parentElement) {
+        if (isClippingAncestor(parent) && !rectContains(getTopRect(parent), rect)) return false;
+      }
+    }
+    return true;
+  }
+
   function getTopClientPoint(event) {
     const x = Number(event && event.clientX);
     const y = Number(event && event.clientY);
@@ -449,7 +527,10 @@
       <button type="button" data-effect="spacing" title="上下间距">间距</button>
       <button type="button" data-effect="shadow" title="图片阴影">阴影</button>
       <button type="button" data-effect="glow" title="图片本体发光">发光</button>
+      <button type="button" data-effect="feather" title="边缘羽化">羽化</button>
+      <button type="button" data-effect="stroke" title="图片描边">描边</button>
       <button type="button" data-effect="color" title="亮度/对比/饱和">色彩</button>
+      <button type="button" data-effect="opacity" title="图片透明度">透明</button>
       <button type="button" data-effect="rotate" title="旋转">旋转</button>
       <button type="button" data-effect="frame" title="相框">相框</button>
       <button type="button" data-effect="caption" title="图注">图注</button>
@@ -614,6 +695,10 @@
     return getCropContainer(image) || image;
   }
 
+  function getAppearanceHost(image) {
+    return getCropContainer(image) || image;
+  }
+
   function getSelectionElement(image) {
     return getCropContainer(image) || image;
   }
@@ -644,6 +729,11 @@
       height,
       sourceAspect: Number.isFinite(rawAspect) ? clamp(rawAspect, 0.05, 40) : 1
     };
+  }
+
+  function hasCropAdjustment(image) {
+    const crop = readCropState(image);
+    return Boolean(crop && (crop.x > 0.0001 || crop.y > 0.0001 || crop.width < 0.9999 || crop.height < 0.9999));
   }
 
   function normalizeCropState(next) {
@@ -733,6 +823,7 @@
     const radius = image.style.getPropertyValue('border-radius');
     if (radius) setStyle(host, 'border-radius', radius);
     writeCropState(image, { x: 0, y: 0, width: 1, height: 1, sourceAspect });
+    renderAppearance(image);
     return { host, created: true };
   }
 
@@ -746,6 +837,7 @@
     copyLayoutStyles(host, image);
     parent.insertBefore(image, host);
     host.remove();
+    renderAppearance(image);
     return image;
   }
 
@@ -1001,7 +1093,13 @@
   }
 
   function exitCropMode() {
-    if (state.cropTransientHost && !state.needsCommit && state.image) unwrapCropContainer(state.image);
+    const image = state.image;
+    const shouldUnwrap = state.cropTransientHost && !state.needsCommit && image
+      && getCropContainer(image) && !hasCropAdjustment(image);
+    if (shouldUnwrap) {
+      state.image = unwrapCropContainer(image);
+      if (hasAppearanceEffects(state.image)) markChanged(state.image, 'crop-exit');
+    }
     state.cropMode = false;
     state.cropTransientHost = false;
     const box = document.getElementById(BOX_ID);
@@ -1108,22 +1206,163 @@
     delete image.dataset.mpseCircleOn;
   }
 
-  function captureStyleBase(image, key, props) {
+  function captureStyleBase(image, key, props, target = image) {
     if (!image || image.dataset[key]) return;
     const values = {};
-    for (const prop of props) values[prop] = image.style.getPropertyValue(prop) || '';
+    for (const prop of props) {
+      values[prop] = {
+        value: target.style.getPropertyValue(prop) || '',
+        priority: target.style.getPropertyPriority(prop) || ''
+      };
+    }
     image.dataset[key] = JSON.stringify(values);
   }
 
-  function restoreStyleBase(image, key, props) {
+  function applyStyleBase(image, key, props, target = image) {
     if (!image) return;
     try {
       const values = JSON.parse(image.dataset[key] || '{}');
-      for (const prop of props) setStyle(image, prop, values[prop] || '');
+      for (const prop of props) {
+        const entry = values[prop];
+        if (entry && typeof entry === 'object') {
+          setStyle(target, prop, entry.value || '', entry.priority === 'important');
+        } else {
+          setStyle(target, prop, entry || '');
+        }
+      }
     } catch (_) {
-      for (const prop of props) setStyle(image, prop, '');
+      for (const prop of props) setStyle(target, prop, '');
     }
+  }
+
+  function restoreStyleBase(image, key, props, target = image) {
+    applyStyleBase(image, key, props, target);
     delete image.dataset[key];
+  }
+
+  function appearanceConfig(effect) {
+    return APPEARANCE_EFFECTS[effect] || null;
+  }
+
+  function isAppearanceEnabled(image, effect) {
+    const config = appearanceConfig(effect);
+    return Boolean(config && image && image.dataset[config.activeKey] === '1');
+  }
+
+  function hasAppearanceEffects(image) {
+    return ['feather', 'stroke', 'opacity'].some((effect) => isAppearanceEnabled(image, effect));
+  }
+
+  function clearAppearanceProperties(target, props) {
+    for (const prop of props) setStyle(target, prop, '');
+  }
+
+  function getAppearanceStyles(image, effect) {
+    if (effect === 'feather') {
+      const amount = clamp(getDataNumber(image, 'mpseFeatherAmount', 0), 0, 45);
+      const opaqueStop = clamp(100 - amount * 2, 0, 100);
+      const mask = `radial-gradient(ellipse at center, #000 0%, #000 ${opaqueStop}%, transparent 100%)`;
+      return {
+        'mask-image': mask,
+        '-webkit-mask-image': mask,
+        'mask-size': '100% 100%',
+        '-webkit-mask-size': '100% 100%',
+        'mask-repeat': 'no-repeat',
+        '-webkit-mask-repeat': 'no-repeat',
+        'mask-position': 'center',
+        '-webkit-mask-position': 'center'
+      };
+    }
+    if (effect === 'stroke') {
+      const width = clamp(getDataNumber(image, 'mpseStrokeWidth', 0), 0, 20);
+      const color = getDataString(image, 'mpseStrokeColor', '#07c160');
+      const opacity = clamp(getDataNumber(image, 'mpseStrokeOpacity', 100), 0, 100) / 100;
+      return { outline: `${width}px solid ${hexToRgba(color, opacity, '#07c160')}`, 'outline-offset': '0px' };
+    }
+    if (effect === 'opacity') {
+      return { opacity: String(clamp(getDataNumber(image, 'mpseOpacityValue', 100), 0, 100) / 100) };
+    }
+    return {};
+  }
+
+  function renderAppearance(image) {
+    if (!image || !image.style) return;
+    const host = getAppearanceHost(image);
+    for (const effect of ['feather', 'stroke', 'opacity']) {
+      const config = appearanceConfig(effect);
+      const enabled = isAppearanceEnabled(image, effect);
+      const hasBase = image.dataset[config.baseKey] !== undefined;
+      if (host !== image && (enabled || hasBase)) clearAppearanceProperties(host, config.props);
+      if (enabled) {
+        if (host !== image) clearAppearanceProperties(image, config.props);
+        setStyles(host, getAppearanceStyles(image, effect));
+      } else if (hasBase) {
+        applyStyleBase(image, config.baseKey, config.props, image);
+      }
+    }
+  }
+
+  function clearAppearanceEffect(image, effect) {
+    const config = appearanceConfig(effect);
+    if (!config || !image) return;
+    delete image.dataset[config.activeKey];
+    for (const key of config.valueKeys) delete image.dataset[key];
+    renderAppearance(image);
+    delete image.dataset[config.baseKey];
+  }
+
+  function resetAppearanceEffects(image) {
+    if (!image) return;
+    const host = getAppearanceHost(image);
+    for (const effect of ['feather', 'stroke', 'opacity']) {
+      const config = appearanceConfig(effect);
+      const hasBase = image.dataset[config.baseKey] !== undefined;
+      const enabled = isAppearanceEnabled(image, effect);
+      if (host !== image && (enabled || hasBase)) clearAppearanceProperties(host, config.props);
+      if (hasBase || enabled) restoreStyleBase(image, config.baseKey, config.props, image);
+      delete image.dataset[config.activeKey];
+      for (const key of config.valueKeys) delete image.dataset[key];
+    }
+  }
+
+  function applyAppearanceEffect(image, effect, values) {
+    const config = appearanceConfig(effect);
+    if (!config || !image) return;
+    captureStyleBase(image, config.baseKey, config.props);
+
+    if (effect === 'feather') {
+      const amount = clamp(values.amount, 0, 45);
+      if (amount <= 0) {
+        clearAppearanceEffect(image, effect);
+        return;
+      }
+      image.dataset.mpseFeatherOn = '1';
+      image.dataset.mpseFeatherAmount = String(amount);
+    }
+
+    if (effect === 'stroke') {
+      const width = clamp(values.width, 0, 20);
+      if (width <= 0) {
+        clearAppearanceEffect(image, effect);
+        return;
+      }
+      image.dataset.mpseStrokeOn = '1';
+      image.dataset.mpseStrokeWidth = String(width);
+      image.dataset.mpseStrokeColor = values.strokeColor || '#07c160';
+      image.dataset.mpseStrokeOpacity = String(clamp(values.opacity, 0, 100));
+    }
+
+    if (effect === 'opacity') {
+      const value = clamp(values.value, 0, 100);
+      if (value >= 100) {
+        clearAppearanceEffect(image, effect);
+        return;
+      }
+      image.dataset.mpseOpacityOn = '1';
+      image.dataset.mpseOpacityValue = String(value);
+    }
+
+    renderAppearance(image);
   }
 
   function range(label, name, min, max, step, value, suffix = '') {
@@ -1205,7 +1444,10 @@
     if (effect === 'spacing') return `${range('上间距', 'top', 0, 120, 1, top, 'px')}${range('下间距', 'bottom', 0, 120, 1, bottom, 'px')}`;
     if (effect === 'shadow') return `${range('水平', 'x', -80, 80, 1, getDataNumber(image, 'mpseShadowX', clampInt(shadowDefaults.x, -80, 80, 0)), 'px')}${range('下移', 'y', -80, 80, 1, getDataNumber(image, 'mpseShadowY', clampInt(shadowDefaults.y, -80, 80, 8)), 'px')}${range('模糊', 'blur', 0, 120, 1, getDataNumber(image, 'mpseShadowBlur', clampInt(shadowDefaults.blur, 0, 120, 24)), 'px')}${range('扩散', 'spread', -40, 40, 1, getDataNumber(image, 'mpseShadowSpread', clampInt(shadowDefaults.spread, -40, 40, 0)), 'px')}${range('透明度', 'opacity', 0, 100, 1, getDataNumber(image, 'mpseShadowOpacity', clampInt(shadowDefaults.opacity * 100, 0, 100, 16)), '%')}${color('阴影颜色', 'shadowColor', getDataString(image, 'mpseShadowColor', shadowDefaults.color || '#0f2337'))}`;
     if (effect === 'glow') return `${range('发光半径', 'blur', 0, 120, 1, getDataNumber(image, 'mpseGlowBlur', clampInt(shadowDefaults.blur, 0, 120, 22)), 'px')}${range('扩散', 'spread', 0, 40, 1, getDataNumber(image, 'mpseGlowSpread', clampInt(shadowDefaults.spread, 0, 40, 0)), 'px')}${range('发光强度', 'opacity', 0, 100, 1, getDataNumber(image, 'mpseGlowOpacity', clampInt(shadowDefaults.opacity * 100, 0, 100, 55)), '%')}${color('发光颜色', 'glowColor', getDataString(image, 'mpseGlowColor', shadowDefaults.color || '#ffd447'))}`;
+    if (effect === 'feather') return range('羽化范围', 'amount', 0, 45, 1, getDataNumber(image, 'mpseFeatherAmount', 0), '%');
+    if (effect === 'stroke') return `${range('描边宽度', 'width', 0, 20, 1, getDataNumber(image, 'mpseStrokeWidth', 0), 'px')}${range('描边透明度', 'opacity', 0, 100, 1, getDataNumber(image, 'mpseStrokeOpacity', 100), '%')}${color('描边颜色', 'strokeColor', getDataString(image, 'mpseStrokeColor', '#07c160'))}`;
     if (effect === 'color') return `${range('亮度', 'brightness', 40, 180, 1, colorDefaults.brightness, '%')}${range('对比度', 'contrast', 40, 180, 1, colorDefaults.contrast, '%')}${range('饱和度', 'saturate', 0, 240, 1, colorDefaults.saturate, '%')}${range('灰度', 'gray', 0, 100, 1, colorDefaults.gray, '%')}`;
+    if (effect === 'opacity') return range('图片透明度', 'value', 0, 100, 1, getDataNumber(image, 'mpseOpacityValue', readOpacityPercent(image, 100)), '%');
     if (effect === 'rotate') return range('角度', 'angle', -180, 180, 1, readRotateAngle(image), '°');
     if (effect === 'frame') return `${range('边框宽度', 'borderWidth', 0, 20, 1, readBorderWidth(image, 1), 'px')}${range('内边距', 'padding', 0, 40, 1, readStyleNumber(image, 'padding', 4), 'px')}${range('框圆角', 'radius', 0, 80, 1, radius, 'px')}${color('边框颜色', 'borderColor', readBorderColor(image, '#e6e8eb'))}${color('底色', 'backgroundColor', readBackgroundColor(image, '#ffffff'))}`;
     if (effect === 'caption') {
@@ -1236,6 +1478,9 @@
   function panelTipForEffect(effect) {
     if (effect === 'size') return '角点等比缩放，边中点裁切；双击图片进入裁切模式，拖动图片并用 Ctrl + 滚轮缩放。';
     if (effect === 'shadow' || effect === 'glow') return '阴影/发光的边角跟随图片圆角；需要圆角请单独调“圆角”。';
+    if (effect === 'feather') return '羽化作用于图片或裁切容器的边缘，拖到 0 可恢复原状。';
+    if (effect === 'stroke') return '描边不改变图片尺寸，也不会影响阴影、发光或相框。';
+    if (effect === 'opacity') return '透明度作用于整张图片；调回 100% 可恢复原始透明度。';
     return '只有实际调整后才会同步到正文 HTML';
   }
 
@@ -1247,6 +1492,7 @@
     if (!image) return false;
     if (effect === 'shadow') return image.dataset.mpseShadowOn === '1';
     if (effect === 'glow') return image.dataset.mpseGlowOn === '1';
+    if (appearanceConfig(effect)) return isAppearanceEnabled(image, effect);
     return getAppliedEffects(image).has(effect);
   }
 
@@ -1265,7 +1511,7 @@
     }
 
     state.activePanel = effect;
-    const titles = { radius: '圆角', size: '尺寸', spacing: '间距', shadow: '阴影', glow: '发光', color: '色彩', rotate: '旋转', frame: '相框', caption: '图注', circle: '圆形' };
+    const titles = { radius: '圆角', size: '尺寸', spacing: '间距', shadow: '阴影', glow: '发光', feather: '羽化', stroke: '描边', color: '色彩', opacity: '透明度', rotate: '旋转', frame: '相框', caption: '图注', circle: '圆形' };
     const panel = createPanel();
     const supportsToggle = isToggleEffect(effect);
     const enabled = isEffectEnabled(image, effect);
@@ -1374,6 +1620,8 @@
       applyGlowBoxShadow(image, values);
     }
 
+    if (appearanceConfig(effect)) applyAppearanceEffect(image, effect, values);
+
     if (effect === 'color') {
       captureStyleBase(image, 'mpseColorBase', ['filter']);
       image.dataset.mpseBrightness = String(clamp(values.brightness, 40, 180));
@@ -1450,6 +1698,7 @@
         delete image.dataset.mpseBaseBoxShadow;
       }
     }
+    if (appearanceConfig(effect)) clearAppearanceEffect(image, effect);
     if (effect === 'color') {
       for (const key of ['mpseBrightness', 'mpseContrast', 'mpseSaturate', 'mpseGray']) delete image.dataset[key];
       restoreStyleBase(image, 'mpseColorBase', ['filter']);
@@ -1495,6 +1744,7 @@
     if (!image || !image.isConnected) return;
     state.image = image;
     exitCropMode();
+    resetAppearanceEffects(image);
     for (const prop of MANAGED_STYLE_PROPS) image.style.removeProperty(prop);
     for (const key of MANAGED_DATA_KEYS) delete image.dataset[key];
     const carrier = getVisualCarrier(image);
@@ -1738,15 +1988,23 @@
     createMenu().classList.add('mpse-visible');
     createBox().classList.add('mpse-visible');
     createBadge().classList.add('mpse-visible');
+    setToolElementsOffscreen(false);
     setButtonStates();
     refreshVisiblePanel();
     positionTools();
   }
 
+  function setToolElementsOffscreen(offscreen) {
+    for (const id of [MENU_ID, PANEL_ID, BOX_ID, BADGE_ID]) {
+      const element = document.getElementById(id);
+      if (element) element.classList.toggle('mpse-offscreen', offscreen);
+    }
+  }
+
   function hideToolElements() {
     for (const id of [MENU_ID, PANEL_ID, BOX_ID, BADGE_ID]) {
       const element = document.getElementById(id);
-      if (element) element.classList.remove('mpse-visible');
+      if (element) element.classList.remove('mpse-visible', 'mpse-offscreen');
     }
   }
 
@@ -1756,6 +2014,7 @@
     state.identity = null;
     state.activePanel = null;
     state.interaction = null;
+    state.lastImagePress = null;
     hideToolElements();
   }
 
@@ -1776,9 +2035,15 @@
     }
     const rect = getTopRect(getSelectionElement(image));
     if (rect.width < 1 || rect.height < 1) {
-      hideToolElements();
+      setToolElementsOffscreen(true);
       return;
     }
+    if (!isSelectionVisible(image, rect)) {
+      if (state.interaction) finishGeometryGesture();
+      setToolElementsOffscreen(true);
+      return;
+    }
+    setToolElementsOffscreen(false);
 
     setStyles(box, { left: `${rect.left}px`, top: `${rect.top}px`, width: `${rect.width}px`, height: `${rect.height}px` });
     box.classList.toggle('mpse-crop-mode', state.cropMode);
@@ -1789,7 +2054,8 @@
     let menuLeft = rect.right + gap;
     if (menuLeft + menuWidth > window.innerWidth - 8) menuLeft = rect.left - menuWidth - gap;
     menuLeft = Math.max(8, Math.min(menuLeft, window.innerWidth - menuWidth - 8));
-    const menuTop = Math.max(8, Math.min(rect.top + 4, window.innerHeight - 330));
+    const menuHeight = Math.min(menu.offsetHeight || 330, Math.max(1, window.innerHeight - 16));
+    const menuTop = Math.max(8, Math.min(rect.top + 4, window.innerHeight - menuHeight - 8));
 
     menu.style.left = `${menuLeft}px`;
     menu.style.top = `${menuTop}px`;
@@ -1816,6 +2082,15 @@
     return image && isLikelyArticleImage(image) ? image : null;
   }
 
+  function isRepeatedImagePress(image, event) {
+    const point = getTopClientPoint(event);
+    const now = Date.now();
+    const previous = state.lastImagePress;
+    state.lastImagePress = { image, time: now, x: point ? point.x : NaN, y: point ? point.y : NaN };
+    if (!previous || previous.image !== image || now - previous.time > 360 || !point) return false;
+    return Math.hypot(point.x - previous.x, point.y - previous.y) <= 14;
+  }
+
   function onDocumentPointer(event) {
     if (!event || !event.target) return;
     if (event.type !== 'pointerdown' || event.button !== 0) return;
@@ -1827,9 +2102,19 @@
 
     const image = findImageFromEvent(event);
     if (image) {
+      const repeatedPress = isRepeatedImagePress(image, event);
+      const wasCropMode = state.cropMode && image === state.image;
+      event.preventDefault();
       event.stopPropagation();
+      if (repeatedPress) {
+        state.lastImagePress = null;
+        if (state.interaction) finishGeometryGesture();
+        showToolsForImage(image);
+        if (wasCropMode) exitCropMode();
+        else enterCropMode(image);
+        return;
+      }
       if (state.cropMode && image === state.image && getCropContainer(image)) {
-        event.preventDefault();
         beginCropPan(image, event);
         return;
       }
@@ -1837,22 +2122,8 @@
       return;
     }
 
+    state.lastImagePress = null;
     hideTools();
-  }
-
-  function onDocumentDoubleClick(event) {
-    if (!event || !event.target || isExtensionElement(event.target)) return;
-    if (document.getElementById('mpse-inline-panel')) return;
-    const image = findImageFromEvent(event);
-    if (!image) return;
-    event.preventDefault();
-    event.stopPropagation();
-    showToolsForImage(image);
-    if (state.cropMode) {
-      exitCropMode();
-    } else {
-      enterCropMode(image);
-    }
   }
 
   function onDocumentWheel(event) {
@@ -1894,7 +2165,6 @@
       }
       if (root) root.setAttribute(GENERIC_BOUND_ATTR, VERSION);
       doc.addEventListener('pointerdown', onDocumentPointer, true);
-      doc.addEventListener('dblclick', onDocumentDoubleClick, true);
       doc.addEventListener('pointermove', onDocumentPointerMove, true);
       doc.addEventListener('pointerup', onDocumentPointerUp, true);
       doc.addEventListener('pointercancel', onDocumentPointerUp, true);
