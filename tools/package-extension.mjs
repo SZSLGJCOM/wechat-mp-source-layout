@@ -32,7 +32,7 @@ try {
     'archive',
     '--format=zip',
     `--output=${archivePath}`,
-    `--prefix=${productName}/`,
+    `--prefix=${releaseSlug}/`,
     'HEAD',
     ...packageFiles
   ], { cwd: rootDir, stdio: 'inherit' });
