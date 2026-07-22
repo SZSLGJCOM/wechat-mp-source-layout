@@ -177,9 +177,28 @@ test('image geometry previews defer editor writes until the gesture ends', () =>
   assert.doesNotMatch(imageTools, /requestAnimationFrame\(positionTools\)/);
   assert.match(imageTools, /addEventListener\('pointercancel', onDocumentPointerUp, true\)/);
   assert.match(imageTools, /capturePointer\(image, event\.pointerId\)/);
-  assert.match(imageTools, /function updateGeometryOverlay\(interaction, preview\)/);
+  assert.match(imageTools, /function updateGeometryOverlay\(image = state\.image\)/);
+  assert.match(imageTools, /const rect = getTopRect\(getSelectionElement\(image\)\);/);
+  assert.doesNotMatch(imageTools, /function getResizePreviewRect\(/);
   assert.match(css, /\.mpse-img2-handle\.mpse-visible/);
   assert.match(css, /width: 38px !important/);
+});
+
+test('image geometry owns the drag session and blocks stale editor writes', () => {
+  const imageTools = readText('src/image-tools.js');
+  const css = readText('src/overlay.css');
+  const beginGesture = imageTools.match(/function beginGeometryGesture\(handle, event, captureTarget\) \{[\s\S]*?\n  \}\n\n  function beginCropPan/);
+
+  assert.ok(beginGesture, 'geometry start function must exist');
+  assert.doesNotMatch(beginGesture[0], /ensureCropContainer\(/);
+  assert.match(imageTools, /GEOMETRY_DRAG_THRESHOLD = 4/);
+  assert.match(imageTools, /function initializeCropGesture\(/);
+  assert.match(imageTools, /function showDragShield\(/);
+  assert.match(imageTools, /addEventListener\('dragstart', onDocumentDragStart, true\)/);
+  assert.match(imageTools, /function commitMatchesCurrentEdit\(/);
+  assert.doesNotMatch(imageTools, /function dispatchEditorEvent\(/);
+  assert.match(css, /#mpse-img2-drag-shield\.mpse-visible/);
+  assert.match(css, /cursor: nwse-resize !important/);
 });
 
 test('image selection follows the visible editor area and crop entry has native fallback', () => {

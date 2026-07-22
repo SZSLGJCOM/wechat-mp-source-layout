@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>图片手势回归</title>
+  <link rel="stylesheet" href="/src/overlay.css">
+  <style>
+    html, body { margin: 0; min-height: 100%; background: #f3f5f7; }
+    iframe { display: block; width: 760px; height: 620px; margin: 48px auto; border: 1px solid #d8dee5; background: #fff; }
+  </style>
+</head>
+<body>
+  <iframe id="ueditor_0" title="编辑器"></iframe>
+  <script>
+    const frame = document.getElementById('ueditor_0');
+    frame.srcdoc = `<!doctype html><html><head><style>
+      html,body{margin:0;background:#fff} body{padding:32px;font-family:sans-serif}
+      #editor{width:640px;min-height:1000px;margin:0 auto;outline:none}
+      p{margin:0 0 24px} img{vertical-align:top}
+    </style></head><body><main id="editor" class="ProseMirror" contenteditable="true">
+      <p>图片上方正文</p>
+      <img id="article-image" alt="测试图片" draggable="true" style="width:50%;max-width:100%;display:block" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='800' height='480'%3E%3Crect width='800' height='480' fill='%2307c160'/%3E%3Cpath d='M0 360L220 180l180 130 120-90 280 180v80H0z' fill='%23dff8e8'/%3E%3C/svg%3E">
+      <p>图片下方正文</p>
+    </main></body></html>`;
+
+    frame.addEventListener('load', async () => {
+      window.__MPSE_BRIDGE_CLIENT__ = {
+        inject: () => true,
+        request: async (type, payload) => {
+          const root = frame.contentDocument.getElementById('editor');
+          if (type === 'GET_CONTENT') return { content: root.innerHTML, mode: 'harness' };
+          if (type === 'SET_CONTENT') {
+            root.innerHTML = payload.content;
+            return { ok: true };
+          }
+          return {};
+        }
+      };
+      const source = await fetch('/src/image-tools.js').then((response) => response.text());
+      window.eval(source.replace("return location.hostname === 'mp.weixin.qq.com';", 'return true;'));
+      document.documentElement.dataset.harnessReady = '1';
+    }, { once: true });
+  </script>
+</body>
+</html>

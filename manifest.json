@@ -16,6 +16,7 @@
       "js": [
         "src/bridge-client.js",
         "src/content.js",
+        "src/image-geometry.js",
         "src/image-tools.js",
         "src/svg-tools.js",
         "src/svg-block-tools.js"

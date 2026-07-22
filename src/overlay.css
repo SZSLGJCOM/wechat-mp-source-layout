@@ -369,7 +369,8 @@
 #mpse-img2-panel,
 #mpse-img2-box,
 #mpse-img2-badge,
-#mpse-img2-handle,
+.mpse-img2-handle,
+#mpse-img2-drag-shield,
 #mpse-img2-menu *,
 #mpse-img2-panel *,
 #mpse-img2-box * {
@@ -586,14 +587,14 @@
 
 #mpse-img2-box {
   position: fixed;
-  z-index: 2147483645;
+  z-index: 2147483644;
   display: none;
   overflow: visible !important;
   border: 1.5px solid #07c160;
   border-radius: 2px;
   pointer-events: none;
   box-shadow: 0 0 0 1px rgba(7, 193, 96, 0.16);
-  will-change: left, top, width, height;
+  will-change: transform, width, height;
 }
 
 #mpse-img2-box.mpse-visible {
@@ -623,8 +624,10 @@
 
 .mpse-img2-handle {
   position: fixed !important;
-  z-index: 2147483645 !important;
+  z-index: 2147483647 !important;
   display: none !important;
+  left: 0 !important;
+  top: 0 !important;
   width: 30px !important;
   min-width: 30px !important;
   height: 30px !important;
@@ -643,10 +646,10 @@
   opacity: 1 !important;
   visibility: visible !important;
   pointer-events: auto !important;
-  touch-action: none;
-  transform: translate(-50%, -50%);
-  cursor: pointer;
-  will-change: left, top;
+  touch-action: none !important;
+  user-select: none !important;
+  cursor: pointer !important;
+  will-change: transform;
 }
 
 .mpse-img2-handle.mpse-visible { display: grid !important; place-items: center; }
@@ -663,17 +666,32 @@
 }
 
 .mpse-img2-handle-n,
-.mpse-img2-handle-s { width: 38px !important; height: 26px !important; min-width: 38px !important; min-height: 26px !important; cursor: ns-resize; }
+.mpse-img2-handle-s { width: 38px !important; height: 26px !important; min-width: 38px !important; min-height: 26px !important; cursor: ns-resize !important; }
 .mpse-img2-handle-e,
-.mpse-img2-handle-w { width: 26px !important; height: 38px !important; min-width: 26px !important; min-height: 38px !important; cursor: ew-resize; }
+.mpse-img2-handle-w { width: 26px !important; height: 38px !important; min-width: 26px !important; min-height: 38px !important; cursor: ew-resize !important; }
 .mpse-img2-handle-n::before,
 .mpse-img2-handle-s::before { width: 16px; height: 6px; border-radius: 999px; }
 .mpse-img2-handle-e::before,
 .mpse-img2-handle-w::before { width: 6px; height: 16px; border-radius: 999px; }
 .mpse-img2-handle-nw,
-.mpse-img2-handle-se { cursor: nwse-resize; }
+.mpse-img2-handle-se { cursor: nwse-resize !important; }
 .mpse-img2-handle-ne,
-.mpse-img2-handle-sw { cursor: nesw-resize; }
+.mpse-img2-handle-sw { cursor: nesw-resize !important; }
+
+#mpse-img2-drag-shield {
+  position: fixed !important;
+  z-index: 2147483647 !important;
+  display: none !important;
+  inset: 0 !important;
+  background: transparent !important;
+  pointer-events: auto !important;
+  touch-action: none !important;
+  user-select: none !important;
+}
+
+#mpse-img2-drag-shield.mpse-visible {
+  display: block !important;
+}
 
 #mpse-img2-badge {
   position: fixed;

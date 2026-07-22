@@ -6,18 +6,23 @@
   const PANEL_ID = 'mpse-img2-panel';
   const BOX_ID = 'mpse-img2-box';
   const BADGE_ID = 'mpse-img2-badge';
+  const DRAG_SHIELD_ID = 'mpse-img2-drag-shield';
   const HANDLE_CLASS = 'mpse-img2-handle';
   const CROP_ATTR = 'data-mpse-image-crop';
+  const GEOMETRY_DRAG_THRESHOLD = 4;
   const BOUND_FLAG = '__mpseImageToolsV094Bound__';
   const GENERIC_BOUND_ATTR = 'data-mpse-image-tools-bound';
   const VERSION_ATTR = 'data-mpse-image-tools-version';
   const bridgeClient = window.__MPSE_BRIDGE_CLIENT__;
+  const imageGeometry = window.__MPSE_IMAGE_GEOMETRY__;
   const injectBridge = bridgeClient && typeof bridgeClient.inject === 'function'
     ? bridgeClient.inject
     : () => false;
   const requestBridge = bridgeClient && typeof bridgeClient.request === 'function'
     ? bridgeClient.request
     : () => Promise.reject(new Error('扩展桥接客户端未加载，请刷新页面后重试'));
+
+  if (!imageGeometry) throw new Error('图片几何模块未加载，请刷新页面后重试');
 
   const MANAGED_STYLE_PROPS = [
     'border-radius', 'overflow', 'width', 'max-width', 'height', 'display',
@@ -67,6 +72,7 @@
     commitTimer: null,
     commitSeq: 0,
     commitInFlight: false,
+    commitPhase: '',
     queuedCommit: false,
     pendingCommitReason: '',
     isDragging: false,
@@ -76,6 +82,11 @@
     needsCommit: false,
     lastSnapshot: null,
     positionFrame: 0,
+    handleElements: [],
+    gestureEpoch: 0,
+    editRevision: 0,
+    selectionRevision: 0,
+    reacquireTimer: null,
     lastImagePress: null,
     lastCropToggleAt: 0
   };
@@ -301,7 +312,7 @@
 
   function isExtensionElement(node) {
     if (!node || !node.closest) return false;
-    return Boolean(node.closest(`#${MENU_ID}, #${PANEL_ID}, #${BOX_ID}, #${BADGE_ID}, .${HANDLE_CLASS}, #mpse-svg2-panel, #mpse-svg2-pick-button, #mpse-svgb-menu, #mpse-svgb-panel, #mpse-svgb-box, #mpse-svgb-badge, #mpse-inline-panel, #mpse-toolbar-button, #mpse-floating-button`));
+    return Boolean(node.closest(`#${MENU_ID}, #${PANEL_ID}, #${BOX_ID}, #${BADGE_ID}, #${DRAG_SHIELD_ID}, .${HANDLE_CLASS}, #mpse-svg2-panel, #mpse-svg2-pick-button, #mpse-svgb-menu, #mpse-svgb-panel, #mpse-svgb-box, #mpse-svgb-badge, #mpse-inline-panel, #mpse-toolbar-button, #mpse-floating-button`));
   }
 
   function findEditableRoot(node) {
@@ -362,7 +373,10 @@
   }
 
   function imageIndexInArticle(image) {
-    const list = getAllArticleImages();
+    const root = findEditableRoot(image);
+    const list = root && root.querySelectorAll
+      ? Array.from(root.querySelectorAll('img')).filter((candidate) => !isExtensionElement(candidate))
+      : getAllArticleImages();
     const idx = list.indexOf(image);
     return idx >= 0 ? idx : 0;
   }
@@ -408,11 +422,15 @@
 
     let best = null;
     let bestScore = -1;
-    for (const img of images) {
+    let bestDistance = Number.POSITIVE_INFINITY;
+    const preferredIndex = Number.isFinite(identity && identity.index) ? identity.index : 0;
+    for (const [index, img] of images.entries()) {
       const score = scoreImageByIdentity(img, identity);
-      if (score > bestScore) {
+      const distance = Math.abs(index - preferredIndex);
+      if (score > bestScore || (score === bestScore && distance < bestDistance)) {
         best = img;
         bestScore = score;
+        bestDistance = distance;
       }
     }
 
@@ -626,8 +644,42 @@
     return box;
   }
 
+  function createDragShield() {
+    let shield = document.getElementById(DRAG_SHIELD_ID);
+    if (shield) return shield;
+    shield = document.createElement('div');
+    shield.id = DRAG_SHIELD_ID;
+    shield.setAttribute('aria-hidden', 'true');
+    document.body.appendChild(shield);
+    return shield;
+  }
+
+  function cursorForHandle(handle) {
+    if (handle === 'n' || handle === 's') return 'ns-resize';
+    if (handle === 'e' || handle === 'w') return 'ew-resize';
+    if (handle === 'ne' || handle === 'sw') return 'nesw-resize';
+    return 'nwse-resize';
+  }
+
+  function showDragShield(cursor) {
+    const shield = createDragShield();
+    shield.style.setProperty('cursor', cursor || 'default', 'important');
+    shield.classList.add('mpse-visible');
+  }
+
+  function hideDragShield() {
+    const shield = document.getElementById(DRAG_SHIELD_ID);
+    if (!shield) return;
+    shield.classList.remove('mpse-visible');
+    shield.style.removeProperty('cursor');
+  }
+
   function getImageHandles() {
-    return Array.from(document.querySelectorAll(`.${HANDLE_CLASS}`));
+    if (state.handleElements.length && state.handleElements.every((handle) => handle.isConnected)) {
+      return state.handleElements;
+    }
+    state.handleElements = Array.from(document.querySelectorAll(`.${HANDLE_CLASS}`));
+    return state.handleElements;
   }
 
   function createHandles() {
@@ -646,11 +698,13 @@
       button.dataset.mpseImageHandle = handle;
       button.setAttribute('aria-label', label);
       button.title = label;
+      button.style.setProperty('cursor', cursorForHandle(handle), 'important');
       button.addEventListener('pointerdown', onHandlePointerDown, true);
       button.addEventListener('pointercancel', onHandlePointerCancel, true);
       button.addEventListener('lostpointercapture', onHandlePointerCancel, true);
       document.body.appendChild(button);
     }
+    state.handleElements = Array.from(document.querySelectorAll(`.${HANDLE_CLASS}`));
   }
 
   function positionHandles(rect) {
@@ -661,10 +715,19 @@
     for (const handle of getImageHandles()) {
       const point = positions[handle.dataset.mpseImageHandle];
       if (!point) continue;
-      handle.style.left = `${point[0]}px`;
-      handle.style.top = `${point[1]}px`;
+      handle.style.setProperty('transform', `translate3d(${point[0]}px, ${point[1]}px, 0) translate(-50%, -50%)`, 'important');
       handle.classList.add('mpse-visible');
     }
+  }
+
+  function positionSelectionBox(box, rect) {
+    setStyles(box, {
+      left: '0px',
+      top: '0px',
+      width: `${rect.width}px`,
+      height: `${rect.height}px`,
+      transform: `translate3d(${rect.left}px, ${rect.top}px, 0)`
+    });
   }
 
   function createBadge() {
@@ -677,11 +740,12 @@
   }
 
   function cleanupLegacyDom() {
-    for (const id of [MENU_ID, PANEL_ID, BOX_ID, BADGE_ID]) {
+    for (const id of [MENU_ID, PANEL_ID, BOX_ID, BADGE_ID, DRAG_SHIELD_ID]) {
       const element = document.getElementById(id);
       if (element) element.remove();
     }
     for (const handle of getImageHandles()) handle.remove();
+    state.handleElements = [];
   }
 
   function absorbUiEvent(event) {
@@ -699,11 +763,34 @@
       element.style.removeProperty(prop);
       return;
     }
-    element.style.setProperty(prop, String(value), important ? 'important' : '');
+    const nextValue = String(value);
+    const nextPriority = important ? 'important' : '';
+    if (element.style.getPropertyValue(prop) === nextValue
+      && element.style.getPropertyPriority(prop) === nextPriority) return;
+    element.style.setProperty(prop, nextValue, nextPriority);
   }
 
   function setStyles(element, styles) {
     for (const [prop, value] of Object.entries(styles)) setStyle(element, prop, value);
+  }
+
+  function captureInlineStyles(element, props) {
+    if (!element || !element.style) return null;
+    return props.reduce((styles, prop) => {
+      styles[prop] = {
+        value: element.style.getPropertyValue(prop),
+        priority: element.style.getPropertyPriority(prop)
+      };
+      return styles;
+    }, {});
+  }
+
+  function restoreInlineStyles(element, styles) {
+    if (!element || !element.style || !styles) return;
+    for (const [prop, entry] of Object.entries(styles)) {
+      if (entry.value) element.style.setProperty(prop, entry.value, entry.priority);
+      else element.style.removeProperty(prop);
+    }
   }
 
   function getVisualCarrier(image) {
@@ -734,37 +821,112 @@
     return getCropContainer(image) || image;
   }
 
+  function detectHorizontalAlignment(element) {
+    const view = element && element.ownerDocument && element.ownerDocument.defaultView;
+    if (!view || !element) return 'left';
+    const style = view.getComputedStyle(element);
+    const parentStyle = element.parentElement ? view.getComputedStyle(element.parentElement) : null;
+    if (style.float === 'right') return 'right';
+    if (style.marginLeft === 'auto' && style.marginRight === 'auto') return 'center';
+    if (style.marginLeft === 'auto') return 'right';
+    if (style.marginRight === 'auto') return 'left';
+    if (parentStyle && parentStyle.textAlign === 'center') return 'center';
+    if (parentStyle && parentStyle.textAlign === 'right') return 'right';
+    return 'left';
+  }
+
+  function captureCropLayout(image) {
+    const view = image && image.ownerDocument && image.ownerDocument.defaultView;
+    const computed = view && image ? view.getComputedStyle(image) : null;
+    const computedDisplay = computed ? computed.display : 'block';
+    return {
+      alignment: detectHorizontalAlignment(image),
+      display: computedDisplay === 'inline' ? 'inline-block' : (computedDisplay === 'none' ? 'block' : computedDisplay),
+      styles: captureInlineStyles(image, [
+        'width', 'height', 'max-width', 'display', 'margin-left', 'margin-right',
+        'margin-top', 'margin-bottom', 'vertical-align', 'float'
+      ])
+    };
+  }
+
+  function readCropLayout(image) {
+    const host = getCropContainer(image);
+    if (!host) return captureCropLayout(image);
+    try {
+      const layout = JSON.parse(host.dataset.mpseCropLayout || '{}');
+      if (layout && layout.styles && ['left', 'center', 'right'].includes(layout.alignment)) return layout;
+    } catch (_) {
+      // Invalid persisted layout metadata falls back to the current frame.
+    }
+    return {
+      alignment: detectHorizontalAlignment(host),
+      display: host.style.getPropertyValue('display') || 'block',
+      styles: captureInlineStyles(host, [
+        'width', 'height', 'max-width', 'display', 'margin-left', 'margin-right',
+        'margin-top', 'margin-bottom', 'vertical-align', 'float'
+      ])
+    };
+  }
+
+  function cropMarginTop(layout, offsetPercent) {
+    const entry = layout && layout.styles && layout.styles['margin-top'];
+    const base = entry && String(entry.value || '').trim();
+    if (Math.abs(offsetPercent) < 0.0001) return base || '';
+    if (!base || /^0(?:[a-z%]+)?$/i.test(base) || base === 'auto') return `${offsetPercent.toFixed(5)}%`;
+    return `calc(${base} + ${offsetPercent.toFixed(5)}%)`;
+  }
+
   function getAvailableImageWidth(image) {
+    const host = getLayoutHost(image);
+    const view = host && host.ownerDocument && host.ownerDocument.defaultView;
+    let parent = host && host.parentElement;
+    while (parent && view) {
+      const style = view.getComputedStyle(parent);
+      if (style.display !== 'inline' && style.display !== 'contents') {
+        const padding = parseFloat(style.paddingLeft || '0') + parseFloat(style.paddingRight || '0');
+        const clientWidth = Math.max(0, (parent.clientWidth || 0) - padding);
+        if (clientWidth > 1) return clientWidth;
+        const rect = parent.getBoundingClientRect();
+        if (rect.width - padding > 1) return rect.width - padding;
+      }
+      parent = parent.parentElement;
+    }
     const root = findEditableRoot(image);
-    const rootRect = root && root.getBoundingClientRect ? root.getBoundingClientRect() : null;
-    if (rootRect && rootRect.width > 1) return rootRect.width;
-    const parent = image && image.parentElement;
-    const parentRect = parent && parent.getBoundingClientRect ? parent.getBoundingClientRect() : null;
-    return parentRect && parentRect.width > 1 ? parentRect.width : 1;
+    return root && root.getBoundingClientRect ? Math.max(1, root.getBoundingClientRect().width) : 1;
   }
 
   function readCropState(image) {
     const host = getCropContainer(image);
     if (!host) return null;
-    const rawAspect = Number(host.dataset.mpseCropAspect);
-    const rawWidth = Number(host.dataset.mpseCropWidth);
-    const rawHeight = Number(host.dataset.mpseCropHeight);
-    const width = Number.isFinite(rawWidth) ? clamp(rawWidth, 0.04, 1) : 1;
-    const height = Number.isFinite(rawHeight) ? clamp(rawHeight, 0.04, 1) : 1;
-    const x = Number(host.dataset.mpseCropX);
-    const y = Number(host.dataset.mpseCropY);
-    return {
-      x: Number.isFinite(x) ? clamp(x, 0, Math.max(0, 1 - width)) : 0,
-      y: Number.isFinite(y) ? clamp(y, 0, Math.max(0, 1 - height)) : 0,
-      width,
-      height,
-      sourceAspect: Number.isFinite(rawAspect) ? clamp(rawAspect, 0.05, 40) : 1
+    const number = (key, fallback) => {
+      const value = Number(host.dataset[key]);
+      return Number.isFinite(value) ? value : fallback;
     };
+    const media = {
+      x: number('mpseCropX', 0),
+      y: number('mpseCropY', 0),
+      width: number('mpseCropWidth', 1),
+      height: number('mpseCropHeight', 1)
+    };
+    return imageGeometry.normalizeModel({
+      frame: {
+        x: number('mpseCropFrameX', media.x),
+        y: number('mpseCropFrameY', media.y),
+        width: number('mpseCropFrameWidth', media.width),
+        height: number('mpseCropFrameHeight', media.height)
+      },
+      media,
+      baseAspect: number('mpseCropAspect', 1)
+    });
   }
 
   function hasCropAdjustment(image) {
     const crop = readCropState(image);
-    return Boolean(crop && (crop.x > 0.0001 || crop.y > 0.0001 || crop.width < 0.9999 || crop.height < 0.9999));
+    return Boolean(crop && !imageGeometry.modelsMatch(crop, {
+      frame: { x: 0, y: 0, width: 1, height: 1 },
+      media: { x: 0, y: 0, width: 1, height: 1 },
+      baseAspect: crop.baseAspect
+    }));
   }
 
   function readCropBaseWidth(image) {
@@ -780,45 +942,44 @@
     host.dataset.mpseCropBaseWidth = clamp(value, 4, 2500).toFixed(4);
   }
 
-  function normalizeCropState(next) {
-    const width = clamp(next.width, 0.04, 1);
-    const height = clamp(next.height, 0.04, 1);
-    return {
-      x: clamp(next.x, 0, Math.max(0, 1 - width)),
-      y: clamp(next.y, 0, Math.max(0, 1 - height)),
-      width,
-      height,
-      sourceAspect: clamp(next.sourceAspect, 0.05, 40)
-    };
-  }
-
   function writeCropState(image, next) {
     const host = getCropContainer(image);
     if (!host) return null;
-    const crop = normalizeCropState(next);
+    const crop = imageGeometry.normalizeModel(next);
     const baseWidth = readCropBaseWidth(image);
-    host.dataset.mpseCropX = crop.x.toFixed(6);
-    host.dataset.mpseCropY = crop.y.toFixed(6);
-    host.dataset.mpseCropWidth = crop.width.toFixed(6);
-    host.dataset.mpseCropHeight = crop.height.toFixed(6);
-    host.dataset.mpseCropAspect = crop.sourceAspect.toFixed(6);
+    const layout = readCropLayout(image);
+    const { frame, media } = crop;
+    host.dataset.mpseCropX = media.x.toFixed(6);
+    host.dataset.mpseCropY = media.y.toFixed(6);
+    host.dataset.mpseCropWidth = media.width.toFixed(6);
+    host.dataset.mpseCropHeight = media.height.toFixed(6);
+    host.dataset.mpseCropFrameX = frame.x.toFixed(6);
+    host.dataset.mpseCropFrameY = frame.y.toFixed(6);
+    host.dataset.mpseCropFrameWidth = frame.width.toFixed(6);
+    host.dataset.mpseCropFrameHeight = frame.height.toFixed(6);
+    host.dataset.mpseCropAspect = crop.baseAspect.toFixed(6);
 
-    const aspect = crop.sourceAspect * crop.width / crop.height;
+    const aspect = crop.baseAspect * frame.width / frame.height;
+    const transformX = imageGeometry.horizontalTransformPercent(frame, layout.alignment);
+    const topOffset = baseWidth * frame.y / crop.baseAspect;
     setStyles(host, {
-      width: `${(baseWidth * crop.width).toFixed(4)}%`,
+      width: `${(baseWidth * frame.width).toFixed(4)}%`,
       'max-width': '100%',
-      display: 'block',
+      display: layout.display || 'block',
       position: 'relative',
       overflow: 'hidden',
       'aspect-ratio': aspect.toFixed(6),
-      'line-height': '0'
+      'line-height': '0',
+      'margin-top': cropMarginTop(layout, topOffset),
+      transform: Math.abs(transformX) < 0.0001 ? '' : `translate3d(${transformX.toFixed(6)}%, 0, 0)`,
+      'transform-origin': 'center center'
     });
     setStyles(image, {
       position: 'absolute',
-      left: `${(-crop.x / crop.width * 100).toFixed(5)}%`,
-      top: `${(-crop.y / crop.height * 100).toFixed(5)}%`,
-      width: `${(100 / crop.width).toFixed(5)}%`,
-      height: 'auto',
+      left: `${(-media.x / media.width * 100).toFixed(5)}%`,
+      top: `${(-media.y / media.height * 100).toFixed(5)}%`,
+      width: `${(100 / media.width).toFixed(5)}%`,
+      height: `${(100 / media.height).toFixed(5)}%`,
       'max-width': 'none',
       display: 'block',
       'margin-left': '0',
@@ -920,7 +1081,7 @@
       writeCropState(image, crop);
       return true;
     }
-    setStyles(host, { width: `${visualWidth.toFixed(3)}%`, 'max-width': '100%', display: 'block' });
+    setStyles(host, { width: `${visualWidth.toFixed(3)}%`, height: 'auto', 'max-width': '100%', display: 'block' });
     return true;
   }
 
@@ -965,6 +1126,29 @@
     state.commitTimer = null;
   }
 
+  function setInteractionCursor(interaction, cursor) {
+    if (!interaction) return;
+    if (interaction.scope === 'overlay') {
+      showDragShield(cursor);
+      return;
+    }
+    const target = interaction.pointerTarget;
+    if (!target || !target.style) return;
+    interaction.cursorBefore = {
+      value: target.style.getPropertyValue('cursor'),
+      priority: target.style.getPropertyPriority('cursor')
+    };
+    target.style.setProperty('cursor', cursor, 'important');
+  }
+
+  function restoreInteractionCursor(interaction) {
+    hideDragShield();
+    if (!interaction || !interaction.cursorBefore || !interaction.pointerTarget || !interaction.pointerTarget.style) return;
+    const { value, priority } = interaction.cursorBefore;
+    if (value) interaction.pointerTarget.style.setProperty('cursor', value, priority);
+    else interaction.pointerTarget.style.removeProperty('cursor');
+  }
+
   function queueGeometryPreview(interaction) {
     if (!interaction || interaction.frame) return;
     interaction.frame = window.requestAnimationFrame(() => {
@@ -991,7 +1175,7 @@
     } else {
       writeCropState(image, preview.crop);
     }
-    updateGeometryOverlay(interaction, preview);
+    updateGeometryOverlay(image);
   }
 
   function hasGeometryChanged(interaction, image) {
@@ -1013,35 +1197,26 @@
       ? 1 + horizontalDelta / Math.max(1, interaction.rect.width)
       : 1 + verticalDelta / Math.max(1, interaction.rect.height);
     const widthPercent = clamp(interaction.startWidthPercent * scale, 4, 100);
-    return { widthPercent, scale: widthPercent / Math.max(0.01, interaction.startWidthPercent) };
+    return { widthPercent };
   }
 
-  function getResizePreviewRect(interaction, preview) {
-    const width = interaction.rect.width * preview.scale;
-    const height = interaction.rect.height * preview.scale;
-    const left = interaction.handle.includes('w') ? interaction.rect.right - width : interaction.rect.left;
-    const top = interaction.handle.includes('n') ? interaction.rect.bottom - height : interaction.rect.top;
-    return { left, top, right: left + width, bottom: top + height, width, height };
-  }
-
-  function getCropPreviewRect(interaction, crop) {
-    const start = interaction.startCrop;
-    if (!start) return interaction.rect;
-    const width = interaction.rect.width * crop.width / Math.max(0.04, start.width);
-    const height = interaction.rect.height * crop.height / Math.max(0.04, start.height);
-    const left = interaction.handle === 'w' ? interaction.rect.right - width : interaction.rect.left;
-    const top = interaction.handle === 'n' ? interaction.rect.bottom - height : interaction.rect.top;
-    return { left, top, right: left + width, bottom: top + height, width, height };
-  }
-
-  function updateGeometryOverlay(interaction, preview) {
+  function updateGeometryOverlay(image = state.image) {
     const box = document.getElementById(BOX_ID);
-    if (!box) return;
-    const rect = preview.kind === 'resize'
-      ? getResizePreviewRect(interaction, preview)
-      : getCropPreviewRect(interaction, preview.crop);
-    setStyles(box, { left: `${rect.left}px`, top: `${rect.top}px`, width: `${rect.width}px`, height: `${rect.height}px` });
+    if (!box || !image || !image.isConnected) return null;
+    const rect = getTopRect(getSelectionElement(image));
+    positionSelectionBox(box, rect);
     positionHandles(rect);
+    return rect;
+  }
+
+  function initializeCropGesture(interaction, image) {
+    if (interaction.startCrop) return true;
+    const result = ensureCropContainer(image);
+    if (!result.host || !image.isConnected) return false;
+    interaction.createdCrop = result.created;
+    interaction.startCrop = readCropState(image);
+    interaction.rect = getTopRect(result.host);
+    return Boolean(interaction.startCrop);
   }
 
   function beginGeometryGesture(handle, event, captureTarget) {
@@ -1050,16 +1225,11 @@
     const point = getTopClientPoint(event);
     if (!point) return;
     const isCorner = ['nw', 'ne', 'se', 'sw'].includes(handle);
-    let createdCrop = false;
-    if (!isCorner) {
-      const result = ensureCropContainer(image);
-      if (!result.host) return;
-      createdCrop = result.created;
-    }
     const target = getSelectionElement(image);
     const rect = getTopRect(target);
+    const startCrop = readCropState(image);
     deferContentCommitForGesture();
-    state.interaction = {
+    const interaction = {
       kind: isCorner ? 'resize' : 'crop',
       scope: 'overlay',
       sourceDocument: document,
@@ -1069,15 +1239,21 @@
       startX: point.x,
       startY: point.y,
       rect,
-      startCrop: readCropState(image),
+      startCrop,
+      startCropBaseWidth: startCrop ? readCropBaseWidth(image) : null,
+      startLayoutStyles: captureInlineStyles(target, ['width', 'height', 'max-width', 'display']),
       startWidthPercent: readLayoutWidthPercent(image),
       availableWidth: getAvailableImageWidth(image),
-      createdCrop,
+      createdCrop: false,
+      started: false,
+      gestureEpoch: ++state.gestureEpoch,
       preview: null,
       frame: 0
     };
+    state.interaction = interaction;
     state.isDragging = true;
     capturePointer(captureTarget || event.target, event.pointerId);
+    setInteractionCursor(interaction, cursorForHandle(handle));
   }
 
   function beginCropPan(image, event) {
@@ -1087,7 +1263,7 @@
     if (!point) return;
     const rect = getTopRect(result.host);
     deferContentCommitForGesture();
-    state.interaction = {
+    const interaction = {
       kind: 'pan',
       scope: 'source',
       sourceDocument: image.ownerDocument,
@@ -1098,11 +1274,15 @@
       rect,
       startCrop: readCropState(image),
       createdCrop: result.created,
+      started: false,
+      gestureEpoch: ++state.gestureEpoch,
       preview: null,
       frame: 0
     };
+    state.interaction = interaction;
     state.isDragging = true;
     capturePointer(image, event.pointerId);
+    setInteractionCursor(interaction, 'grabbing');
   }
 
   function updateGeometryGesture(event, scope) {
@@ -1111,8 +1291,18 @@
     if (!interaction || !image || !image.isConnected || !interactionOwnsEvent(interaction, event, scope)) return;
     const point = getTopClientPoint(event);
     if (!point) return;
-    const rect = interaction.rect;
+    let rect = interaction.rect;
     if (rect.width < 1 || rect.height < 1) return;
+    if (!interaction.started) {
+      const distance = Math.hypot(point.x - interaction.startX, point.y - interaction.startY);
+      if (distance < GEOMETRY_DRAG_THRESHOLD) return;
+      interaction.started = true;
+      if (interaction.kind === 'crop' && !initializeCropGesture(interaction, image)) {
+        interaction.started = false;
+        return;
+      }
+      rect = interaction.rect;
+    }
     const dx = (point.x - interaction.startX) / rect.width;
     const dy = (point.y - interaction.startY) / rect.height;
 
@@ -1125,19 +1315,21 @@
     const start = interaction.startCrop;
     if (!start) return;
     const next = { ...start };
+    const cropDx = dx * start.width;
+    const cropDy = dy * start.height;
     if (interaction.kind === 'pan') {
       next.x = start.x - dx * start.width;
       next.y = start.y - dy * start.height;
     } else if (interaction.handle === 'e') {
-      next.width = start.width + dx;
+      next.width = start.width + cropDx;
     } else if (interaction.handle === 'w') {
-      next.x = start.x + dx;
-      next.width = start.width - dx;
+      next.x = start.x + cropDx;
+      next.width = start.width - cropDx;
     } else if (interaction.handle === 's') {
-      next.height = start.height + dy;
+      next.height = start.height + cropDy;
     } else if (interaction.handle === 'n') {
-      next.y = start.y + dy;
-      next.height = start.height - dy;
+      next.y = start.y + cropDy;
+      next.height = start.height - cropDy;
     }
     interaction.preview = { kind: 'crop', crop: normalizeCropState(next) };
     queueGeometryPreview(interaction);
@@ -1165,14 +1357,43 @@
     schedulePositionTools();
   }
 
-  function finishGeometryGesture(event, scope) {
+  function restoreGeometryGesture(interaction, image) {
+    if (!interaction || !image || !image.isConnected) return image;
+    if (interaction.kind === 'resize') {
+      if (interaction.startCrop && getCropContainer(image)) {
+        setCropBaseWidth(image, interaction.startCropBaseWidth);
+        writeCropState(image, interaction.startCrop);
+        return image;
+      }
+      restoreInlineStyles(getLayoutHost(image), interaction.startLayoutStyles);
+      return image;
+    }
+    if (interaction.createdCrop && getCropContainer(image)) return unwrapCropContainer(image);
+    if (interaction.startCrop) writeCropState(image, interaction.startCrop);
+    return image;
+  }
+
+  function finishGeometryGesture(event, scope, forceCancel = false) {
     const interaction = state.interaction;
     if (!interaction || !interactionOwnsEvent(interaction, event, scope)) return false;
-    flushGeometryPreview(interaction);
-    const image = state.image;
+    const canceled = forceCancel || Boolean(event && (event.type === 'pointercancel' || event.type === 'lostpointercapture'));
+    if (canceled) {
+      if (interaction.frame) window.cancelAnimationFrame(interaction.frame);
+      interaction.frame = 0;
+      interaction.preview = null;
+    } else {
+      flushGeometryPreview(interaction);
+    }
+    let image = state.image;
     state.interaction = null;
     state.isDragging = false;
+    restoreInteractionCursor(interaction);
     releasePointer(interaction.pointerTarget, interaction.pointerId);
+    if (canceled) {
+      state.image = restoreGeometryGesture(interaction, image);
+      schedulePositionTools();
+      return true;
+    }
     const changed = hasGeometryChanged(interaction, image);
     if (interaction.kind === 'crop' && changed && state.image) {
       state.cropMode = true;
@@ -1180,7 +1401,10 @@
       createBox().classList.add('mpse-crop-mode');
       setBadgeText('裁切模式：拖动图片，Ctrl + 滚轮缩放');
     }
-    if (interaction.createdCrop && !changed && !state.cropMode) state.image = unwrapCropContainer(image);
+    if (!changed && interaction.started) {
+      state.image = restoreGeometryGesture(interaction, image);
+      image = state.image;
+    }
     if (changed && state.image) {
       markChanged(state.image, interaction.kind === 'pan' ? 'crop-pan' : interaction.kind, false);
       scheduleContentCommit('drag-end');
@@ -1891,26 +2115,15 @@
     };
   }
 
-  function dispatchEditorEvent(target, type) {
-    try {
-      return target.dispatchEvent(new Event(type, { bubbles: true }));
-    } catch (_) {
-      return false;
-    }
-  }
-
   function markChanged(image, reason, schedule = true) {
     if (!image || !image.ownerDocument) return;
     image.setAttribute('data-mpse-image-edited', '1');
-    state.lastSnapshot = snapshotCurrentImage();
+    const snapshot = snapshotCurrentImage();
+    if (!snapshot) return;
+    snapshot.revision = ++state.editRevision;
+    snapshot.gestureEpoch = state.gestureEpoch;
+    state.lastSnapshot = snapshot;
     state.needsCommit = true;
-
-    const doc = image.ownerDocument;
-    const root = findEditableRoot(image) || doc.body;
-    for (const target of [image, root, doc.body].filter(Boolean)) {
-      dispatchEditorEvent(target, 'input');
-      dispatchEditorEvent(target, 'change');
-    }
 
     if (DEBUG) console.info('[公众号源码排版助手] image style applied', reason || '', image.getAttribute('style') || '');
     if (schedule) scheduleContentCommit(reason);
@@ -1930,8 +2143,11 @@
       return;
     }
 
-    const delay = reason === 'drag-end' ? 260 : 520;
-    state.commitTimer = window.setTimeout(() => commitSnapshotToEditor(state.pendingCommitReason), delay);
+    const delay = reason === 'drag-end' ? 0 : 360;
+    state.commitTimer = window.setTimeout(() => {
+      state.commitTimer = null;
+      commitSnapshotToEditor(state.pendingCommitReason);
+    }, delay);
   }
 
   function copyManagedData(source, target) {
@@ -2010,6 +2226,13 @@
     return Boolean(target && getCropContainer(target));
   }
 
+  function commitMatchesCurrentEdit(snapshot) {
+    return Boolean(snapshot && !state.isDragging && !state.interaction
+      && state.lastSnapshot === snapshot
+      && state.editRevision === snapshot.revision
+      && state.gestureEpoch === snapshot.gestureEpoch);
+  }
+
   async function commitSnapshotToEditor(reason) {
     if (state.isDragging) return;
     if (state.commitInFlight) {
@@ -2027,6 +2250,10 @@
 
     try {
       const current = await requestBridge('GET_CONTENT', {}, 15000);
+      if (!commitMatchesCurrentEdit(snapshot)) {
+        state.needsCommit = true;
+        return;
+      }
       const content = typeof current.content === 'string' ? current.content : '';
       const result = applySnapshotToHtml(content, snapshot);
       if (!result.changed) {
@@ -2034,7 +2261,7 @@
         setBadgeText('仅预览');
         return;
       }
-      if (state.isDragging) {
+      if (!commitMatchesCurrentEdit(snapshot)) {
         state.needsCommit = true;
         return;
       }
@@ -2048,7 +2275,7 @@
           console.warn('[公众号源码排版助手] image crop verification failed:', error);
         }
       }
-      if (seq === state.commitSeq) {
+      if (seq === state.commitSeq && commitMatchesCurrentEdit(snapshot)) {
         if (DEBUG) console.info('[公众号源码排版助手] image html synced', reason || '', current.mode || 'unknown');
         setBadgeText(cropPersisted ? '已同步' : '裁切未保留');
         window.setTimeout(() => reacquireSelectedImage(snapshot.identity), 180);
@@ -2060,7 +2287,7 @@
       setBadgeText('同步失败');
     } finally {
       state.commitInFlight = false;
-      if (state.queuedCommit || (!failed && state.needsCommit && state.lastSnapshot !== snapshot)) {
+      if (state.queuedCommit || (!failed && state.needsCommit)) {
         state.queuedCommit = false;
         scheduleContentCommit('queued');
       }
@@ -2071,8 +2298,10 @@
     if (!identity) return;
     let best = null;
     let bestScore = -1;
+    let bestDistance = Number.POSITIVE_INFINITY;
     const list = getAllArticleImages();
-    for (const image of list) {
+    const preferredIndex = Number.isFinite(identity.index) ? identity.index : 0;
+    for (const [index, image] of list.entries()) {
       const asDom = {
         getAttribute: (name) => {
           if (name === 'src') return getAttr(image, 'src') || image.currentSrc || image.src || '';
@@ -2080,9 +2309,11 @@
         }
       };
       const score = scoreImageByIdentity(asDom, identity);
-      if (score > bestScore) {
+      const distance = Math.abs(index - preferredIndex);
+      if (score > bestScore || (score === bestScore && distance < bestDistance)) {
         best = image;
         bestScore = score;
+        bestDistance = distance;
       }
     }
     if (!best && list[identity.index]) best = list[identity.index];
@@ -2124,14 +2355,16 @@
       if (element) element.classList.remove('mpse-visible', 'mpse-offscreen');
     }
     for (const handle of getImageHandles()) handle.classList.remove('mpse-visible', 'mpse-offscreen');
+    hideDragShield();
   }
 
   function hideTools() {
+    if (state.interaction) finishGeometryGesture(undefined, undefined, true);
     exitCropMode();
     state.image = null;
     state.identity = null;
     state.activePanel = null;
-    state.interaction = null;
+    state.isDragging = false;
     state.lastImagePress = null;
     hideToolElements();
   }
@@ -2152,6 +2385,10 @@
       return;
     }
     if (state.interaction) return;
+    if (hasBlockingEditorLayer()) {
+      setToolElementsOffscreen(true);
+      return;
+    }
     const rect = getTopRect(getSelectionElement(image));
     if (rect.width < 1 || rect.height < 1) {
       setToolElementsOffscreen(true);
@@ -2163,13 +2400,13 @@
     }
     setToolElementsOffscreen(false);
 
-    setStyles(box, { left: `${rect.left}px`, top: `${rect.top}px`, width: `${rect.width}px`, height: `${rect.height}px` });
+    positionSelectionBox(box, rect);
     box.classList.toggle('mpse-crop-mode', state.cropMode);
     positionHandles(rect);
 
     const menuWidth = 54;
     const panelWidth = 238;
-    const gap = 8;
+    const gap = 20;
     let menuLeft = rect.right + gap;
     if (menuLeft + menuWidth > window.innerWidth - 8) menuLeft = rect.left - menuWidth - gap;
     menuLeft = Math.max(8, Math.min(menuLeft, window.innerWidth - menuWidth - 8));
@@ -2192,6 +2429,31 @@
     if (!/同步|已同步|失败|预览|裁切/.test(badge.textContent || '')) {
       badge.textContent = `图片 ${Math.round(rect.width)}×${Math.round(rect.height)}`;
     }
+  }
+
+  function hasBlockingEditorLayer() {
+    const selector = [
+      'dialog[open]',
+      '[aria-modal="true"]',
+      '.weui-mask',
+      '.weui-desktop-mask',
+      '.weui-desktop-dialog__wrp',
+      '.weui-desktop-dialog_wrapper',
+      '[class*="modal-mask"]',
+      '[class*="dialog__mask"]'
+    ].join(',');
+    for (const doc of getAccessibleDocuments()) {
+      const view = doc.defaultView;
+      if (!view) continue;
+      for (const element of doc.querySelectorAll(selector)) {
+        if (isExtensionElement(element)) continue;
+        const style = view.getComputedStyle(element);
+        if (style.display === 'none' || style.visibility === 'hidden' || style.pointerEvents === 'none') continue;
+        const rect = element.getBoundingClientRect();
+        if (rect.width > 120 && rect.height > 80) return true;
+      }
+    }
+    return false;
   }
 
   function findImageFromEvent(event) {
@@ -2241,7 +2503,7 @@
     if (!event || !event.target) return;
     if (event.type !== 'pointerdown' || event.button !== 0) return;
     if (isExtensionElement(event.target)) return;
-    if (document.getElementById('mpse-inline-panel')) {
+    if (document.getElementById('mpse-inline-panel') || hasBlockingEditorLayer()) {
       hideTools();
       return;
     }
@@ -2272,7 +2534,7 @@
 
   function onDocumentDoubleClick(event) {
     if (!event || !event.target || isExtensionElement(event.target)) return;
-    if (document.getElementById('mpse-inline-panel')) return;
+    if (document.getElementById('mpse-inline-panel') || hasBlockingEditorLayer()) return;
     const image = findImageFromEvent(event);
     if (!image) return;
     event.preventDefault();
@@ -2291,11 +2553,25 @@
   }
 
   function onDocumentPointerMove(event) {
+    if (state.interaction && state.interaction.scope === 'source') stopUiEvent(event);
     updateGeometryGesture(event, 'source');
   }
 
   function onDocumentPointerUp(event) {
+    if (state.interaction && state.interaction.scope === 'source') stopUiEvent(event);
     finishGeometryGesture(event, 'source');
+  }
+
+  function onDocumentDragStart(event) {
+    if (!event || !event.target || !state.image) return;
+    const selection = getSelectionElement(state.image);
+    if (state.interaction || event.target === state.image || (selection && selection.contains(event.target))) {
+      stopUiEvent(event);
+    }
+  }
+
+  function onDocumentSelectStart(event) {
+    if (state.interaction) stopUiEvent(event);
   }
 
   function onDocumentKeyDown(event) {
@@ -2325,6 +2601,8 @@
       doc.addEventListener('pointerup', onDocumentPointerUp, true);
       doc.addEventListener('pointercancel', onDocumentPointerUp, true);
       doc.addEventListener('lostpointercapture', onDocumentPointerUp, true);
+      doc.addEventListener('dragstart', onDocumentDragStart, true);
+      doc.addEventListener('selectstart', onDocumentSelectStart, true);
       doc.addEventListener('wheel', onDocumentWheel, { capture: true, passive: false });
       doc.addEventListener('keydown', onDocumentKeyDown, true);
       doc.addEventListener('scroll', () => {
@@ -2335,7 +2613,10 @@
 
   function onGlobalPointerUp(event) {
     if (state.interaction) {
-      if (state.interaction.scope === 'overlay') finishGeometryGesture(event, 'overlay');
+      if (state.interaction.scope === 'overlay') {
+        stopUiEvent(event);
+        finishGeometryGesture(event, 'overlay');
+      }
       return;
     }
     if (!state.isDragging) return;
@@ -2344,6 +2625,7 @@
   }
 
   function onGlobalPointerMove(event) {
+    if (state.interaction && state.interaction.scope === 'overlay') stopUiEvent(event);
     updateGeometryGesture(event, 'overlay');
   }
 
@@ -2354,6 +2636,7 @@
     bindTimer = window.setTimeout(() => {
       bindTimer = 0;
       bindDocuments();
+      if (state.image) schedulePositionTools();
     }, 180);
   }
 
@@ -2369,6 +2652,7 @@
     createPanel();
     createBox();
     createHandles();
+    createDragShield();
     createBadge();
     bindDocuments();
 
@@ -2380,7 +2664,7 @@
     window.addEventListener('pointerup', onGlobalPointerUp, true);
     window.addEventListener('pointercancel', onGlobalPointerUp, true);
     window.addEventListener('mouseup', onGlobalPointerUp, true);
-    window.addEventListener('blur', () => finishGeometryGesture(), true);
+    window.addEventListener('blur', () => finishGeometryGesture(undefined, undefined, true), true);
     window.addEventListener('resize', () => {
       if (state.image) schedulePositionTools();
     });
