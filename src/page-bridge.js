@@ -331,8 +331,11 @@
       for (const type of ['beforeinput', 'input', 'paste', 'drop', 'cut']) {
         doc.addEventListener(type, (event) => {
           if (!isEditorInputEvent(event, doc)) return;
-          if (type !== 'input' && nativePasteLockOwnsEvent(event, doc)) {
-            blockNativePasteInput(event);
+          if (nativePasteLockOwnsEvent(event, doc)) {
+            // WeChat emits a trusted input while committing our synthetic paste.
+            // Let that input reach its editor model, but do not count it as an
+            // external article edit that invalidates the same paste transaction.
+            if (type !== 'input') blockNativePasteInput(event);
             return;
           }
           noteEditorInput();
@@ -803,7 +806,6 @@
     candidate.setAttribute('data-mpse-native-paste-id', context.pasteId);
     const editId = String(context.locator?.editId || '');
     if (editId) candidate.setAttribute('data-mpse-paste-for', editId);
-    releaseNativePasteInputLock(context);
     return candidate;
   }
 

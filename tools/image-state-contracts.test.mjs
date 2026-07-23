@@ -303,7 +303,7 @@ test('candidate cleanup still applies the snapshot to a promoted original image'
   assert.equal(candidate.removed, true);
 });
 
-test('one snapshot transaction removes the carrier and preserves the original presentation state', () => {
+test('one snapshot transaction removes superseded carriers and preserves the original presentation state', () => {
   const imageTools = readText('src/image-tools.js');
   const targetStart = imageTools.indexOf('  function copyManagedData(source, target) {');
   const targetEnd = imageTools.indexOf('  function parseContentRoot(content) {', targetStart);
@@ -402,32 +402,45 @@ return { applySnapshotToRoot };`
     'data-mpse-glow-blur': '24'
   }, cropHost);
   original.cropHost = cropHost;
-  const carrier = createImage({
-    src: 'https://mmbiz.qpic.cn/baked.png?wx_fmt=png&from=appmsg',
-    'data-src': 'https://mmbiz.qpic.cn/baked.png?wx_fmt=png&from=appmsg',
-    'data-fileid': 'baked-file',
-    'data-mpse-native-paste-id': 'atomic-carrier'
+  const firstCarrier = createImage({
+    src: 'https://mmbiz.qpic.cn/baked-first.png?wx_fmt=png&from=appmsg',
+    'data-src': 'https://mmbiz.qpic.cn/baked-first.png?wx_fmt=png&from=appmsg',
+    'data-fileid': 'baked-first-file',
+    'data-mpse-native-paste-id': 'atomic-carrier-first'
+  });
+  const latestCarrier = createImage({
+    src: 'https://mmbiz.qpic.cn/baked-latest.png?wx_fmt=png&from=appmsg',
+    'data-src': 'https://mmbiz.qpic.cn/baked-latest.png?wx_fmt=png&from=appmsg',
+    'data-fileid': 'baked-latest-file',
+    'data-mpse-native-paste-id': 'atomic-carrier-latest'
   });
   const neighbor = createImage({
     src: 'https://mmbiz.qpic.cn/neighbor.png',
     'data-src': 'https://mmbiz.qpic.cn/neighbor.png',
     'data-mpse-image-id': 'neighbor'
   });
-  root.images.push(original, carrier, neighbor);
+  root.images.push(original, firstCarrier, latestCarrier, neighbor);
 
   const result = applySnapshotToRoot(root, {
     identity: { editId: 'stable-original', index: 0 },
-    nativePasteCandidates: [{
-      pasteId: 'atomic-carrier',
-      cdnUrl: 'https://mmbiz.qpic.cn/baked.png?wx_fmt=png&from=appmsg',
-      placement: 'after'
-    }],
+    nativePasteCandidates: [
+      {
+        pasteId: 'atomic-carrier-first',
+        cdnUrl: 'https://mmbiz.qpic.cn/baked-first.png?wx_fmt=png&from=appmsg',
+        placement: 'after'
+      },
+      {
+        pasteId: 'atomic-carrier-latest',
+        cdnUrl: 'https://mmbiz.qpic.cn/baked-latest.png?wx_fmt=png&from=appmsg',
+        placement: 'after'
+      }
+    ],
     cropAction: 'preserve',
     imgAttributeAction: 'sync',
     imgAttributePatch: {
-      src: 'https://mmbiz.qpic.cn/baked.png?wx_fmt=png&from=appmsg',
-      'data-src': 'https://mmbiz.qpic.cn/baked.png?wx_fmt=png&from=appmsg',
-      'data-fileid': 'baked-file',
+      src: 'https://mmbiz.qpic.cn/baked-latest.png?wx_fmt=png&from=appmsg',
+      'data-src': 'https://mmbiz.qpic.cn/baked-latest.png?wx_fmt=png&from=appmsg',
+      'data-fileid': 'baked-latest-file',
       'data-w': '1200',
       'data-ratio': '0.625'
     },
@@ -452,8 +465,8 @@ return { applySnapshotToRoot };`
   assert.equal(original.style.getPropertyValue('border-radius'), '18px');
   assert.equal(original.getAttribute('data-mpse-glow-on'), '1');
   assert.equal(original.getAttribute('data-mpse-glow-blur'), '24');
-  assert.equal(original.getAttribute('data-src'), 'https://mmbiz.qpic.cn/baked.png?wx_fmt=png&from=appmsg');
-  assert.equal(original.getAttribute('data-fileid'), 'baked-file');
+  assert.equal(original.getAttribute('data-src'), 'https://mmbiz.qpic.cn/baked-latest.png?wx_fmt=png&from=appmsg');
+  assert.equal(original.getAttribute('data-fileid'), 'baked-latest-file');
   assert.equal(original.getAttribute('data-w'), '1200');
   assert.equal(original.getAttribute('data-ratio'), '0.625');
   assert.equal(neighbor.removed, false);

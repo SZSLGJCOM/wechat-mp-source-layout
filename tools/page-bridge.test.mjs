@@ -585,6 +585,7 @@ test('image bake keeps an after-target carrier for the atomic snapshot commit', 
         pasteEvent = event;
         images.push(pasted);
         canonicalContent += '<p><img data-src="https://mmbiz.qpic.cn/mmbiz_png/baked.png?wx_fmt=png&amp;from=appmsg"></p>';
+        harness.fireDocumentEvent('input', editor);
       }
       return true;
     },
@@ -884,7 +885,10 @@ test('an input conflict restores the known replacement and hands canonical clean
   await nextTurn();
 
   assert.ok(confirmationRequest, 'the pasted replacement must be owned before the input conflict');
-  harness.fireDocumentEvent('input', editor);
+  harness.fireDocumentEvent('input', {
+    nodeType: 1,
+    isContentEditable: true
+  });
   confirmationRequest.sucCb({ content: canonicalContent });
 
   const response = await pending;
@@ -1077,7 +1081,7 @@ test('native paste waits for the candidate beside the target across a full edito
   assert.notEqual(response.data.cdnUrl, 'https://mmbiz.qpic.cn/neighbor.png');
 });
 
-test('trusted input leaves a later unowned image untouched', async () => {
+test('trusted input outside the locked editor leaves a later unowned image untouched', async () => {
   const target = fakeImage({
     src: 'https://mmbiz.qpic.cn/source.png',
     'data-src': 'https://mmbiz.qpic.cn/source.png',
@@ -1131,7 +1135,10 @@ test('trusted input leaves a later unowned image untouched', async () => {
   });
   await nextTurn();
 
-  harness.fireDocumentEvent('input', editor);
+  harness.fireDocumentEvent('input', {
+    nodeType: 1,
+    isContentEditable: true
+  });
   images = [target, pasted];
   canonicalContent += '<p><img data-src="https://mmbiz.qpic.cn/delayed.png"></p>';
   harness.runTimer(120);
@@ -1145,7 +1152,7 @@ test('trusted input leaves a later unowned image untouched', async () => {
   assert.match(canonicalContent, /delayed\.png/);
 });
 
-test('native paste blocks editor input only until it owns a placeholder', async () => {
+test('native paste holds the input lock through canonical confirmation', async () => {
   const target = fakeImage({
     src: 'https://mmbiz.qpic.cn/source-lock.png',
     'data-src': 'https://mmbiz.qpic.cn/source-lock.png',
@@ -1158,6 +1165,8 @@ test('native paste blocks editor input only until it owns a placeholder', async 
   const baseline = '<p><img data-mpse-image-id="image-lock" data-src="https://mmbiz.qpic.cn/source-lock.png"></p>';
   let images = [target];
   let canonicalContent = baseline;
+  let getCalls = 0;
+  let confirmationRequest = null;
   const editor = {
     innerHTML: canonicalContent,
     textContent: '',
@@ -1175,7 +1184,9 @@ test('native paste blocks editor input only until it owns a placeholder', async 
     } else if (payload.apiName === 'mp_editor_set_selection') {
       payload.sucCb({});
     } else if (payload.apiName === 'mp_editor_get_content') {
-      payload.sucCb({ content: canonicalContent });
+      getCalls += 1;
+      if (getCalls === 1) payload.sucCb({ content: canonicalContent });
+      else confirmationRequest = payload;
     } else if (payload.apiName === 'mp_editor_set_content') {
       canonicalContent = payload.apiParam.content;
       payload.sucCb({});
@@ -1210,6 +1221,21 @@ test('native paste blocks editor input only until it owns a placeholder', async 
   images = [target, pasted];
   canonicalContent += '<p><img data-src="https://mmbiz.qpic.cn/pasted-lock.png"></p>';
   harness.runTimer(120);
+  await nextTurn();
+
+  assert.ok(confirmationRequest, 'the carrier must be owned before canonical confirmation');
+  assert.deepEqual(
+    harness.fireDocumentEvent('input', editor),
+    { prevented: false, stopped: false },
+    'WeChat must receive its own trusted model input'
+  );
+  const stillBlocked = harness.fireDocumentEvent('beforeinput', editor, {
+    inputType: 'insertText',
+    data: 'y'
+  });
+  assert.equal(stillBlocked.prevented, true);
+  assert.equal(stillBlocked.stopped, true);
+  confirmationRequest.sucCb({ content: canonicalContent });
 
   const response = await pending;
   assert.equal(response.ok, true, JSON.stringify(response.error));
@@ -1217,6 +1243,11 @@ test('native paste blocks editor input only until it owns a placeholder', async 
   assert.equal((canonicalContent.match(/<img\b/g) || []).length, 2);
   assert.match(canonicalContent, /source-lock\.png/);
   assert.match(canonicalContent, /pasted-lock\.png/);
+  assert.deepEqual(
+    harness.fireDocumentEvent('beforeinput', editor),
+    { prevented: false, stopped: false },
+    'the lock must be released after the paste transaction settles'
+  );
 });
 
 test('a queued SET invalidates an unresolved paste before writing new HTML', async () => {
