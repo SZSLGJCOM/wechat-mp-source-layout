@@ -34,6 +34,54 @@ function createPageHarness(invoke, options = {}) {
     },
     removeEventListener(type, listener) {
       documentListeners.get(type)?.delete(listener);
+    },
+    createElement() {
+      let html = '';
+      let entries = [];
+      return {
+        set innerHTML(value) {
+          html = String(value || '');
+          entries = [];
+          for (const match of html.matchAll(/<img\b([^>]*)>/gi)) {
+            const attributes = {};
+            for (const attribute of match[1].matchAll(/([^\s=]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/g)) {
+              attributes[attribute[1]] = String(attribute[2] ?? attribute[3] ?? attribute[4] ?? '')
+                .replaceAll('&amp;', '&');
+            }
+            const entry = {
+              html: match[0],
+              removed: false,
+              image: null
+            };
+            const image = fakeImage(attributes);
+            image.remove = () => {
+              entry.removed = true;
+              image.isConnected = false;
+            };
+            entry.image = image;
+            entries.push(entry);
+          }
+        },
+        get innerHTML() {
+          return entries.reduce((content, entry) => {
+            if (entry.removed) return content.replace(entry.html, '');
+            const attributes = [...entry.image.__attributes.entries()]
+              .map(([name, value]) => {
+                const escaped = String(value)
+                  .replaceAll('&', '&amp;')
+                  .replaceAll('"', '&quot;')
+                  .replaceAll('<', '&lt;');
+                return `${name}="${escaped}"`;
+              })
+              .join(' ');
+            return content.replace(entry.html, `<img${attributes ? ` ${attributes}` : ''}>`);
+          }, html);
+        },
+        querySelectorAll(selector) {
+          if (selector !== 'img') return [];
+          return entries.filter((entry) => !entry.removed).map((entry) => entry.image);
+        }
+      };
     }
   };
 
@@ -66,6 +114,12 @@ function createPageHarness(invoke, options = {}) {
   };
   window.window = window;
   window.top = window;
+  window.File = options.File || globalThis.File;
+  window.DataTransfer = options.DataTransfer;
+  window.ClipboardEvent = options.ClipboardEvent;
+  window.Event = options.Event || globalThis.Event;
+  window.InputEvent = options.InputEvent || window.Event;
+  window.KeyboardEvent = options.KeyboardEvent || window.Event;
   document.defaultView = window;
 
   if (options.editor) {
@@ -85,9 +139,14 @@ function createPageHarness(invoke, options = {}) {
     fetch: options.fetch || globalThis.fetch,
     URL,
     URLSearchParams,
+    Date: options.Date || Date,
     Blob,
-    FormData,
     ArrayBuffer,
+    MutationObserver: options.MutationObserver || class {
+      constructor() {}
+      observe() {}
+      disconnect() {}
+    },
     console,
     setTimeout,
     clearTimeout
@@ -158,7 +217,7 @@ test('native input events stay untouched and delay a queued SET until idle', asy
   assert.equal(typeof finishSet, 'function');
   finishSet({});
   const response = await pending;
-  assert.equal(response.ok, true);
+  assert.equal(response.ok, true, JSON.stringify(response.error));
   assert.deepEqual(calls, ['mp_editor_get_content', 'mp_editor_set_content']);
 });
 
@@ -240,6 +299,33 @@ test('input during final expected-content validation becomes a retryable conflic
   assert.equal(response.ok, false);
   assert.equal(response.error.code, 'MPSE_CONTENT_CONFLICT');
   assert.equal(setCalls, 0, 'validation invalidated by input must never reach SET');
+});
+
+test('conditional writes reject a different article even when the HTML is identical', async () => {
+  const editor = { innerHTML: 'same', textContent: 'same', isConnected: true };
+  let setCalls = 0;
+  const harness = createPageHarness((payload) => {
+    if (payload.apiName === 'mp_editor_get_content') {
+      payload.sucCb({ content: 'same' });
+    } else {
+      setCalls += 1;
+      payload.sucCb({});
+    }
+  }, {
+    editor,
+    href: 'https://mp.weixin.qq.com/cgi-bin/appmsg?appmsgid=2'
+  });
+
+  const response = await harness.request('SET_CONTENT', {
+    content: 'replacement',
+    expectedContent: 'same',
+    expectedMode: 'mp-editor-jsapi',
+    expectedArticleKey: 'path=/cgi-bin/appmsg&appmsgid=1'
+  });
+
+  assert.equal(response.ok, false);
+  assert.equal(response.error.code, 'MPSE_CONTENT_CONFLICT');
+  assert.equal(setCalls, 0);
 });
 
 test('synthetic editor events emitted by programmatic writes do not impersonate user input', async () => {
@@ -411,166 +497,1099 @@ test('a confirmed SET failure releases the queue for the next write', async () =
   assert.equal(setCalls, 2);
 });
 
-test('image upload uses the editor local-file channel without material-library credentials', async () => {
-  const requests = [];
-  const harness = createPageHarness(() => {
-    throw new Error('editor JSAPI must not be used for uploads');
+function fakeImage(attributes) {
+  const values = new Map(Object.entries(attributes));
+  return {
+    __attributes: values,
+    isConnected: true,
+    currentSrc: values.get('src') || '',
+    getAttribute: (name) => values.get(name) || '',
+    hasAttribute: (name) => values.has(name),
+    setAttribute(name, value) {
+      values.set(name, String(value));
+    },
+    removeAttribute(name) {
+      values.delete(name);
+    },
+    remove() {
+      this.isConnected = false;
+    },
+    parentElement: null
+  };
+}
+
+class FakeFile extends Blob {
+  constructor(parts, name, options = {}) {
+    super(parts, options);
+    this.name = name;
+    this.lastModified = options.lastModified || 0;
+  }
+}
+
+class FakeDataTransfer {
+  constructor() {
+    this.files = [];
+    this.items = {
+      add: (file) => {
+        this.files.push(file);
+        return file;
+      }
+    };
+  }
+}
+
+class FakeClipboardEvent {
+  constructor(type, options = {}) {
+    this.type = type;
+    Object.assign(this, options);
+    this.isTrusted = false;
+  }
+}
+
+test('image bake is handed to the editor paste handler and keeps the original until confirmation', async () => {
+  const original = fakeImage({
+    src: 'https://mmbiz.qpic.cn/source.png',
+    'data-src': 'https://mmbiz.qpic.cn/source.png',
+    'data-mpse-image-id': 'image-7'
+  });
+  const pasted = fakeImage({
+    src: 'https://mmbiz.qpic.cn/mmbiz_png/baked.png?wx_fmt=png&from=appmsg',
+    'data-src': 'https://mmbiz.qpic.cn/mmbiz_png/baked.png?wx_fmt=png&from=appmsg',
+    'data-fileid': '987654',
+    'data-w': '900',
+    'data-ratio': '0.5625',
+    'data-type': 'png'
+  });
+  const images = [original];
+  let selectionPayload = null;
+  let pasteEvent = null;
+  let canonicalContent = '<p><img src="https://mmbiz.qpic.cn/source.png"></p>';
+  const editor = {
+    innerHTML: canonicalContent,
+    textContent: '',
+    isConnected: true,
+    querySelectorAll(selector) {
+      return selector === 'img' ? images : [];
+    },
+    dispatchEvent(event) {
+      if (event.type === 'paste') {
+        pasteEvent = event;
+        images.push(pasted);
+        canonicalContent += '<p><img data-src="https://mmbiz.qpic.cn/mmbiz_png/baked.png?wx_fmt=png&amp;from=appmsg"></p>';
+      }
+      return true;
+    },
+    focus() {}
+  };
+  const harness = createPageHarness((payload) => {
+    if (payload.apiName === 'mp_editor_get_isready') {
+      payload.sucCb({ isReady: true, isNew: true });
+      return;
+    }
+    if (payload.apiName === 'mp_editor_set_selection') {
+      selectionPayload = payload.apiParam;
+      payload.sucCb({});
+      return;
+    }
+    if (payload.apiName === 'mp_editor_get_content') {
+      payload.sucCb({ content: canonicalContent });
+      return;
+    }
+    if (payload.apiName === 'mp_editor_set_content') {
+      canonicalContent = payload.apiParam.content;
+      payload.sucCb({});
+      return;
+    }
+    throw new Error(`unexpected API ${payload.apiName}`);
   }, {
-    href: 'https://mp.weixin.qq.com/cgi-bin/appmsg?token=123456&lang=zh_CN',
-    fetch: async (url, init) => {
-      requests.push({ url: String(url), init });
-      return {
-        ok: true,
-        status: 200,
-        async json() {
-          return {
-            base_resp: { ret: 0 },
-            content: '987654',
-            cdn_url: 'https://mmbiz.qpic.cn/mmbiz_png/baked.png'
-          };
-        }
-      };
-    }
+    editor,
+    File: FakeFile,
+    DataTransfer: FakeDataTransfer,
+    ClipboardEvent: FakeClipboardEvent
   });
 
-  const bytes = new Uint8Array([137, 80, 78, 71]).buffer;
-  const response = await harness.request('UPLOAD_IMAGE', {
-    bytes,
-    mimeType: 'image/png',
-    filename: 'article-effect.png'
-  });
-
-  assert.equal(response.ok, true);
-  assert.deepEqual(JSON.parse(JSON.stringify(response.data)), {
-    cdnUrl: 'https://mmbiz.qpic.cn/mmbiz_png/baked.png',
-    fileId: '987654',
-    mimeType: 'image/png',
-    channel: 'editor-local'
-  });
-  assert.equal(requests.length, 1);
-  assert.match(requests[0].url, /^\/cgi-bin\/filetransfer\?/);
-  const query = new URL(requests[0].url, 'https://mp.weixin.qq.com').searchParams;
-  assert.equal(query.get('action'), 'upload_material');
-  assert.equal(query.get('scene'), '8');
-  assert.equal(query.get('writetype'), 'doublewrite');
-  assert.equal(query.get('ticket_id'), '');
-  assert.equal(query.get('ticket'), '');
-  assert.equal(query.get('svr_time'), '');
-  assert.equal(query.get('token'), '123456');
-  assert.equal(requests[0].init.method, 'POST');
-  assert.equal(requests[0].init.credentials, 'same-origin');
-  const form = requests[0].init.body;
-  const file = form.get('file');
-  assert.equal(file.name, 'article-effect.png');
-  assert.equal(file.type, 'image/png');
-  assert.equal(file.size, bytes.byteLength);
-  assert.equal(form.get('type'), 'image/png');
-  assert.equal(form.get('name'), 'article-effect.png');
-  assert.equal(form.get('size'), String(bytes.byteLength));
-  assert.ok(form.get('id'));
-  assert.ok(form.get('lastModifiedDate'));
-});
-
-test('local image upload retries with a fresh ticket only when the token-only channel rejects it', async () => {
-  const requests = [];
-  const harness = createPageHarness(() => {}, {
-    href: 'https://mp.weixin.qq.com/cgi-bin/appmsg?token=123456',
-    fetch: async (url, init) => {
-      requests.push({ url: String(url), init });
-      if (requests.length === 1) {
-        return {
-          ok: true,
-          status: 200,
-          async json() {
-            return { base_resp: { ret: 200002, err_msg: 'invalid args' } };
-          }
-        };
-      }
-      if (requests.length === 2) {
-        return {
-          ok: true,
-          status: 200,
-          async text() {
-            return 'ticket:"upload-ticket", user_name:"gh_material_owner"';
-          }
-        };
-      }
-      return {
-        ok: true,
-        status: 200,
-        async json() {
-          return {
-            base_resp: { ret: 0, err_msg: 'ok' },
-            content: '987654',
-            cdn_url: 'http://mmbiz.qpic.cn/mmbiz_png/baked.png'
-          };
-        }
-      };
-    }
-  });
-
-  const response = await harness.request('UPLOAD_IMAGE', {
+  const response = await harness.request('PASTE_IMAGE', {
     bytes: new Uint8Array([137, 80, 78, 71]).buffer,
-    mimeType: 'image/png'
-  });
-  assert.equal(response.ok, true);
-  assert.equal(response.data.cdnUrl, 'https://mmbiz.qpic.cn/mmbiz_png/baked.png');
-  assert.equal(requests.length, 3);
-  assert.equal(requests[1].url, '/cgi-bin/masssendpage?t=mass/send&token=123456&lang=zh_CN');
-  const retryQuery = new URL(requests[2].url, 'https://mp.weixin.qq.com').searchParams;
-  assert.equal(retryQuery.get('scene'), '8');
-  assert.equal(retryQuery.get('ticket_id'), 'gh_material_owner');
-  assert.equal(retryQuery.get('ticket'), 'upload-ticket');
-  assert.ok(retryQuery.get('svr_time'));
-});
-
-test('image upload rejects invalid payloads before touching the network', async () => {
-  let fetchCalls = 0;
-  const harness = createPageHarness(() => {}, {
-    href: 'https://mp.weixin.qq.com/cgi-bin/appmsg?token=123456',
-    fetch: async () => {
-      fetchCalls += 1;
-      throw new Error('network must not be reached');
+    mimeType: 'image/png',
+    filename: 'article-effect.png',
+    locator: {
+      editId: 'image-7',
+      sourceUrl: 'https://mmbiz.qpic.cn/source.png',
+      index: 0
     }
   });
 
-  const invalidMime = await harness.request('UPLOAD_IMAGE', {
+  assert.equal(response.ok, true, JSON.stringify(response.error));
+  assert.equal(selectionPayload.container, original);
+  assert.equal(selectionPayload.selectAfter, true);
+  assert.equal(pasteEvent.type, 'paste');
+  assert.equal(pasteEvent.clipboardData.files.length, 1);
+  assert.equal(pasteEvent.clipboardData.files[0].name, 'article-effect.png');
+  assert.equal(original.isConnected, true, 'the original stays until the atomic content commit');
+  assert.equal(pasted.isConnected, false, 'the temporary pasted node is rolled back before returning');
+  assert.equal(canonicalContent, '<p><img src="https://mmbiz.qpic.cn/source.png"></p>');
+  assert.match(response.data.pasteId, /^mpse-paste-/);
+  assert.deepEqual(JSON.parse(JSON.stringify({ ...response.data, pasteId: '<dynamic>' })), {
+    pasteId: '<dynamic>',
+    cdnUrl: 'https://mmbiz.qpic.cn/mmbiz_png/baked.png?wx_fmt=png&from=appmsg',
+    sourceAttributes: {
+      src: 'https://mmbiz.qpic.cn/mmbiz_png/baked.png?wx_fmt=png&from=appmsg',
+      'data-src': 'https://mmbiz.qpic.cn/mmbiz_png/baked.png?wx_fmt=png&from=appmsg',
+      'data-fileid': '987654',
+      'data-w': '900',
+      'data-ratio': '0.5625',
+      'data-type': 'png'
+    },
+    mimeType: 'image/png',
+    channel: 'editor-paste',
+    selectionMode: 'mp-editor-jsapi',
+    articleKey: 'path=/cgi-bin/appmsg',
+    placement: 'after',
+    cleanupPending: false
+  });
+});
+
+test('an in-place native paste is restored without deleting the target image', async () => {
+  const target = fakeImage({
+    src: 'https://mmbiz.qpic.cn/source-replace.png',
+    'data-src': 'https://mmbiz.qpic.cn/source-replace.png',
+    'data-mpse-image-id': 'image-replace'
+  });
+  const baseline = '<p><img data-mpse-image-id="image-replace" data-src="https://mmbiz.qpic.cn/source-replace.png"></p>';
+  let canonicalContent = baseline;
+  const editor = {
+    innerHTML: baseline,
+    textContent: '',
+    isConnected: true,
+    querySelectorAll: (selector) => (selector === 'img' ? [target] : []),
+    contains: (node) => node === target,
+    dispatchEvent(event) {
+      if (event.type === 'paste') {
+        target.setAttribute('src', 'https://mmbiz.qpic.cn/replaced.png');
+        target.setAttribute('data-src', 'https://mmbiz.qpic.cn/replaced.png');
+        target.setAttribute('data-fileid', 'replace-file');
+        canonicalContent = '<p><img data-mpse-image-id="image-replace" data-src="https://mmbiz.qpic.cn/replaced.png"></p>';
+      }
+      return true;
+    },
+    focus() {}
+  };
+  const harness = createPageHarness((payload) => {
+    if (payload.apiName === 'mp_editor_get_isready') {
+      payload.sucCb({ isReady: true, isNew: true });
+    } else if (payload.apiName === 'mp_editor_set_selection') {
+      payload.sucCb({});
+    } else if (payload.apiName === 'mp_editor_get_content') {
+      payload.sucCb({ content: canonicalContent });
+    } else if (payload.apiName === 'mp_editor_set_content') {
+      canonicalContent = payload.apiParam.content;
+      payload.sucCb({});
+    } else {
+      throw new Error(`unexpected API ${payload.apiName}`);
+    }
+  }, {
+    editor,
+    File: FakeFile,
+    DataTransfer: FakeDataTransfer,
+    ClipboardEvent: FakeClipboardEvent
+  });
+
+  const response = await harness.request('PASTE_IMAGE', {
+    bytes: new Uint8Array([137, 80, 78, 71]).buffer,
+    mimeType: 'image/png',
+    locator: {
+      editId: 'image-replace',
+      sourceUrl: 'https://mmbiz.qpic.cn/source-replace.png',
+      index: 0
+    }
+  });
+
+  assert.equal(response.ok, true, JSON.stringify(response.error));
+  assert.equal(response.data.placement, 'replace');
+  assert.equal(response.data.cdnUrl, 'https://mmbiz.qpic.cn/replaced.png');
+  assert.equal(target.isConnected, true);
+  assert.equal(target.getAttribute('data-src'), 'https://mmbiz.qpic.cn/source-replace.png');
+  assert.equal(target.getAttribute('data-mpse-native-paste-id'), '');
+  assert.equal(canonicalContent, baseline);
+});
+
+test('an in-place raw upload placeholder receives the bounded upload window', async () => {
+  let now = 0;
+  class ControlledDate extends Date {
+    static now() {
+      return now;
+    }
+  }
+  const target = fakeImage({
+    src: 'https://mmbiz.qpic.cn/source-placeholder.png',
+    'data-src': 'https://mmbiz.qpic.cn/source-placeholder.png',
+    'data-mpse-image-id': 'image-placeholder'
+  });
+  const baseline = [
+    '<p><img data-mpse-image-id="image-placeholder"',
+    ' data-src="https://mmbiz.qpic.cn/source-placeholder.png"></p>'
+  ].join('');
+  let canonicalContent = baseline;
+  const editor = {
+    innerHTML: baseline,
+    textContent: '',
+    isConnected: true,
+    querySelectorAll: (selector) => (selector === 'img' ? [target] : []),
+    contains: (node) => node === target,
+    dispatchEvent(event) {
+      if (event.type === 'paste') {
+        target.setAttribute('src', 'blob:https://mp.weixin.qq.com/pending-upload');
+        target.setAttribute('data-src', 'blob:https://mp.weixin.qq.com/pending-upload');
+        canonicalContent = '<p><img data-src="blob:https://mp.weixin.qq.com/pending-upload"></p>';
+      }
+      return true;
+    },
+    focus() {}
+  };
+  const harness = createPageHarness((payload) => {
+    if (payload.apiName === 'mp_editor_get_isready') {
+      payload.sucCb({ isReady: true, isNew: true });
+    } else if (payload.apiName === 'mp_editor_set_selection') {
+      payload.sucCb({});
+    } else if (payload.apiName === 'mp_editor_get_content') {
+      payload.sucCb({ content: canonicalContent });
+    } else if (payload.apiName === 'mp_editor_set_content') {
+      canonicalContent = payload.apiParam.content;
+      payload.sucCb({});
+    } else {
+      throw new Error(`unexpected API ${payload.apiName}`);
+    }
+  }, {
+    editor,
+    File: FakeFile,
+    DataTransfer: FakeDataTransfer,
+    ClipboardEvent: FakeClipboardEvent,
+    Date: ControlledDate
+  });
+
+  let settled = false;
+  const pending = harness.request('PASTE_IMAGE', {
+    bytes: new Uint8Array([137, 80, 78, 71]).buffer,
+    mimeType: 'image/png',
+    locator: {
+      editId: 'image-placeholder',
+      sourceUrl: 'https://mmbiz.qpic.cn/source-placeholder.png',
+      index: 0
+    }
+  }).finally(() => {
+    settled = true;
+  });
+  await nextTurn();
+
+  now = 6000;
+  harness.runTimer(120);
+  await nextTurn();
+  assert.equal(settled, false, 'the raw placeholder must extend the initial five-second deadline');
+
+  target.setAttribute('src', 'https://mmbiz.qpic.cn/uploaded-placeholder.png');
+  target.setAttribute('data-src', 'https://mmbiz.qpic.cn/uploaded-placeholder.png');
+  canonicalContent = '<p><img data-src="https://mmbiz.qpic.cn/uploaded-placeholder.png"></p>';
+  now = 7000;
+  harness.runTimer(120);
+
+  const response = await pending;
+  assert.equal(response.ok, true, JSON.stringify(response.error));
+  assert.equal(response.data.placement, 'replace');
+  assert.equal(response.data.cdnUrl, 'https://mmbiz.qpic.cn/uploaded-placeholder.png');
+  assert.equal(canonicalContent, baseline);
+});
+
+test('an input conflict restores the known replacement and hands canonical cleanup to the page ledger', async () => {
+  const target = fakeImage({
+    src: 'https://mmbiz.qpic.cn/source-conflict.png',
+    'data-src': 'https://mmbiz.qpic.cn/source-conflict.png',
+    'data-fileid': 'source-file',
+    'data-mpse-image-id': 'image-conflict'
+  });
+  const baseline = [
+    '<p><img data-mpse-image-id="image-conflict"',
+    ' src="https://mmbiz.qpic.cn/source-conflict.png"',
+    ' data-src="https://mmbiz.qpic.cn/source-conflict.png"',
+    ' data-fileid="source-file"></p>'
+  ].join('');
+  let canonicalContent = baseline;
+  let getCalls = 0;
+  let confirmationRequest = null;
+  const editor = {
+    innerHTML: baseline,
+    textContent: '',
+    isConnected: true,
+    querySelectorAll: (selector) => (selector === 'img' ? [target] : []),
+    contains: (node) => node === target,
+    dispatchEvent(event) {
+      if (event.type === 'paste') {
+        target.setAttribute('src', 'https://mmbiz.qpic.cn/replacement-conflict.png');
+        target.setAttribute('data-src', 'https://mmbiz.qpic.cn/replacement-conflict.png');
+        target.setAttribute('data-fileid', 'replacement-file');
+        canonicalContent = [
+          '<p><img data-mpse-image-id="image-conflict"',
+          ' src="https://mmbiz.qpic.cn/replacement-conflict.png"',
+          ' data-src="https://mmbiz.qpic.cn/replacement-conflict.png"',
+          ' data-fileid="replacement-file"></p>'
+        ].join('');
+      }
+      return true;
+    },
+    focus() {}
+  };
+  const harness = createPageHarness((payload) => {
+    if (payload.apiName === 'mp_editor_get_isready') {
+      payload.sucCb({ isReady: true, isNew: true });
+    } else if (payload.apiName === 'mp_editor_set_selection') {
+      payload.sucCb({});
+    } else if (payload.apiName === 'mp_editor_get_content') {
+      getCalls += 1;
+      if (getCalls === 1) payload.sucCb({ content: canonicalContent });
+      else if (getCalls === 2) confirmationRequest = payload;
+      else payload.sucCb({ content: canonicalContent });
+    } else if (payload.apiName === 'mp_editor_set_content') {
+      canonicalContent = payload.apiParam.content;
+      payload.sucCb({});
+    } else {
+      throw new Error(`unexpected API ${payload.apiName}`);
+    }
+  }, {
+    editor,
+    File: FakeFile,
+    DataTransfer: FakeDataTransfer,
+    ClipboardEvent: FakeClipboardEvent
+  });
+
+  const pending = harness.request('PASTE_IMAGE', {
+    bytes: new Uint8Array([137, 80, 78, 71]).buffer,
+    mimeType: 'image/png',
+    locator: {
+      editId: 'image-conflict',
+      sourceUrl: 'https://mmbiz.qpic.cn/source-conflict.png',
+      index: 0
+    }
+  });
+  await nextTurn();
+
+  assert.ok(confirmationRequest, 'the pasted replacement must be owned before the input conflict');
+  harness.fireDocumentEvent('input', editor);
+  confirmationRequest.sucCb({ content: canonicalContent });
+
+  const response = await pending;
+  assert.equal(response.ok, false);
+  assert.equal(response.error.code, 'MPSE_CONTENT_CONFLICT');
+  assert.equal(response.error.pasteCandidate.placement, 'replace');
+  assert.deepEqual(JSON.parse(JSON.stringify(response.error.pasteCandidate.originalAttributes)), {
+    src: 'https://mmbiz.qpic.cn/source-conflict.png',
+    'data-src': 'https://mmbiz.qpic.cn/source-conflict.png',
+    'data-fileid': 'source-file'
+  });
+  assert.equal(target.isConnected, true);
+  assert.equal(target.getAttribute('data-src'), 'https://mmbiz.qpic.cn/source-conflict.png');
+  assert.equal(target.getAttribute('data-fileid'), 'source-file');
+
+  harness.runTimer(160);
+  await nextTurn();
+  harness.runTimer(1000);
+  await nextTurn();
+  await nextTurn();
+
+  assert.equal((canonicalContent.match(/<img\b/g) || []).length, 1);
+  assert.match(canonicalContent, /source-conflict\.png/);
+  assert.match(canonicalContent, /source-file/);
+  assert.doesNotMatch(canonicalContent, /replacement-conflict\.png|replacement-file|data-mpse-native-paste-id/);
+});
+
+test('a replacement node without the extension image id is recognized by its bounded position', async () => {
+  const original = fakeImage({
+    src: 'https://mmbiz.qpic.cn/source-node.png',
+    'data-src': 'https://mmbiz.qpic.cn/source-node.png',
+    'data-mpse-image-id': 'image-node'
+  });
+  const neighbor = fakeImage({
+    src: 'https://mmbiz.qpic.cn/neighbor-node.png',
+    'data-src': 'https://mmbiz.qpic.cn/neighbor-node.png',
+    'data-mpse-image-id': 'neighbor-node'
+  });
+  const replacement = fakeImage({
+    src: 'https://mmbiz.qpic.cn/replacement-node.png',
+    'data-src': 'https://mmbiz.qpic.cn/replacement-node.png'
+  });
+  let images = [original, neighbor];
+  const baseline = [
+    '<p><img data-mpse-image-id="image-node" data-src="https://mmbiz.qpic.cn/source-node.png"></p>',
+    '<p><img data-mpse-image-id="neighbor-node" data-src="https://mmbiz.qpic.cn/neighbor-node.png"></p>'
+  ].join('');
+  let canonicalContent = baseline;
+  const editor = {
+    innerHTML: baseline,
+    textContent: '',
+    isConnected: true,
+    querySelectorAll: (selector) => (selector === 'img' ? images : []),
+    contains: (node) => images.includes(node),
+    dispatchEvent(event) {
+      if (event.type === 'paste') {
+        original.isConnected = false;
+        images = [replacement, neighbor];
+        canonicalContent = [
+          '<p><img data-src="https://mmbiz.qpic.cn/replacement-node.png"></p>',
+          '<p><img data-mpse-image-id="neighbor-node" data-src="https://mmbiz.qpic.cn/neighbor-node.png"></p>'
+        ].join('');
+      }
+      return true;
+    },
+    focus() {}
+  };
+  const harness = createPageHarness((payload) => {
+    if (payload.apiName === 'mp_editor_get_isready') {
+      payload.sucCb({ isReady: true, isNew: true });
+    } else if (payload.apiName === 'mp_editor_set_selection') {
+      payload.sucCb({});
+    } else if (payload.apiName === 'mp_editor_get_content') {
+      payload.sucCb({ content: canonicalContent });
+    } else if (payload.apiName === 'mp_editor_set_content') {
+      canonicalContent = payload.apiParam.content;
+      payload.sucCb({});
+    } else {
+      throw new Error(`unexpected API ${payload.apiName}`);
+    }
+  }, {
+    editor,
+    File: FakeFile,
+    DataTransfer: FakeDataTransfer,
+    ClipboardEvent: FakeClipboardEvent
+  });
+
+  const response = await harness.request('PASTE_IMAGE', {
+    bytes: new Uint8Array([137, 80, 78, 71]).buffer,
+    mimeType: 'image/png',
+    locator: {
+      editId: 'image-node',
+      sourceUrl: 'https://mmbiz.qpic.cn/source-node.png',
+      index: 0
+    }
+  });
+
+  assert.equal(response.ok, true, JSON.stringify(response.error));
+  assert.equal(response.data.placement, 'replace');
+  assert.equal(response.data.cdnUrl, 'https://mmbiz.qpic.cn/replacement-node.png');
+  assert.equal(replacement.isConnected, true);
+  assert.equal(replacement.getAttribute('data-src'), 'https://mmbiz.qpic.cn/source-node.png');
+  assert.equal(canonicalContent, baseline);
+});
+
+test('native paste waits for the candidate beside the target across a full editor rerender', async () => {
+  const target = fakeImage({
+    src: 'https://mmbiz.qpic.cn/target.png',
+    'data-src': 'https://mmbiz.qpic.cn/target.png',
+    'data-mpse-image-id': 'target-id'
+  });
+  const neighbor = fakeImage({
+    src: 'https://mmbiz.qpic.cn/neighbor.png',
+    'data-src': 'https://mmbiz.qpic.cn/neighbor.png',
+    'data-mpse-image-id': 'neighbor-id'
+  });
+  const targetClone = fakeImage({
+    src: 'https://mmbiz.qpic.cn/target.png',
+    'data-src': 'https://mmbiz.qpic.cn/target.png',
+    'data-mpse-image-id': 'target-id'
+  });
+  const neighborClone = fakeImage({
+    src: 'https://mmbiz.qpic.cn/neighbor.png',
+    'data-src': 'https://mmbiz.qpic.cn/neighbor.png',
+    'data-mpse-image-id': 'neighbor-id'
+  });
+  const pasted = fakeImage({
+    src: 'https://mmbiz.qpic.cn/pasted.png',
+    'data-src': 'https://mmbiz.qpic.cn/pasted.png',
+    'data-fileid': 'paste-file'
+  });
+  let images = [target, neighbor];
+  let canonicalContent = [
+    '<p><img data-mpse-image-id="target-id" data-src="https://mmbiz.qpic.cn/target.png"></p>',
+    '<p><img data-mpse-image-id="neighbor-id" data-src="https://mmbiz.qpic.cn/neighbor.png"></p>'
+  ].join('');
+  const editor = {
+    innerHTML: canonicalContent,
+    textContent: '',
+    isConnected: true,
+    querySelectorAll: (selector) => (selector === 'img' ? images : []),
+    contains: (node) => images.includes(node),
+    dispatchEvent(event) {
+      if (event.type === 'paste') images = [targetClone, neighborClone];
+      return true;
+    },
+    focus() {}
+  };
+  const harness = createPageHarness((payload) => {
+    if (payload.apiName === 'mp_editor_get_isready') {
+      payload.sucCb({ isReady: true, isNew: true });
+    } else if (payload.apiName === 'mp_editor_set_selection') {
+      payload.sucCb({});
+    } else if (payload.apiName === 'mp_editor_get_content') {
+      payload.sucCb({ content: canonicalContent });
+    } else if (payload.apiName === 'mp_editor_set_content') {
+      canonicalContent = payload.apiParam.content;
+      payload.sucCb({});
+    } else {
+      throw new Error(`unexpected API ${payload.apiName}`);
+    }
+  }, {
+    editor,
+    File: FakeFile,
+    DataTransfer: FakeDataTransfer,
+    ClipboardEvent: FakeClipboardEvent
+  });
+
+  const pending = harness.request('PASTE_IMAGE', {
+    bytes: new Uint8Array([137, 80, 78, 71]).buffer,
+    mimeType: 'image/png',
+    locator: {
+      editId: 'target-id',
+      sourceUrl: 'https://mmbiz.qpic.cn/target.png',
+      index: 0
+    }
+  });
+  await nextTurn();
+
+  images = [targetClone, pasted, neighborClone];
+  canonicalContent = [
+    '<p><img data-mpse-image-id="target-id" data-src="https://mmbiz.qpic.cn/target.png"></p>',
+    '<p><img data-src="https://mmbiz.qpic.cn/pasted.png"></p>',
+    '<p><img data-mpse-image-id="neighbor-id" data-src="https://mmbiz.qpic.cn/neighbor.png"></p>'
+  ].join('');
+  harness.runTimer(120);
+
+  const response = await pending;
+  assert.equal(response.ok, true, JSON.stringify(response.error));
+  assert.equal(response.data.cdnUrl, 'https://mmbiz.qpic.cn/pasted.png');
+  assert.notEqual(response.data.cdnUrl, 'https://mmbiz.qpic.cn/neighbor.png');
+});
+
+test('trusted input leaves a later unowned image untouched', async () => {
+  const target = fakeImage({
+    src: 'https://mmbiz.qpic.cn/source.png',
+    'data-src': 'https://mmbiz.qpic.cn/source.png',
+    'data-mpse-image-id': 'image-delayed'
+  });
+  const pasted = fakeImage({
+    src: 'https://mmbiz.qpic.cn/delayed.png',
+    'data-src': 'https://mmbiz.qpic.cn/delayed.png'
+  });
+  let images = [target];
+  let canonicalContent = '<p><img data-mpse-image-id="image-delayed" data-src="https://mmbiz.qpic.cn/source.png"></p>';
+  const editor = {
+    innerHTML: canonicalContent,
+    textContent: '',
+    isConnected: true,
+    querySelectorAll: (selector) => (selector === 'img' ? images : []),
+    contains: (node) => images.includes(node),
+    dispatchEvent() {
+      return true;
+    },
+    focus() {}
+  };
+  const harness = createPageHarness((payload) => {
+    if (payload.apiName === 'mp_editor_get_isready') {
+      payload.sucCb({ isReady: true, isNew: true });
+    } else if (payload.apiName === 'mp_editor_set_selection') {
+      payload.sucCb({});
+    } else if (payload.apiName === 'mp_editor_get_content') {
+      payload.sucCb({ content: canonicalContent });
+    } else if (payload.apiName === 'mp_editor_set_content') {
+      canonicalContent = payload.apiParam.content;
+      payload.sucCb({});
+    } else {
+      throw new Error(`unexpected API ${payload.apiName}`);
+    }
+  }, {
+    editor,
+    File: FakeFile,
+    DataTransfer: FakeDataTransfer,
+    ClipboardEvent: FakeClipboardEvent
+  });
+
+  const pending = harness.request('PASTE_IMAGE', {
+    bytes: new Uint8Array([137, 80, 78, 71]).buffer,
+    mimeType: 'image/png',
+    locator: {
+      editId: 'image-delayed',
+      sourceUrl: 'https://mmbiz.qpic.cn/source.png',
+      index: 0
+    }
+  });
+  await nextTurn();
+
+  harness.fireDocumentEvent('input', editor);
+  images = [target, pasted];
+  canonicalContent += '<p><img data-src="https://mmbiz.qpic.cn/delayed.png"></p>';
+  harness.runTimer(120);
+
+  const response = await pending;
+  assert.equal(response.ok, false);
+  assert.equal(response.error.code, 'MPSE_CONTENT_CONFLICT');
+  assert.equal(response.error.pasteCandidate, undefined);
+  assert.equal(pasted.isConnected, true);
+  assert.deepEqual(images, [target, pasted]);
+  assert.match(canonicalContent, /delayed\.png/);
+});
+
+test('native paste blocks editor input only until it owns a placeholder', async () => {
+  const target = fakeImage({
+    src: 'https://mmbiz.qpic.cn/source-lock.png',
+    'data-src': 'https://mmbiz.qpic.cn/source-lock.png',
+    'data-mpse-image-id': 'image-lock'
+  });
+  const pasted = fakeImage({
+    src: 'https://mmbiz.qpic.cn/pasted-lock.png',
+    'data-src': 'https://mmbiz.qpic.cn/pasted-lock.png'
+  });
+  const baseline = '<p><img data-mpse-image-id="image-lock" data-src="https://mmbiz.qpic.cn/source-lock.png"></p>';
+  let images = [target];
+  let canonicalContent = baseline;
+  const editor = {
+    innerHTML: canonicalContent,
+    textContent: '',
+    isConnected: true,
+    querySelectorAll: (selector) => (selector === 'img' ? images : []),
+    contains: (node) => images.includes(node),
+    dispatchEvent() {
+      return true;
+    },
+    focus() {}
+  };
+  const harness = createPageHarness((payload) => {
+    if (payload.apiName === 'mp_editor_get_isready') {
+      payload.sucCb({ isReady: true, isNew: true });
+    } else if (payload.apiName === 'mp_editor_set_selection') {
+      payload.sucCb({});
+    } else if (payload.apiName === 'mp_editor_get_content') {
+      payload.sucCb({ content: canonicalContent });
+    } else if (payload.apiName === 'mp_editor_set_content') {
+      canonicalContent = payload.apiParam.content;
+      payload.sucCb({});
+    } else {
+      throw new Error(`unexpected API ${payload.apiName}`);
+    }
+  }, {
+    editor,
+    File: FakeFile,
+    DataTransfer: FakeDataTransfer,
+    ClipboardEvent: FakeClipboardEvent
+  });
+
+  const pending = harness.request('PASTE_IMAGE', {
+    bytes: new Uint8Array([137, 80, 78, 71]).buffer,
+    mimeType: 'image/png',
+    locator: {
+      editId: 'image-lock',
+      sourceUrl: 'https://mmbiz.qpic.cn/source-lock.png',
+      index: 0
+    }
+  });
+  await nextTurn();
+
+  const blocked = harness.fireDocumentEvent('beforeinput', editor, {
+    inputType: 'insertText',
+    data: 'x'
+  });
+  assert.equal(blocked.prevented, true);
+  assert.equal(blocked.stopped, true);
+
+  images = [target, pasted];
+  canonicalContent += '<p><img data-src="https://mmbiz.qpic.cn/pasted-lock.png"></p>';
+  harness.runTimer(120);
+
+  const response = await pending;
+  assert.equal(response.ok, true, JSON.stringify(response.error));
+  assert.equal(response.data.cdnUrl, 'https://mmbiz.qpic.cn/pasted-lock.png');
+  assert.equal(canonicalContent, baseline);
+});
+
+test('a queued SET invalidates an unresolved paste before writing new HTML', async () => {
+  const target = fakeImage({
+    src: 'https://mmbiz.qpic.cn/source-write.png',
+    'data-src': 'https://mmbiz.qpic.cn/source-write.png',
+    'data-mpse-image-id': 'image-write'
+  });
+  const baseline = '<p><img data-mpse-image-id="image-write" data-src="https://mmbiz.qpic.cn/source-write.png"></p>';
+  const saved = '<p>saved after paste</p>';
+  let canonicalContent = baseline;
+  const editor = {
+    innerHTML: canonicalContent,
+    textContent: '',
+    isConnected: true,
+    querySelectorAll: (selector) => (selector === 'img' ? [target] : []),
+    contains: (node) => node === target,
+    dispatchEvent() {
+      return true;
+    },
+    focus() {}
+  };
+  const harness = createPageHarness((payload) => {
+    if (payload.apiName === 'mp_editor_get_isready') {
+      payload.sucCb({ isReady: true, isNew: true });
+    } else if (payload.apiName === 'mp_editor_set_selection') {
+      payload.sucCb({});
+    } else if (payload.apiName === 'mp_editor_get_content') {
+      payload.sucCb({ content: canonicalContent });
+    } else if (payload.apiName === 'mp_editor_set_content') {
+      canonicalContent = payload.apiParam.content;
+      payload.sucCb({});
+    } else {
+      throw new Error(`unexpected API ${payload.apiName}`);
+    }
+  }, {
+    editor,
+    File: FakeFile,
+    DataTransfer: FakeDataTransfer,
+    ClipboardEvent: FakeClipboardEvent
+  });
+
+  const pastePending = harness.request('PASTE_IMAGE', {
+    bytes: new Uint8Array([137, 80, 78, 71]).buffer,
+    mimeType: 'image/png',
+    locator: {
+      editId: 'image-write',
+      sourceUrl: 'https://mmbiz.qpic.cn/source-write.png',
+      index: 0
+    }
+  });
+  await nextTurn();
+  const setPending = harness.request('SET_CONTENT', {
+    content: saved,
+    expectedContent: baseline,
+    expectedMode: 'mp-editor-jsapi',
+    expectedArticleKey: 'path=/cgi-bin/appmsg'
+  });
+  harness.runTimer(120);
+
+  const pasteResponse = await pastePending;
+  const setResponse = await setPending;
+  assert.equal(pasteResponse.ok, false);
+  assert.equal(pasteResponse.error.code, 'MPSE_CONTENT_CONFLICT');
+  assert.equal(setResponse.ok, true, JSON.stringify(setResponse.error));
+  assert.equal(canonicalContent, saved);
+});
+
+test('a timed-out paste leaves a later user image untouched', async () => {
+  let now = 0;
+  class ControlledDate extends Date {
+    static now() {
+      return now;
+    }
+  }
+  const target = fakeImage({
+    src: 'https://mmbiz.qpic.cn/source-timeout.png',
+    'data-src': 'https://mmbiz.qpic.cn/source-timeout.png',
+    'data-mpse-image-id': 'image-timeout'
+  });
+  const userImage = fakeImage({
+    src: 'https://mmbiz.qpic.cn/user-image.png',
+    'data-src': 'https://mmbiz.qpic.cn/user-image.png'
+  });
+  let images = [target];
+  let canonicalContent = '<p><img data-mpse-image-id="image-timeout" data-src="https://mmbiz.qpic.cn/source-timeout.png"></p>';
+  const editor = {
+    innerHTML: canonicalContent,
+    textContent: '',
+    isConnected: true,
+    querySelectorAll: (selector) => (selector === 'img' ? images : []),
+    contains: (node) => images.includes(node),
+    dispatchEvent() {
+      return true;
+    },
+    focus() {}
+  };
+  const harness = createPageHarness((payload) => {
+    if (payload.apiName === 'mp_editor_get_isready') {
+      payload.sucCb({ isReady: true, isNew: true });
+    } else if (payload.apiName === 'mp_editor_set_selection') {
+      payload.sucCb({});
+    } else if (payload.apiName === 'mp_editor_get_content') {
+      payload.sucCb({ content: canonicalContent });
+    } else if (payload.apiName === 'mp_editor_set_content') {
+      canonicalContent = payload.apiParam.content;
+      payload.sucCb({});
+    } else {
+      throw new Error(`unexpected API ${payload.apiName}`);
+    }
+  }, {
+    editor,
+    File: FakeFile,
+    DataTransfer: FakeDataTransfer,
+    ClipboardEvent: FakeClipboardEvent,
+    Date: ControlledDate
+  });
+
+  const pending = harness.request('PASTE_IMAGE', {
+    bytes: new Uint8Array([137, 80, 78, 71]).buffer,
+    mimeType: 'image/png',
+    locator: {
+      editId: 'image-timeout',
+      sourceUrl: 'https://mmbiz.qpic.cn/source-timeout.png',
+      index: 0
+    }
+  });
+  await nextTurn();
+
+  now = 6000;
+  harness.runTimer(120);
+  const response = await pending;
+  assert.equal(response.ok, false);
+  assert.equal(response.error.code, 'MPSE_NATIVE_IMAGE_PASTE_UNSUPPORTED');
+
+  harness.fireDocumentEvent('input', editor);
+  images = [target, userImage];
+  canonicalContent += '<p><img data-src="https://mmbiz.qpic.cn/user-image.png"></p>';
+  await nextTurn();
+
+  assert.equal(userImage.isConnected, true);
+  assert.equal(userImage.getAttribute('data-mpse-native-paste-id'), '');
+  assert.deepEqual(images, [target, userImage]);
+  assert.match(canonicalContent, /user-image\.png/);
+});
+
+test('native paste rejects invalid image payloads before touching the editor', async () => {
+  const harness = createPageHarness(() => {
+    throw new Error('editor API must not be reached');
+  });
+  const invalidMime = await harness.request('PASTE_IMAGE', {
     bytes: new Uint8Array([1]).buffer,
     mimeType: 'image/webp'
   });
   assert.equal(invalidMime.ok, false);
   assert.match(invalidMime.error.message, /PNG 或 JPEG/);
 
-  const oversized = await harness.request('UPLOAD_IMAGE', {
+  const oversized = await harness.request('PASTE_IMAGE', {
     bytes: new ArrayBuffer((10 * 1024 * 1024) + 1),
     mimeType: 'image/png'
   });
   assert.equal(oversized.ok, false);
   assert.match(oversized.error.message, /10MB/);
-  assert.equal(fetchCalls, 0);
 });
 
-test('image upload never accepts a non-WeChat URL as a successful article asset', async () => {
-  const harness = createPageHarness(() => {}, {
-    href: 'https://mp.weixin.qq.com/cgi-bin/appmsg?token=123456',
-    fetch: async () => {
-      return {
-        ok: true,
-        status: 200,
-        async json() {
-          return {
-            base_resp: { ret: 0 },
-            cdn_url: 'https://untrusted.example/baked.png'
-          };
-        }
-      };
+test('discard removes a marked candidate even when the original target is already gone', async () => {
+  let canonicalContent = [
+    '<p><img data-mpse-native-paste-id="paste-orphan-1"',
+    ' data-src="https://mmbiz.qpic.cn/orphan.png"></p>',
+    '<p><img data-src="https://mmbiz.qpic.cn/neighbor.png"></p>'
+  ].join('');
+  let setContent = '';
+  const editor = { innerHTML: canonicalContent, textContent: '', isConnected: true };
+  const harness = createPageHarness((payload) => {
+    if (payload.apiName === 'mp_editor_get_content') {
+      payload.sucCb({ content: canonicalContent });
+      return;
+    }
+    if (payload.apiName === 'mp_editor_set_content') {
+      setContent = payload.apiParam.content;
+      canonicalContent = setContent;
+      payload.sucCb({});
+      return;
+    }
+    throw new Error(`unexpected API ${payload.apiName}`);
+  }, { editor });
+
+  const response = await harness.request('DISCARD_PASTED_IMAGE', {
+    pasteId: 'paste-orphan-1',
+    cdnUrl: 'https://mmbiz.qpic.cn/orphan.png',
+    expectedArticleKey: 'path=/cgi-bin/appmsg',
+    locator: {
+      editId: 'deleted-target',
+      sourceUrl: 'https://mmbiz.qpic.cn/source.png',
+      index: 0
     }
   });
 
-  const response = await harness.request('UPLOAD_IMAGE', {
-    bytes: new Uint8Array([1]).buffer,
-    mimeType: 'image/png'
+  assert.equal(response.ok, true, JSON.stringify(response.error));
+  assert.equal(response.data.changed, true);
+  assert.equal(response.data.confirmedAbsent, true);
+  assert.doesNotMatch(setContent, /orphan\.png|paste-orphan-1/);
+  assert.match(setContent, /neighbor\.png/);
+});
+
+test('discard restores a marked replacement instead of deleting the only image', async () => {
+  let canonicalContent = [
+    '<p><img data-mpse-native-paste-id="replace-cleanup-1"',
+    ' data-mpse-paste-for="image-1"',
+    ' src="https://mmbiz.qpic.cn/replacement.png"',
+    ' data-src="https://mmbiz.qpic.cn/replacement.png"',
+    ' data-fileid="replacement-file" data-w="900"></p>'
+  ].join('');
+  let setContent = '';
+  const editor = { innerHTML: canonicalContent, textContent: '', isConnected: true };
+  const harness = createPageHarness((payload) => {
+    if (payload.apiName === 'mp_editor_get_content') {
+      payload.sucCb({ content: canonicalContent });
+      return;
+    }
+    if (payload.apiName === 'mp_editor_set_content') {
+      setContent = payload.apiParam.content;
+      canonicalContent = setContent;
+      payload.sucCb({});
+      return;
+    }
+    throw new Error(`unexpected API ${payload.apiName}`);
+  }, { editor });
+
+  const response = await harness.request('DISCARD_PASTED_IMAGE', {
+    pasteId: 'replace-cleanup-1',
+    cdnUrl: 'https://mmbiz.qpic.cn/replacement.png',
+    placement: 'replace',
+    originalAttributes: {
+      src: 'https://mmbiz.qpic.cn/source.png',
+      'data-src': 'https://mmbiz.qpic.cn/source.png',
+      'data-fileid': 'source-file',
+      'data-w': '640',
+      'data-ratio': '0.75',
+      'data-type': 'jpeg'
+    },
+    expectedArticleKey: 'path=/cgi-bin/appmsg',
+    locator: {
+      editId: 'image-1',
+      sourceUrl: 'https://mmbiz.qpic.cn/source.png',
+      index: 0
+    }
   });
-  assert.equal(response.ok, false);
-  assert.match(response.error.message, /CDN 地址/);
+
+  assert.equal(response.ok, true, JSON.stringify(response.error));
+  assert.deepEqual(JSON.parse(JSON.stringify(response.data)), {
+    changed: true,
+    confirmedAbsent: true
+  });
+  assert.equal((setContent.match(/<img\b/g) || []).length, 1);
+  assert.match(setContent, /src="https:\/\/mmbiz\.qpic\.cn\/source\.png"/);
+  assert.match(setContent, /data-src="https:\/\/mmbiz\.qpic\.cn\/source\.png"/);
+  assert.match(setContent, /data-fileid="source-file"/);
+  assert.match(setContent, /data-w="640"/);
+  assert.doesNotMatch(setContent, /replacement\.png|replacement-file|data-mpse-native-paste-id|data-mpse-paste-for/);
+});
+
+test('discard restores a marker-stripped replacement by exact index and CDN', async () => {
+  let canonicalContent = [
+    '<p><img src="https://mmbiz.qpic.cn/replacement-stripped.png"',
+    ' data-src="https://mmbiz.qpic.cn/replacement-stripped.png"',
+    ' data-fileid="replacement-file"></p>',
+    '<p><img data-src="https://mmbiz.qpic.cn/neighbor.png"></p>'
+  ].join('');
+  let setContent = '';
+  const editor = { innerHTML: canonicalContent, textContent: '', isConnected: true };
+  const harness = createPageHarness((payload) => {
+    if (payload.apiName === 'mp_editor_get_content') {
+      payload.sucCb({ content: canonicalContent });
+      return;
+    }
+    if (payload.apiName === 'mp_editor_set_content') {
+      setContent = payload.apiParam.content;
+      canonicalContent = setContent;
+      payload.sucCb({});
+      return;
+    }
+    throw new Error(`unexpected API ${payload.apiName}`);
+  }, { editor });
+
+  const response = await harness.request('DISCARD_PASTED_IMAGE', {
+    pasteId: 'stripped-replace-cleanup',
+    cdnUrl: 'https://mmbiz.qpic.cn/replacement-stripped.png',
+    placement: 'replace',
+    originalAttributes: {
+      src: 'https://mmbiz.qpic.cn/source-stripped.png',
+      'data-src': 'https://mmbiz.qpic.cn/source-stripped.png',
+      'data-fileid': 'source-file'
+    },
+    expectedArticleKey: 'path=/cgi-bin/appmsg',
+    locator: {
+      editId: 'stripped-image',
+      sourceUrl: 'https://mmbiz.qpic.cn/source-stripped.png',
+      index: 0
+    }
+  });
+
+  assert.equal(response.ok, true, JSON.stringify(response.error));
+  assert.equal(response.data.changed, true);
+  assert.equal(response.data.confirmedAbsent, true);
+  assert.equal((setContent.match(/<img\b/g) || []).length, 2);
+  assert.match(setContent, /source-stripped\.png/);
+  assert.match(setContent, /source-file/);
+  assert.match(setContent, /neighbor\.png/);
+  assert.doesNotMatch(setContent, /replacement-stripped\.png|replacement-file/);
+});
+
+test('replacement cleanup fails closed when original native attributes are invalid', async () => {
+  const canonicalContent = [
+    '<p><img data-mpse-native-paste-id="replace-cleanup-invalid"',
+    ' data-src="https://mmbiz.qpic.cn/replacement-invalid.png"></p>'
+  ].join('');
+  let setCalls = 0;
+  const editor = { innerHTML: canonicalContent, textContent: '', isConnected: true };
+  const harness = createPageHarness((payload) => {
+    if (payload.apiName === 'mp_editor_get_content') {
+      payload.sucCb({ content: canonicalContent });
+      return;
+    }
+    if (payload.apiName === 'mp_editor_set_content') {
+      setCalls += 1;
+      payload.sucCb({});
+      return;
+    }
+    throw new Error(`unexpected API ${payload.apiName}`);
+  }, { editor });
+
+  const response = await harness.request('DISCARD_PASTED_IMAGE', {
+    pasteId: 'replace-cleanup-invalid',
+    cdnUrl: 'https://mmbiz.qpic.cn/replacement-invalid.png',
+    placement: 'replace',
+    originalAttributes: {
+      src: 'https://example.com/not-wechat.png'
+    },
+    expectedArticleKey: 'path=/cgi-bin/appmsg',
+    locator: {
+      sourceUrl: 'https://mmbiz.qpic.cn/source-invalid.png',
+      index: 0
+    }
+  });
+
+  assert.equal(response.ok, true);
+  assert.equal(response.data.changed, false);
+  assert.equal(response.data.confirmedAbsent, false);
+  assert.equal(response.data.cleanupScheduled, true);
+  assert.equal(setCalls, 0);
+  assert.ok([...harness.timers.values()].some((timer) => timer.delay === 1000));
+});
+
+test('ambiguous cleanup is retained by the page bridge retry owner', async () => {
+  const canonicalContent = '<p><img data-src="https://mmbiz.qpic.cn/orphan.png"></p>';
+  const editor = { innerHTML: canonicalContent, textContent: '', isConnected: true };
+  const harness = createPageHarness((payload) => {
+    assert.equal(payload.apiName, 'mp_editor_get_content');
+    payload.sucCb({ content: canonicalContent });
+  }, { editor });
+
+  const response = await harness.request('DISCARD_PASTED_IMAGE', {
+    pasteId: 'marker-was-stripped',
+    cdnUrl: 'https://mmbiz.qpic.cn/orphan.png',
+    expectedArticleKey: 'path=/cgi-bin/appmsg',
+    locator: {
+      editId: 'deleted-target',
+      sourceUrl: 'https://mmbiz.qpic.cn/source.png',
+      index: 0
+    }
+  });
+
+  assert.equal(response.ok, true);
+  assert.equal(response.data.changed, false);
+  assert.equal(response.data.confirmedAbsent, false);
+  assert.equal(response.data.cleanupScheduled, true);
+  assert.ok([...harness.timers.values()].some((timer) => timer.delay === 1000));
+});
+
+test('the page bridge no longer calls the private image upload endpoint', () => {
+  assert.doesNotMatch(source, /\/cgi-bin\/filetransfer|ticket_id|writetype|scene:\s*['"]8['"]/);
+  assert.match(source, /mp_editor_set_selection/);
+  assert.match(source, /new view\.ClipboardEvent\('paste'/);
+  assert.match(source, /channel:\s*'editor-paste'/);
+  assert.match(source, /let editorWriteRevision = 0/);
+  assert.match(source, /\+\+editorWriteRevision/);
+  assert.match(source, /editorInputEpoch !== epoch[\s\S]*?context\.revision !== editorWriteRevision/);
 });

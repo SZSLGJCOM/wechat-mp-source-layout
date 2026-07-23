@@ -27,6 +27,19 @@ function createBridgeHarness(handleRequest) {
       if (type === 'message') messageListeners.delete(listener);
     },
     postMessage(message) {
+      if (message.type === 'PING') {
+        queueMicrotask(() => {
+          const data = {
+            source: PAGE_SOURCE,
+            requestId: message.requestId,
+            type: 'PONG',
+            ok: true,
+            data: { hasMpEditorApi: true }
+          };
+          for (const listener of [...messageListeners]) listener({ source: window, data });
+        });
+        return;
+      }
       queueMicrotask(() => handleRequest(message, (response = {}) => {
         const data = {
           source: PAGE_SOURCE,
@@ -79,7 +92,7 @@ test('confirmed writes stay pending without a client-side timeout', async () => 
   await nextTurn();
 
   assert.equal(settled, false);
-  assert.deepEqual(scheduledTimeouts, []);
+  assert.deepEqual(scheduledTimeouts, [5000, 160]);
   pendingResponse({ data: { mode: 'mp-editor-jsapi' } });
   await write;
 });
@@ -114,7 +127,7 @@ test('atomic mutations retry conflicts against the latest content and fixed adap
   const { client } = createBridgeHarness((message, respond) => {
     if (message.type === 'GET_CONTENT') {
       getCount += 1;
-      respond({ data: { content, mode: 'mp-editor-jsapi' } });
+      respond({ data: { content, mode: 'mp-editor-jsapi', articleKey: 'article-1' } });
       return;
     }
 
@@ -142,9 +155,21 @@ test('atomic mutations retry conflicts against the latest content and fixed adap
   assert.equal(getCount, 2);
   assert.equal(setCount, 2);
   assert.equal(result.conflictRetries, 1);
-  assert.deepEqual(writes.map(({ expectedContent, expectedMode }) => ({ expectedContent, expectedMode })), [
-    { expectedContent: '<p>A</p>', expectedMode: 'mp-editor-jsapi' },
-    { expectedContent: '<p>B</p>', expectedMode: 'mp-editor-jsapi' }
+  assert.deepEqual(writes.map(({ expectedContent, expectedMode, expectedArticleKey }) => ({
+    expectedContent,
+    expectedMode,
+    expectedArticleKey
+  })), [
+    {
+      expectedContent: '<p>A</p>',
+      expectedMode: 'mp-editor-jsapi',
+      expectedArticleKey: 'article-1'
+    },
+    {
+      expectedContent: '<p>B</p>',
+      expectedMode: 'mp-editor-jsapi',
+      expectedArticleKey: 'article-1'
+    }
   ]);
   assert.equal(content, '<p>B</p>!');
 });
@@ -195,37 +220,90 @@ test('content conflicts stop after two retries without an unconditional write', 
   assert.equal(setCount, 3);
 });
 
-test('image uploads transfer binary data with a bounded long-running timeout', async () => {
+test('native image paste transfers binary data and a stable target locator', async () => {
   let captured = null;
   const { client, scheduledTimeouts } = createBridgeHarness((message, respond) => {
     captured = message;
     respond({
       data: {
+        pasteId: 'mpse-paste-1',
         cdnUrl: 'https://mmbiz.qpic.cn/mmbiz_png/baked.png',
-        fileId: '123',
+        sourceAttributes: { 'data-src': 'https://mmbiz.qpic.cn/mmbiz_png/baked.png' },
         mimeType: 'image/png'
       }
     });
   });
 
   const blob = new Blob([new Uint8Array([137, 80, 78, 71])], { type: 'image/png' });
-  const result = await client.uploadImage(blob, 'baked.png');
+  const result = await client.pasteImage(blob, 'baked.png', {
+    editId: 'image-7',
+    sourceUrl: 'https://mmbiz.qpic.cn/source.png',
+    index: 2
+  });
 
-  assert.equal(captured.type, 'UPLOAD_IMAGE');
+  assert.equal(captured.type, 'PASTE_IMAGE');
   assert.ok(captured.payload.bytes instanceof ArrayBuffer);
   assert.equal(captured.payload.bytes.byteLength, blob.size);
   assert.equal(captured.payload.mimeType, 'image/png');
   assert.equal(captured.payload.filename, 'baked.png');
-  assert.ok(scheduledTimeouts.includes(90000));
+  assert.deepEqual(JSON.parse(JSON.stringify(captured.payload.locator)), {
+    editId: 'image-7',
+    sourceUrl: 'https://mmbiz.qpic.cn/source.png',
+    index: 2
+  });
+  assert.equal(scheduledTimeouts.includes(105000), false, 'the page transaction owns the paste timeout');
+  assert.equal(result.pasteId, 'mpse-paste-1');
   assert.equal(result.cdnUrl, 'https://mmbiz.qpic.cn/mmbiz_png/baked.png');
 });
 
-test('image uploads reject empty input before posting to the page bridge', async () => {
+test('native image paste rejects empty input before posting to the page bridge', async () => {
   let requestCalls = 0;
   const { client } = createBridgeHarness(() => {
     requestCalls += 1;
   });
 
-  await assert.rejects(client.uploadImage(new Blob([], { type: 'image/png' })), /Image blob is required/);
+  await assert.rejects(client.pasteImage(new Blob([], { type: 'image/png' })), /Image blob is required/);
   assert.equal(requestCalls, 0);
+});
+
+test('pasted image cleanup carries exact candidate and article ownership', async () => {
+  let captured = null;
+  const { client } = createBridgeHarness((message, respond) => {
+    captured = message;
+    respond({ data: { changed: true, confirmedAbsent: true } });
+  });
+
+  const result = await client.discardPastedImage({
+    pasteId: 'paste-cleanup-1',
+    cdnUrl: 'https://mmbiz.qpic.cn/cleanup.png',
+    articleKey: 'path=/cgi-bin/appmsg&draftid=7',
+    originalAttributes: {
+      src: 'https://mmbiz.qpic.cn/source.png',
+      'data-src': 'https://mmbiz.qpic.cn/source.png',
+      'data-fileid': 'source-file'
+    }
+  }, {
+    editId: 'image-7',
+    sourceUrl: 'https://mmbiz.qpic.cn/source.png',
+    index: 2
+  });
+
+  assert.equal(captured.type, 'DISCARD_PASTED_IMAGE');
+  assert.deepEqual(JSON.parse(JSON.stringify(captured.payload)), {
+    pasteId: 'paste-cleanup-1',
+    cdnUrl: 'https://mmbiz.qpic.cn/cleanup.png',
+    expectedArticleKey: 'path=/cgi-bin/appmsg&draftid=7',
+    placement: 'after',
+    originalAttributes: {
+      src: 'https://mmbiz.qpic.cn/source.png',
+      'data-src': 'https://mmbiz.qpic.cn/source.png',
+      'data-fileid': 'source-file'
+    },
+    locator: {
+      editId: 'image-7',
+      sourceUrl: 'https://mmbiz.qpic.cn/source.png',
+      index: 2
+    }
+  });
+  assert.equal(result.confirmedAbsent, true);
 });

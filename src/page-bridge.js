@@ -10,7 +10,7 @@
   const SET_CONFIRM_TIMEOUT_MS = 5000;
   const EDITOR_INPUT_IDLE_MS = 160;
   const EDITOR_INPUT_WAIT_TIMEOUT_MS = 2500;
-  const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+  const MAX_PASTE_IMAGE_BYTES = 10 * 1024 * 1024;
 
   if (window.__MP_SOURCE_EDITOR_BRIDGE_INSTALLED__) {
     return;
@@ -28,6 +28,15 @@
     };
     if (error.code) payload.code = String(error.code);
     if (error.mode) payload.mode = String(error.mode);
+    if (error.pasteCandidate && typeof error.pasteCandidate === 'object') {
+      payload.pasteCandidate = {
+        pasteId: String(error.pasteCandidate.pasteId || ''),
+        cdnUrl: String(error.pasteCandidate.cdnUrl || ''),
+        articleKey: String(error.pasteCandidate.articleKey || ''),
+        placement: error.pasteCandidate.placement === 'replace' ? 'replace' : 'after',
+        originalAttributes: normalizedNativeAttributeRecord(error.pasteCandidate.originalAttributes)
+      };
+    }
     return payload;
   }
 
@@ -159,13 +168,28 @@
     return candidates[0] ? candidates[0].node : null;
   }
 
+  function articleKey() {
+    const url = new URL(location.href);
+    const keys = ['appmsgid', 'draftid', 'media_id', 'itemidx', 'type', 'action', 'sub', 'createType'];
+    const parts = [`path=${url.pathname}`];
+    for (const key of keys) {
+      const urlValue = url.searchParams.get(key);
+      const field = document.querySelector?.(`[name="${key}"], #${key}`) || null;
+      const fieldValue = field && 'value' in field ? String(field.value || '') : '';
+      const value = urlValue || fieldValue;
+      if (value) parts.push(`${key}=${value}`);
+    }
+    return parts.join('&');
+  }
+
   function fallbackGetContent(editor = findEditorElement()) {
     if (!editor) {
       throw new Error('没有找到可编辑正文区域');
     }
     return {
       content: editor.innerHTML || '',
-      mode: 'dom-fallback'
+      mode: 'dom-fallback',
+      articleKey: articleKey()
     };
   }
 
@@ -210,7 +234,7 @@
     }
 
     dispatchEditorEvents(editor, content);
-    return { mode: 'dom-fallback' };
+    return { mode: 'dom-fallback', articleKey: articleKey() };
   }
 
   async function getContent(options = {}) {
@@ -220,7 +244,8 @@
         const response = await invokeMpEditor('mp_editor_get_content', undefined, options.timeoutMs || 10000, api);
         return {
           content: normalizeContentResponse(response),
-          mode: 'mp-editor-jsapi'
+          mode: 'mp-editor-jsapi',
+          articleKey: articleKey()
         };
       } catch (apiError) {
         if (options.allowFallback === false) throw apiError;
@@ -240,6 +265,7 @@
   let compositionActive = false;
   let resolveCompositionEnd = null;
   let compositionEnd = Promise.resolve();
+  let activeNativePasteInputLock = null;
 
   function isEditorInputEvent(event, doc) {
     if (event && event.isTrusted === false) return false;
@@ -248,6 +274,20 @@
     if (!target) return doc.designMode === 'on';
     if (target.isContentEditable) return true;
     return Boolean(target.closest && target.closest('[contenteditable="true"], body[contenteditable="true"]'));
+  }
+
+  function nativePasteLockOwnsEvent(event, doc) {
+    const editor = activeNativePasteInputLock?.editor;
+    if (!editor || editor.isConnected === false || event?.isTrusted === false) return false;
+    let target = event?.target;
+    if (target && target.nodeType !== Node.ELEMENT_NODE) target = target.parentElement;
+    if (!target) return doc === editor.ownerDocument && doc.designMode === 'on';
+    return target === editor || Boolean(editor.contains?.(target));
+  }
+
+  function blockNativePasteInput(event) {
+    event?.preventDefault?.();
+    event?.stopImmediatePropagation?.();
   }
 
   function noteEditorInput() {
@@ -290,17 +330,53 @@
       trackedInputDocuments.add(doc);
       for (const type of ['beforeinput', 'input', 'paste', 'drop', 'cut']) {
         doc.addEventListener(type, (event) => {
-          if (isEditorInputEvent(event, doc)) noteEditorInput();
+          if (!isEditorInputEvent(event, doc)) return;
+          if (type !== 'input' && nativePasteLockOwnsEvent(event, doc)) {
+            blockNativePasteInput(event);
+            return;
+          }
+          noteEditorInput();
         }, true);
       }
+      doc.addEventListener('keydown', (event) => {
+        if (!activeNativePasteInputLock || event?.isTrusted === false) return;
+        if (nativePasteLockOwnsEvent(event, doc)) {
+          blockNativePasteInput(event);
+        } else {
+          noteEditorInput();
+        }
+      }, true);
+      doc.addEventListener('pointerdown', (event) => {
+        if (!activeNativePasteInputLock || event?.isTrusted === false) return;
+        if (nativePasteLockOwnsEvent(event, doc)) {
+          blockNativePasteInput(event);
+        } else {
+          noteEditorInput();
+        }
+      }, true);
       doc.addEventListener('compositionstart', (event) => {
-        if (isEditorInputEvent(event, doc)) beginComposition();
+        if (!isEditorInputEvent(event, doc)) return;
+        if (nativePasteLockOwnsEvent(event, doc)) {
+          blockNativePasteInput(event);
+          return;
+        }
+        beginComposition();
       }, true);
       doc.addEventListener('compositionupdate', (event) => {
-        if (isEditorInputEvent(event, doc)) noteEditorInput();
+        if (!isEditorInputEvent(event, doc)) return;
+        if (nativePasteLockOwnsEvent(event, doc)) {
+          blockNativePasteInput(event);
+          return;
+        }
+        noteEditorInput();
       }, true);
       doc.addEventListener('compositionend', (event) => {
-        if (isEditorInputEvent(event, doc)) endComposition();
+        if (!isEditorInputEvent(event, doc)) return;
+        if (nativePasteLockOwnsEvent(event, doc)) {
+          blockNativePasteInput(event);
+          return;
+        }
+        endComposition();
       }, true);
     }
   }
@@ -368,7 +444,7 @@
 
   let writeStateUncertain = false;
 
-  async function setContent(content, expectedContent = null, expectedMode = '') {
+  async function setContent(content, expectedContent = null, expectedMode = '', expectedArticleKey = '') {
     if (writeStateUncertain) throw uncertainWrite();
     await waitForEditorInputIdle();
     if (writeStateUncertain) throw uncertainWrite();
@@ -380,11 +456,13 @@
     const editor = mode === 'dom-fallback' ? findEditorElement() : null;
     if (mode === 'dom-fallback' && !editor) throw new Error('没有找到可编辑正文区域');
     const validationEpoch = editorInputEpoch;
-    if (typeof expectedContent === 'string') {
+    if (typeof expectedContent === 'string' || expectedArticleKey) {
       const current = mode === 'mp-editor-jsapi'
         ? await getContent({ api, allowFallback: false, timeoutMs: 2000 })
         : fallbackGetContent(editor);
-      if (current.content !== expectedContent || validationEpoch !== editorInputEpoch
+      if ((typeof expectedContent === 'string' && current.content !== expectedContent)
+        || (expectedArticleKey && current.articleKey !== expectedArticleKey)
+        || validationEpoch !== editorInputEpoch
         || compositionActive || editorInputTimer) {
         throw contentConflict(current.mode);
       }
@@ -409,9 +487,14 @@
     if (setEpoch !== editorInputEpoch || compositionActive || editorInputTimer) {
       throw contentConflict('mp-editor-jsapi');
     }
+    const nextArticleKey = articleKey();
+    if (expectedArticleKey && nextArticleKey !== expectedArticleKey) {
+      throw contentConflict('mp-editor-jsapi');
+    }
     return {
       response,
-      mode: 'mp-editor-jsapi'
+      mode: 'mp-editor-jsapi',
+      articleKey: nextArticleKey
     };
   }
 
@@ -422,64 +505,30 @@
     return error;
   }
 
-  let setContentQueue = Promise.resolve();
+  let editorWriteQueue = Promise.resolve();
+  let editorWriteRevision = 0;
 
-  ensureEditorInputTracking();
-
-  function enqueueSetContent(content, expectedContent = null, expectedMode = '') {
-    const scheduled = setContentQueue.then(
-      () => setContent(content, expectedContent, expectedMode),
-      () => setContent(content, expectedContent, expectedMode)
-    );
-    setContentQueue = scheduled.then(() => undefined, () => undefined);
+  function enqueueEditorWrite(operation, options = {}) {
+    const revision = options.invalidateRevision === false
+      ? editorWriteRevision
+      : ++editorWriteRevision;
+    const run = () => operation(revision);
+    const scheduled = editorWriteQueue.then(run, run);
+    editorWriteQueue = scheduled.then(() => undefined, () => undefined);
     return scheduled;
   }
 
+  ensureEditorInputTracking();
+
+  function enqueueSetContent(content, expectedContent = null, expectedMode = '', expectedArticleKey = '') {
+    return enqueueEditorWrite(
+      () => setContent(content, expectedContent, expectedMode, expectedArticleKey)
+    );
+  }
+
   async function waitForPendingSetContent() {
-    await setContentQueue;
+    await editorWriteQueue;
     if (writeStateUncertain) throw uncertainWrite();
-  }
-
-  let uploadContextCache = null;
-
-  function matchPageValue(source, names) {
-    for (const name of names) {
-      const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const match = String(source || '').match(new RegExp(`(?:["']?${escaped}["']?)\\s*[:=]\\s*["']([^"']+)["']`, 'i'));
-      if (match && match[1]) return match[1];
-    }
-    return '';
-  }
-
-  function getPageToken() {
-    const pageUrl = new URL(location.href);
-    const token = pageUrl.searchParams.get('token') || '';
-    if (!/^\d+$/.test(token)) throw new Error('当前编辑页面缺少有效登录令牌');
-    return token;
-  }
-
-  async function getUploadContext(token = getPageToken()) {
-    if (uploadContextCache?.token === token && uploadContextCache.expiresAt > Date.now()) {
-      return uploadContextCache;
-    }
-
-    const response = await fetch(`/cgi-bin/masssendpage?t=mass/send&token=${encodeURIComponent(token)}&lang=zh_CN`, {
-      method: 'GET',
-      credentials: 'same-origin',
-      cache: 'no-store'
-    });
-    if (!response.ok) throw new Error(`无法读取微信本地图片上传授权（HTTP ${response.status}）`);
-    const source = await response.text();
-    const ticket = matchPageValue(source, ['ticket', 'upload_ticket']);
-    const ticketId = matchPageValue(source, ['user_name', 'ticket_id']);
-    if (!ticket || !ticketId) throw new Error('微信本地图片上传授权已失效，请刷新编辑页面后重试');
-    uploadContextCache = {
-      token,
-      ticket,
-      ticketId,
-      expiresAt: Date.now() + 5 * 60 * 1000
-    };
-    return uploadContextCache;
   }
 
   function validatedImagePayload(payload) {
@@ -487,54 +536,13 @@
     const mimeType = String(payload?.mimeType || '');
     if (!(bytes instanceof ArrayBuffer)) throw new Error('烘焙图片数据无效');
     if (!['image/png', 'image/jpeg'].includes(mimeType)) throw new Error('只允许上传 PNG 或 JPEG 图片');
-    if (!bytes.byteLength || bytes.byteLength > MAX_UPLOAD_BYTES) throw new Error('烘焙图片超过微信 10MB 上传限制');
+    if (!bytes.byteLength || bytes.byteLength > MAX_PASTE_IMAGE_BYTES) throw new Error('烘焙图片超过 10MB 粘贴处理限制');
     const extension = mimeType === 'image/jpeg' ? 'jpg' : 'png';
     const requestedName = String(payload?.filename || '').replace(/[^a-zA-Z0-9._-]/g, '').slice(0, 80);
     const filename = requestedName && requestedName.toLowerCase().endsWith(`.${extension}`)
       ? requestedName
       : `mpse-image-${Date.now()}.${extension}`;
     return { blob: new Blob([bytes], { type: mimeType }), mimeType, filename };
-  }
-
-  function createLocalUploadForm(image) {
-    const form = new FormData();
-    const uploadId = String(Date.now());
-    form.append('type', image.mimeType);
-    form.append('id', uploadId);
-    form.append('name', image.filename);
-    form.append('lastModifiedDate', new Date().toString());
-    form.append('size', String(image.blob.size));
-    form.append('file', image.blob, image.filename);
-    return form;
-  }
-
-  async function uploadEditorLocalImage(image, context) {
-    const token = context?.token || getPageToken();
-    const query = new URLSearchParams({
-      action: 'upload_material',
-      f: 'json',
-      scene: '8',
-      writetype: 'doublewrite',
-      groupid: '1',
-      ticket_id: context?.ticketId || '',
-      ticket: context?.ticket || '',
-      svr_time: context?.ticket ? String(Math.floor(Date.now() / 1000)) : '',
-      seq: String(Date.now()),
-      token,
-      lang: 'zh_CN',
-      t: String(Math.random())
-    });
-    const response = await fetch(`/cgi-bin/filetransfer?${query}`, {
-      method: 'POST',
-      credentials: 'same-origin',
-      body: createLocalUploadForm(image)
-    });
-    if (!response.ok) throw new Error(`微信本地图片上传失败（HTTP ${response.status}）`);
-    const body = await response.json();
-    return {
-      body,
-      ret: Number(body?.base_resp?.ret ?? body?.errcode ?? -1)
-    };
   }
 
   function normalizedWechatCdnUrl(value) {
@@ -549,38 +557,707 @@
     }
   }
 
-  function uploadResultError(body, ret) {
-    const error = new Error(body?.base_resp?.err_msg || body?.errmsg || `微信本地图片上传失败（${ret}）`);
-    error.code = `MPSE_WECHAT_LOCAL_UPLOAD_${ret}`;
+  const NATIVE_IMAGE_ATTRIBUTES = Object.freeze([
+    'src',
+    'data-src',
+    'data-backsrc',
+    'data-croporisrc',
+    'data-fileid',
+    'data-mediaid',
+    'data-w',
+    'data-ratio',
+    'data-type',
+    'data-s'
+  ]);
+
+  function normalizedNativeAttributeRecord(attributes) {
+    return NATIVE_IMAGE_ATTRIBUTES.reduce((result, name) => {
+      if (Object.prototype.hasOwnProperty.call(attributes || {}, name)) {
+        result[name] = String(attributes[name] || '');
+      }
+      return result;
+    }, {});
+  }
+
+  function imageSource(image) {
+    return normalizedWechatCdnUrl(
+      image?.getAttribute?.('data-src')
+      || image?.getAttribute?.('src')
+      || image?.currentSrc
+      || image?.src
+      || ''
+    );
+  }
+
+  function rawImageSource(image) {
+    return String(
+      image?.getAttribute?.('data-src')
+      || image?.getAttribute?.('src')
+      || image?.currentSrc
+      || image?.src
+      || ''
+    ).trim();
+  }
+
+  function nativeImageAttributes(image) {
+    return NATIVE_IMAGE_ATTRIBUTES.reduce((attributes, name) => {
+      if (image?.hasAttribute?.(name)) attributes[name] = image.getAttribute(name);
+      return attributes;
+    }, {});
+  }
+
+  function syncNativeImageAttributes(image, attributes) {
+    if (!image) return;
+    for (const name of NATIVE_IMAGE_ATTRIBUTES) {
+      if (Object.prototype.hasOwnProperty.call(attributes || {}, name)) {
+        image.setAttribute(name, attributes[name]);
+      } else {
+        image.removeAttribute(name);
+      }
+    }
+  }
+
+  function locateImageForPaste(editor, locator = {}) {
+    const images = Array.from(editor?.querySelectorAll?.('img') || []);
+    const editId = String(locator.editId || '');
+    if (editId) {
+      const exact = images.find((image) => image.getAttribute('data-mpse-image-id') === editId);
+      if (exact) return exact;
+    }
+    const sourceUrl = normalizedWechatCdnUrl(locator.sourceUrl);
+    if (sourceUrl) {
+      const matches = images.filter((image) => imageSource(image) === sourceUrl);
+      if (matches.length === 1) return matches[0];
+      const index = Number(locator.index);
+      if (Number.isInteger(index) && index >= 0 && matches.includes(images[index])) {
+        return images[index];
+      }
+      return null;
+    }
+    const index = Number(locator.index);
+    return Number.isInteger(index) && index >= 0 ? images[index] || null : null;
+  }
+
+  function pasteImageKey(image) {
+    if (!image) return '';
+    return [
+      image.getAttribute?.('data-mpse-image-id') || '',
+      imageSource(image) || rawImageSource(image)
+    ].join('|');
+  }
+
+  function createNativePasteContext(editor, target, locator, revision, pasteId) {
+    const images = Array.from(editor.querySelectorAll('img'));
+    const targetIndex = images.indexOf(target);
+    return {
+      editor,
+      target,
+      locator,
+      revision,
+      pasteId,
+      targetIndex,
+      originalSource: imageSource(target),
+      originalRawSource: rawImageSource(target),
+      originalAttributes: nativeImageAttributes(target),
+      nextImageKey: pasteImageKey(images[targetIndex + 1] || null),
+      ownedCandidate: null,
+      ownedPlacement: ''
+    };
+  }
+
+  function acquireNativePasteInputLock(context) {
+    activeNativePasteInputLock = {
+      editor: context.editor,
+      revision: context.revision
+    };
+  }
+
+  function releaseNativePasteInputLock(context) {
+    if (
+      activeNativePasteInputLock?.editor === context.editor
+      && activeNativePasteInputLock?.revision === context.revision
+    ) {
+      activeNativePasteInputLock = null;
+    }
+  }
+
+  function currentPasteAnchor(context) {
+    const { editor, target, locator } = context;
+    if (target?.isConnected && editor.contains(target)) return target;
+    const located = locateImageForPaste(editor, locator);
+    if (located) return located;
+
+    const images = Array.from(editor?.querySelectorAll?.('img') || []);
+    const replacement = images[context.targetIndex] || null;
+    if (!replacement || imageSource(replacement) === context.originalSource) return null;
+    const nextImage = images[context.targetIndex + 1] || null;
+    const boundaryMatches = context.nextImageKey
+      ? pasteImageKey(nextImage) === context.nextImageKey
+      : context.targetIndex === images.length - 1;
+    return boundaryMatches ? replacement : null;
+  }
+
+  function scopedPasteCandidates(context) {
+    const anchor = currentPasteAnchor(context);
+    if (!anchor) return [];
+    const images = Array.from(context.editor.querySelectorAll('img'));
+    const anchorIndex = images.indexOf(anchor);
+    if (anchorIndex < 0) return [];
+
+    const candidates = [];
+    const anchorSource = imageSource(anchor);
+    const editId = String(context.locator?.editId || '');
+    const boundedReplacement = anchor !== context.target && anchorIndex === context.targetIndex;
+    if (
+      anchorSource
+      && anchorSource !== context.originalSource
+      && (
+        !editId
+        || anchor.getAttribute('data-mpse-image-id') === editId
+        || boundedReplacement
+      )
+    ) {
+      candidates.push(anchor);
+    }
+
+    const following = images.slice(anchorIndex + 1);
+    let boundary = following.length;
+    if (context.nextImageKey) {
+      boundary = following.findIndex((image) => pasteImageKey(image) === context.nextImageKey);
+      if (boundary < 0) return candidates;
+    }
+    return candidates.concat(following.slice(0, Math.min(boundary, 4)));
+  }
+
+  function candidateBelongsToEditor(context, candidate) {
+    if (!candidate || candidate.isConnected === false) return false;
+    return typeof context.editor?.contains !== 'function' || context.editor.contains(candidate);
+  }
+
+  function ownedNativePasteCandidate(context) {
+    if (candidateBelongsToEditor(context, context.ownedCandidate)) {
+      return context.ownedCandidate;
+    }
+    const marked = Array.from(context.editor?.querySelectorAll?.('img') || []).find((image) => (
+      image.getAttribute('data-mpse-native-paste-id') === context.pasteId
+    )) || null;
+    if (marked) context.ownedCandidate = marked;
+    return marked;
+  }
+
+  function claimNativePasteCandidate(context) {
+    const existing = ownedNativePasteCandidate(context);
+    if (existing) return existing;
+
+    const anchor = currentPasteAnchor(context);
+    const scoped = scopedPasteCandidates(context);
+    const candidates = [anchor, ...scoped].filter((image, index, entries) => (
+      image && entries.indexOf(image) === index
+    ));
+    const candidate = candidates.find((image) => {
+      if (image !== anchor) return true;
+      const source = imageSource(image);
+      return source
+        ? source !== context.originalSource
+        : rawImageSource(image) !== context.originalRawSource;
+    }) || null;
+    if (!candidate) return null;
+
+    context.ownedCandidate = candidate;
+    context.ownedPlacement = candidate === anchor ? 'replace' : 'after';
+    candidate.setAttribute('data-mpse-native-paste-id', context.pasteId);
+    const editId = String(context.locator?.editId || '');
+    if (editId) candidate.setAttribute('data-mpse-paste-for', editId);
+    releaseNativePasteInputLock(context);
+    return candidate;
+  }
+
+  async function selectImageForNativePaste(image, editor) {
+    const api = getMpEditorApi();
+    if (api) {
+      try {
+        const readiness = await invokeMpEditor('mp_editor_get_isready', undefined, 3000, api);
+        if (readiness?.isReady && readiness?.isNew) {
+          await invokeMpEditor('mp_editor_set_selection', {
+            container: image,
+            selectAfter: true
+          }, 3000, api);
+          return 'mp-editor-jsapi';
+        }
+      } catch (error) {
+        console.warn('[公众号源码排版助手] native selection fallback:', error);
+      }
+    }
+
+    const doc = editor.ownerDocument;
+    const selection = doc.getSelection();
+    const range = doc.createRange();
+    range.setStartAfter(image);
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    editor.focus();
+    return 'dom-range';
+  }
+
+  function nativePasteEvent(editor, image) {
+    const view = editor.ownerDocument.defaultView || window;
+    const file = new view.File([image.blob], image.filename, {
+      type: image.mimeType,
+      lastModified: Date.now()
+    });
+    const transfer = new view.DataTransfer();
+    transfer.items.add(file);
+
+    try {
+      return new view.ClipboardEvent('paste', {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        clipboardData: transfer
+      });
+    } catch (_) {
+      const event = new view.Event('paste', { bubbles: true, cancelable: true, composed: true });
+      Object.defineProperty(event, 'clipboardData', { configurable: true, value: transfer });
+      return event;
+    }
+  }
+
+  function nativePasteUnsupported(message) {
+    const error = new Error(message || '当前微信编辑器没有接收图片粘贴，请刷新页面后重试');
+    error.code = 'MPSE_NATIVE_IMAGE_PASTE_UNSUPPORTED';
     return error;
   }
 
-  async function uploadImage(payload) {
-    const image = validatedImagePayload(payload);
-    const token = getPageToken();
-    let attempt = await uploadEditorLocalImage(image, { token });
-    if (attempt.ret !== 0) {
+  function waitForNativePastedImage(context, epoch, pasteEvent) {
+    return new Promise((resolve, reject) => {
+      const startedAt = Date.now();
+      const uploadDeadline = startedAt + 90000;
+      let deadline = startedAt + 5000;
+      let settled = false;
+      let pollTimer = 0;
+
+      const cleanup = () => {
+        observer.disconnect();
+        if (pollTimer) window.clearTimeout(pollTimer);
+      };
+
+      const finish = (callback, value) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        callback(value);
+      };
+
+      const inspect = () => {
+        if (settled) return;
+        if (
+          editorInputEpoch !== epoch
+          || context.revision !== editorWriteRevision
+        ) {
+          finish(reject, contentConflict('native-image-paste'));
+          return;
+        }
+        const candidate = claimNativePasteCandidate(context);
+        const candidateSource = imageSource(candidate);
+        if (candidateSource && candidateSource !== context.originalSource) {
+          finish(resolve, candidate);
+          return;
+        }
+        const pendingPlaceholder = Boolean(
+          candidate
+          && !candidateSource
+          && (
+            context.ownedPlacement === 'after'
+            || rawImageSource(candidate) !== context.originalRawSource
+          )
+        );
+        if (pendingPlaceholder) {
+          deadline = Math.max(deadline, uploadDeadline);
+        }
+        if (Date.now() >= deadline) {
+          finish(reject, nativePasteUnsupported('微信编辑器未在等待窗口内完成图片粘贴上传'));
+          return;
+        }
+        pollTimer = window.setTimeout(inspect, 120);
+      };
+
+      const observer = new MutationObserver(inspect);
+      observer.observe(context.editor, {
+        subtree: true,
+        childList: true,
+        attributes: true,
+        attributeFilter: ['src', 'data-src', 'data-fileid', 'data-mediaid']
+      });
+      inspect();
       try {
-        attempt = await uploadEditorLocalImage(image, await getUploadContext(token));
-      } catch (_) {
-        throw uploadResultError(attempt.body, attempt.ret);
+        const dispatched = context.editor.dispatchEvent(pasteEvent);
+        if (dispatched === false || pasteEvent.defaultPrevented) {
+          deadline = uploadDeadline;
+        }
+        inspect();
+      } catch (error) {
+        finish(reject, error);
       }
+    });
+  }
+
+  function contentHasImageSource(content, cdnUrl) {
+    const container = document.createElement('div');
+    container.innerHTML = String(content || '');
+    return Array.from(container.querySelectorAll('img')).some((image) => imageSource(image) === cdnUrl);
+  }
+
+  async function confirmPastedImageInContent(cdnUrl, epoch, baseline, context) {
+    const deadline = Date.now() + 10000;
+    for (;;) {
+      if (
+        editorInputEpoch !== epoch
+        || context.revision !== editorWriteRevision
+      ) throw contentConflict('native-image-paste');
+      const api = baseline.mode === 'mp-editor-jsapi' ? getMpEditorApi() : null;
+      const result = api
+        ? await getContent({ api, allowFallback: false, timeoutMs: 3000 })
+        : fallbackGetContent(context.editor);
+      if (
+        editorInputEpoch !== epoch
+        || context.revision !== editorWriteRevision
+      ) throw contentConflict(result.mode);
+      if (baseline.articleKey && result.articleKey !== baseline.articleKey) {
+        throw contentConflict(result.mode);
+      }
+      if (contentHasImageSource(result.content, cdnUrl)) return result;
+      if (Date.now() >= deadline) {
+        throw nativePasteUnsupported('微信编辑器已生成图片，但正文模型尚未确认该图片');
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 160));
     }
-    const { body, ret } = attempt;
-    if (ret !== 0) {
-      uploadContextCache = null;
-      throw uploadResultError(body, ret);
+  }
+
+  function removeEmptyPasteWrapper(image, editor) {
+    const parent = image?.parentElement;
+    image?.remove();
+    if (
+      parent
+      && parent !== editor
+      && /^(?:P|FIGURE|SECTION)$/.test(parent.tagName)
+      && !parent.textContent.trim()
+      && !parent.querySelector('img,svg,video,canvas')
+    ) {
+      parent.remove();
     }
-    const cdnUrl = normalizedWechatCdnUrl(body?.cdn_url || body?.url);
-    if (!cdnUrl) {
-      throw new Error('微信上传成功，但没有返回可用于正文的 CDN 地址');
+  }
+
+  function restoreLivePasteContext(context) {
+    const anchor = currentPasteAnchor(context);
+    for (const candidate of scopedPasteCandidates(context)) {
+      if (candidate === anchor) continue;
+      removeEmptyPasteWrapper(candidate, context.editor);
     }
+    if (anchor) {
+      syncNativeImageAttributes(anchor, context.originalAttributes);
+      anchor.removeAttribute('data-mpse-native-paste-id');
+      anchor.removeAttribute('data-mpse-paste-for');
+    }
+    dispatchEditorEvents(context.editor, '');
+  }
+
+  function restoreKnownPasteCandidate(context, candidate, placement = '') {
+    if (!candidate || candidate.isConnected === false) return false;
+    if (
+      typeof context.editor?.contains === 'function'
+      && !context.editor.contains(candidate)
+    ) return false;
+
+    const replacesAnchor = placement === 'replace'
+      || (!placement && candidate === currentPasteAnchor(context));
+    if (replacesAnchor) {
+      syncNativeImageAttributes(candidate, context.originalAttributes);
+      candidate.removeAttribute('data-mpse-native-paste-id');
+      candidate.removeAttribute('data-mpse-paste-for');
+    } else {
+      removeEmptyPasteWrapper(candidate, context.editor);
+    }
+    dispatchEditorEvents(context.editor, '');
+    return true;
+  }
+
+  async function rollbackNativePaste(baseline, context, epoch, candidate = null, placement = '') {
+    if (editorInputEpoch !== epoch) {
+      restoreKnownPasteCandidate(context, candidate, placement);
+      return false;
+    }
+    try {
+      restoreLivePasteContext(context);
+      const api = baseline.mode === 'mp-editor-jsapi' ? getMpEditorApi() : null;
+      const current = api
+        ? await getContent({ api, allowFallback: false, timeoutMs: 3000 })
+        : fallbackGetContent(context.editor);
+      if (current.articleKey !== baseline.articleKey) return false;
+      if (current.content === baseline.content) return true;
+      await setContent(
+        baseline.content,
+        current.content,
+        current.mode,
+        baseline.articleKey
+      );
+      return true;
+    } catch (error) {
+      console.warn('[公众号源码排版助手] native paste rollback failed:', error);
+      return false;
+    }
+  }
+
+  async function pasteImageThroughEditor(payload, revision) {
+    const sourceImage = validatedImagePayload(payload);
+    const epoch = await waitForEditorInputIdle();
+    const editor = findEditorElement();
+    if (!editor) throw new Error('没有找到可接收图片粘贴的正文编辑区');
+    const locator = payload?.locator || {};
+    const target = locateImageForPaste(editor, locator);
+    if (!target) throw new Error('原图已经变化，无法安全执行图片替换');
+
+    const api = getMpEditorApi();
+    const baseline = api
+      ? await getContent({ api, allowFallback: false, timeoutMs: 3000 })
+      : fallbackGetContent(editor);
+    if (
+      editorInputEpoch !== epoch
+      || revision !== editorWriteRevision
+    ) throw contentConflict(baseline.mode);
+    const pasteId = `mpse-paste-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const context = createNativePasteContext(editor, target, locator, revision, pasteId);
+    const selectionMode = await selectImageForNativePaste(target, editor);
+    if (
+      editorInputEpoch !== epoch
+      || revision !== editorWriteRevision
+    ) throw contentConflict('native-image-paste');
+    const event = nativePasteEvent(editor, sourceImage);
+    let pasted = null;
+    let cdnUrl = '';
+    let sourceAttributes = {};
+    let placement = 'after';
+    let rollbackAttempted = false;
+    let rolledBack = false;
+    acquireNativePasteInputLock(context);
+    try {
+      pasted = await waitForNativePastedImage(context, epoch, event);
+      placement = context.ownedPlacement
+        || (pasted === currentPasteAnchor(context) ? 'replace' : 'after');
+      cdnUrl = imageSource(pasted);
+      if (!cdnUrl) throw nativePasteUnsupported('微信编辑器生成的图片缺少有效 CDN 地址');
+      pasted.setAttribute('data-mpse-native-paste-id', pasteId);
+      const editId = String(locator.editId || '');
+      if (editId) pasted.setAttribute('data-mpse-paste-for', editId);
+      dispatchEditorEvents(editor, '');
+      await confirmPastedImageInContent(cdnUrl, epoch, baseline, context);
+      sourceAttributes = nativeImageAttributes(pasted);
+      rollbackAttempted = true;
+      rolledBack = await rollbackNativePaste(baseline, context, epoch, pasted, placement);
+      if (!rolledBack) {
+        throw nativePasteUnsupported('微信编辑器已生成图片，但粘贴占位内容无法安全撤回');
+      }
+    } catch (error) {
+      if (!pasted) {
+        pasted = ownedNativePasteCandidate(context);
+        if (
+          !pasted
+          && editorInputEpoch === epoch
+          && context.revision === editorWriteRevision
+        ) pasted = claimNativePasteCandidate(context);
+        cdnUrl = imageSource(pasted);
+        if (pasted) placement = context.ownedPlacement
+          || (pasted === currentPasteAnchor(context) ? 'replace' : 'after');
+      }
+      if (!rollbackAttempted) {
+        rollbackAttempted = true;
+        rolledBack = await rollbackNativePaste(baseline, context, epoch, pasted, placement);
+      }
+      if (!rolledBack && cdnUrl) {
+        error.pasteCandidate = {
+          pasteId,
+          cdnUrl,
+          articleKey: baseline.articleKey,
+          placement,
+          originalAttributes: context.originalAttributes
+        };
+        schedulePastedImageCleanup({
+          ...error.pasteCandidate,
+          expectedArticleKey: baseline.articleKey,
+          locator
+        });
+      }
+      throw error;
+    } finally {
+      releaseNativePasteInputLock(context);
+    }
+
     return {
+      pasteId,
       cdnUrl,
-      fileId: String(body?.content || body?.fileid || ''),
-      mimeType: image.mimeType,
-      channel: 'editor-local'
+      sourceAttributes,
+      mimeType: sourceImage.mimeType,
+      channel: 'editor-paste',
+      selectionMode,
+      articleKey: baseline.articleKey,
+      placement,
+      cleanupPending: false
     };
+  }
+
+  function findPastedImageForDiscard(root, payload) {
+    const images = Array.from(root?.querySelectorAll?.('img') || []);
+    const pasteId = String(payload?.pasteId || '');
+    const locator = payload?.locator || {};
+    const target = locateImageForPaste(root, locator);
+    const marked = pasteId
+      ? images.find((image) => image.getAttribute('data-mpse-native-paste-id') === pasteId)
+      : null;
+    const cdnUrl = normalizedWechatCdnUrl(payload?.cdnUrl);
+
+    if (payload?.placement === 'replace') {
+      if (marked) return marked;
+      if (!cdnUrl) return null;
+      if (target && imageSource(target) === cdnUrl) return target;
+      const index = Number(locator.index);
+      const indexed = Number.isInteger(index) && index >= 0 ? images[index] || null : null;
+      return indexed && imageSource(indexed) === cdnUrl ? indexed : null;
+    }
+
+    if (marked) return marked;
+    if (!target || !cdnUrl) return null;
+    const targetIndex = images.indexOf(target);
+    const adjacent = targetIndex >= 0 ? images[targetIndex + 1] : null;
+    return adjacent && imageSource(adjacent) === cdnUrl ? adjacent : null;
+  }
+
+  async function discardPastedImage(payload) {
+    await waitForEditorInputIdle();
+    const editor = findEditorElement();
+    if (!editor) throw new Error('没有找到可清理粘贴图片的正文编辑区');
+    const api = getMpEditorApi();
+    const current = api
+      ? await getContent({ api, allowFallback: false, timeoutMs: 3000 })
+      : fallbackGetContent(editor);
+    const expectedArticleKey = String(payload?.expectedArticleKey || '');
+    if (expectedArticleKey && current.articleKey !== expectedArticleKey) {
+      throw contentConflict(current.mode);
+    }
+    const container = document.createElement('div');
+    container.innerHTML = current.content;
+    const candidate = findPastedImageForDiscard(container, payload);
+    if (!candidate) {
+      const cdnUrl = normalizedWechatCdnUrl(payload?.cdnUrl);
+      const sourceStillPresent = Boolean(cdnUrl) && Array.from(container.querySelectorAll('img'))
+        .some((image) => imageSource(image) === cdnUrl);
+      return {
+        changed: false,
+        confirmedAbsent: Boolean(cdnUrl && !sourceStillPresent)
+      };
+    }
+    if (payload?.placement === 'replace') {
+      const originalAttributes = normalizedNativeAttributeRecord(payload?.originalAttributes);
+      const originalSource = normalizedWechatCdnUrl(
+        originalAttributes['data-src'] || originalAttributes.src
+      );
+      if (!originalSource) {
+        return { changed: false, confirmedAbsent: false };
+      }
+      syncNativeImageAttributes(candidate, originalAttributes);
+      candidate.removeAttribute('data-mpse-native-paste-id');
+      candidate.removeAttribute('data-mpse-paste-for');
+    } else {
+      removeEmptyPasteWrapper(candidate, container);
+    }
+    await setContent(
+      container.innerHTML,
+      current.content,
+      current.mode,
+      current.articleKey
+    );
+    return { changed: true, confirmedAbsent: true };
+  }
+
+  function enqueueNativeImagePaste(payload) {
+    return enqueueEditorWrite((revision) => pasteImageThroughEditor(payload, revision));
+  }
+
+  const pendingPastedImageCleanups = new Map();
+
+  function pastedImageCleanupKey(payload) {
+    return [
+      String(payload?.expectedArticleKey || ''),
+      String(payload?.pasteId || ''),
+      normalizedWechatCdnUrl(payload?.cdnUrl)
+    ].join('|');
+  }
+
+  function forgetPastedImageCleanup(key) {
+    const entry = pendingPastedImageCleanups.get(key);
+    if (entry?.timer) window.clearTimeout(entry.timer);
+    pendingPastedImageCleanups.delete(key);
+  }
+
+  function schedulePastedImageCleanup(payload) {
+    const key = pastedImageCleanupKey(payload);
+    if (key === '||') return false;
+    let entry = pendingPastedImageCleanups.get(key);
+    if (!entry) {
+      entry = {
+        payload,
+        attempts: 0,
+        createdAt: Date.now(),
+        timer: 0
+      };
+      pendingPastedImageCleanups.set(key, entry);
+    }
+    if (entry.timer) return true;
+    const delay = Math.min(30000, 1000 * (2 ** Math.min(entry.attempts, 5)));
+    entry.timer = window.setTimeout(async () => {
+      entry.timer = 0;
+      if (Date.now() - entry.createdAt > 15 * 60 * 1000) {
+        console.warn('[公众号源码排版助手] pasted image cleanup expired:', entry.payload);
+        forgetPastedImageCleanup(key);
+        return;
+      }
+      entry.attempts += 1;
+      try {
+        const result = await enqueueEditorWrite(() => discardPastedImage(entry.payload));
+        if (result.changed || result.confirmedAbsent) {
+          forgetPastedImageCleanup(key);
+          return;
+        }
+      } catch (error) {
+        console.warn('[公众号源码排版助手] pasted image cleanup retry failed:', error);
+      }
+      schedulePastedImageCleanup(entry.payload);
+    }, delay);
+    return true;
+  }
+
+  function enqueuePastedImageDiscard(payload) {
+    return enqueueEditorWrite(async () => {
+      const key = pastedImageCleanupKey(payload);
+      try {
+        const result = await discardPastedImage(payload);
+        if (result.changed || result.confirmedAbsent) {
+          forgetPastedImageCleanup(key);
+          return result;
+        }
+        return {
+          ...result,
+          cleanupScheduled: schedulePastedImageCleanup(payload)
+        };
+      } catch (error) {
+        if (!schedulePastedImageCleanup(payload)) throw error;
+        return {
+          changed: false,
+          confirmedAbsent: false,
+          cleanupScheduled: true,
+          error: asErrorPayload(error)
+        };
+      }
+    });
   }
 
   function postResponse(requestId, type, ok, data, error) {
@@ -623,14 +1300,23 @@
           ? payload.expectedContent
           : null;
         const expectedMode = payload && typeof payload.expectedMode === 'string' ? payload.expectedMode : '';
-        const result = await enqueueSetContent(html, expectedContent, expectedMode);
+        const expectedArticleKey = payload && typeof payload.expectedArticleKey === 'string'
+          ? payload.expectedArticleKey
+          : '';
+        const result = await enqueueSetContent(html, expectedContent, expectedMode, expectedArticleKey);
         postResponse(requestId, 'SET_CONTENT_RESULT', true, result);
         return;
       }
 
-      if (type === 'UPLOAD_IMAGE') {
-        const result = await uploadImage(payload || {});
-        postResponse(requestId, 'UPLOAD_IMAGE_RESULT', true, result);
+      if (type === 'PASTE_IMAGE') {
+        const result = await enqueueNativeImagePaste(payload || {});
+        postResponse(requestId, 'PASTE_IMAGE_RESULT', true, result);
+        return;
+      }
+
+      if (type === 'DISCARD_PASTED_IMAGE') {
+        const result = await enqueuePastedImageDiscard(payload || {});
+        postResponse(requestId, 'DISCARD_PASTED_IMAGE_RESULT', true, result);
         return;
       }
 

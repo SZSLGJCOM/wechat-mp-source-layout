@@ -305,6 +305,23 @@
   background: transparent;
 }
 
+.mpse-inline-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 30px;
+  padding: 0 2px 6px;
+  color: #44505c;
+  font-size: 12px;
+}
+
+.mpse-inline-toolbar strong {
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 600;
+}
+
 .mpse-inline-code-wrap {
   position: relative;
   display: flex;
@@ -489,6 +506,11 @@
   line-height: 18px;
 }
 
+#mpse-inline-panel [data-mpse-action]:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
 .mpse-inline-loading {
   position: absolute;
   inset: 0;
@@ -587,9 +609,6 @@
     flex-wrap: wrap;
   }
 }
-
-/* 源码模式只保留代码区；进入/退出都由工具栏 HTML 切换。 */
-#mpse-inline-panel .mpse-inline-footer { display: none !important; }
 
 /* 图片侧边参数工具 */
 #mpse-img2-menu,

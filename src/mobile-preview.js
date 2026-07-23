@@ -5,7 +5,7 @@
   const FRAME_ID = 'mpse-mobile-preview-frame';
   const ARTICLE_WIDTH = 440;
   const RENDER_DELAY_MS = 120;
-  const REBIND_INTERVAL_MS = 1400;
+  const REBIND_INTERVAL_MS = 2500;
   const DANGEROUS_ELEMENTS = [
     'script', 'iframe', 'object', 'embed', 'frame', 'frameset',
     'form', 'input', 'button', 'textarea', 'select', 'option',
@@ -20,6 +20,7 @@
     frame: null,
     renderTimer: 0,
     fingerprint: '',
+    sourceFingerprint: '',
     documentObservers: new Map()
   };
 
@@ -38,7 +39,9 @@
 
   function isOwnPreviewNode(node) {
     const element = node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement;
-    return Boolean(element?.closest?.(`#${ROOT_ID}`));
+    return Boolean(element?.closest?.(
+      `#${ROOT_ID}, #mpse-inline-panel .mpse-highlight-layer, #mpse-inline-panel .mpse-inline-lines`
+    ));
   }
 
   function sourceFingerprint(value) {
@@ -125,6 +128,7 @@
       installFrameGuards();
       updateFrameGeometry();
       state.fingerprint = '';
+      state.sourceFingerprint = '';
       scheduleRender(0);
     });
     state.frame.srcdoc = frameMarkup();
@@ -293,10 +297,18 @@
     state.renderTimer = 0;
     if (!state.root || state.root.hidden) return;
     const snapshot = readArticleSnapshot();
+    const sourceKey = sourceFingerprint(`${snapshot.mode}\0${snapshot.title}\0${snapshot.author}\0${snapshot.html}`);
+    if (sourceKey === state.sourceFingerprint) return;
     snapshot.html = sanitizeHtml(snapshot.html);
-    const fingerprint = sourceFingerprint(`${snapshot.mode}\0${snapshot.title}\0${snapshot.author}\0${snapshot.html}`);
-    if (fingerprint === state.fingerprint) return;
-    if (writeSnapshot(snapshot)) state.fingerprint = fingerprint;
+    const fingerprint = sourceFingerprint(`${sourceKey}\0${snapshot.html}`);
+    if (fingerprint === state.fingerprint) {
+      state.sourceFingerprint = sourceKey;
+      return;
+    }
+    if (writeSnapshot(snapshot)) {
+      state.sourceFingerprint = sourceKey;
+      state.fingerprint = fingerprint;
+    }
   }
 
   function scheduleRender(delay = RENDER_DELAY_MS) {
@@ -321,9 +333,12 @@
 
   function bindDocuments() {
     const activeDocuments = new Set(getAccessibleDocuments());
-    for (const [targetDocument, observer] of state.documentObservers) {
+    for (const [targetDocument, binding] of state.documentObservers) {
       if (activeDocuments.has(targetDocument)) continue;
-      observer.disconnect();
+      binding.observer.disconnect();
+      for (const eventName of ['beforeinput', 'input', 'paste', 'drop', 'cut']) {
+        targetDocument.removeEventListener(eventName, binding.onInput, true);
+      }
       state.documentObservers.delete(targetDocument);
     }
 
@@ -345,7 +360,7 @@
         attributes: true,
         attributeFilter: ['style', 'class', 'src', 'href', 'contenteditable']
       });
-      state.documentObservers.set(targetDocument, observer);
+      state.documentObservers.set(targetDocument, { observer, onInput });
     }
   }
 
@@ -357,7 +372,7 @@
     window.setInterval(() => {
       bindDocuments();
       updateClock();
-      scheduleRender();
+      if (state.root && !state.root.hidden) scheduleRender(0);
     }, REBIND_INTERVAL_MS);
   }
 

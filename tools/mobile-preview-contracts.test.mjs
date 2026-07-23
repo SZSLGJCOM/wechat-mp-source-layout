@@ -52,14 +52,18 @@ test('unsaved HTML source is the first-class live preview source', () => {
   assert.match(reader[0], /mode: sourceEditor \? 'source' : 'rich'/);
 });
 
-test('editor replacements and direct style changes share one debounced refresh lifecycle', () => {
+test('editor changes are debounced and unchanged previews do no parse work', () => {
   assert.match(preview, /const RENDER_DELAY_MS = 120/);
   assert.match(preview, /for \(const eventName of \['beforeinput', 'input', 'paste', 'drop', 'cut'\]\)/);
   assert.match(preview, /new MutationObserver\(\(records\) =>/);
   assert.match(preview, /characterData: true/);
   assert.match(preview, /attributeFilter: \['style', 'class', 'src', 'href', 'contenteditable'\]/);
-  assert.match(preview, /window\.setInterval\(\(\) => \{[\s\S]*?bindDocuments\(\)[\s\S]*?scheduleRender\(\)/);
-  assert.match(preview, /if \(fingerprint === state\.fingerprint\) return/);
+  const interval = preview.match(/window\.setInterval\(\(\) => \{[\s\S]*?\}, REBIND_INTERVAL_MS\)/)?.[0] || '';
+  assert.match(interval, /bindDocuments\(\)/);
+  assert.match(interval, /if \(state\.root && !state\.root\.hidden\) scheduleRender\(0\)/);
+  assert.match(preview, /if \(sourceKey === state\.sourceFingerprint\) return;[\s\S]*?snapshot\.html = sanitizeHtml/);
+  assert.match(preview, /#mpse-inline-panel \.mpse-highlight-layer/);
+  assert.match(preview, /targetDocument\.removeEventListener\(eventName, binding\.onInput, true\)/);
 });
 
 test('mobile preview switch follows HTML in the native toolbar', () => {

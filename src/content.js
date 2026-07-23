@@ -2,7 +2,7 @@
   'use strict';
 
   const INLINE_ID = 'mpse-inline-panel';
-  const VERSION = 'v0.10.0';
+  const VERSION = 'v0.11.0';
   const TOOLBAR_BUTTON_ID = 'mpse-toolbar-button';
   const FLOATING_BUTTON_ID = 'mpse-floating-button';
   const bridgeClient = window.__MPSE_BRIDGE_CLIENT__;
@@ -33,8 +33,13 @@
     session: 0,
     active: false,
     drafts: new Map(),
-    targetIds: new WeakMap(),
-    nextTargetId: 0
+    articleKey: '',
+    bridgeArticleKey: '',
+    renderFrame: 0,
+    highlightTimer: 0,
+    highlightFingerprint: '',
+    renderedLineCount: 0,
+    locationKey: location.href
   };
 
   function isMpHost() {
@@ -49,6 +54,54 @@
     return false;
   }
 
+  function tokenizeHtml(source) {
+    const value = String(source || '');
+    const tokens = [];
+    let textStart = 0;
+    let index = 0;
+
+    function pushText(end) {
+      if (end > textStart) tokens.push(value.slice(textStart, end));
+    }
+
+    while (index < value.length) {
+      if (value[index] !== '<') {
+        index += 1;
+        continue;
+      }
+
+      pushText(index);
+      const tokenStart = index;
+      if (value.startsWith('<!--', index)) {
+        const close = value.indexOf('-->', index + 4);
+        index = close === -1 ? value.length : close + 3;
+        tokens.push(value.slice(tokenStart, index));
+        textStart = index;
+        continue;
+      }
+
+      let quote = '';
+      index += 1;
+      while (index < value.length) {
+        const character = value[index];
+        if (quote) {
+          if (character === quote) quote = '';
+        } else if (character === '"' || character === "'") {
+          quote = character;
+        } else if (character === '>') {
+          index += 1;
+          break;
+        }
+        index += 1;
+      }
+      tokens.push(value.slice(tokenStart, index));
+      textStart = index;
+    }
+
+    pushText(value.length);
+    return tokens;
+  }
+
   function htmlFormat(source) {
     const raw = String(source || '').trim();
     if (!raw) return '';
@@ -58,9 +111,7 @@
       'link', 'meta', 'param', 'source', 'track', 'wbr'
     ]);
 
-    const tokens = raw
-      .replace(/>\s+</g, '><')
-      .match(/<!--[\s\S]*?-->|<[^>]+>|[^<]+/g) || [];
+    const tokens = tokenizeHtml(raw);
 
     const lines = [];
     let indent = 0;
@@ -225,15 +276,15 @@
       return out;
     }
 
-    return raw.replace(/(<!--[\s\S]*?-->|<[^>]*>|[^<]+)/g, (token) => {
+    return tokenizeHtml(raw).map((token) => {
       if (token.startsWith('<!--')) return emit('comment', token);
       if (token.startsWith('<')) return highlightTag(token);
       return escapeHtml(token);
-    });
+    }).join('');
   }
 
   function setEditorValue(textarea, html, options = {}) {
-    const value = options.raw ? String(html || '') : htmlFormat(html);
+    const value = options.format ? htmlFormat(html) : String(html || '');
     textarea.value = value;
     if (options.toStart !== false) {
       textarea.selectionStart = 0;
@@ -249,7 +300,7 @@
     const toolbarButton = document.getElementById(TOOLBAR_BUTTON_ID);
     if (toolbarButton) {
       toolbarButton.classList.toggle('mpse-active', isActive);
-      toolbarButton.title = isActive ? '原样保存并返回富文本编辑' : '源码模式';
+      toolbarButton.title = isActive ? '退出源码模式' : '源码模式';
       toolbarButton.setAttribute('aria-pressed', isActive ? 'true' : 'false');
     }
 
@@ -257,7 +308,7 @@
     if (floatingButton) {
       floatingButton.classList.toggle('mpse-active', isActive);
       floatingButton.textContent = isActive ? '返回' : '源码';
-      floatingButton.title = isActive ? '原样保存并返回富文本编辑' : '打开源码模式';
+      floatingButton.title = isActive ? '退出源码模式' : '打开源码模式';
     }
   }
   async function copyText(text) {
@@ -352,12 +403,15 @@
     return `${text.length}:${(hash >>> 0).toString(36)}`;
   }
 
-  function draftKey(target, html) {
-    if (target && !state.targetIds.has(target)) {
-      state.nextTargetId += 1;
-      state.targetIds.set(target, `source-${state.nextTargetId}`);
-    }
-    return `${target ? state.targetIds.get(target) : 'editor'}:${sourceFingerprint(html)}`;
+  function articleKey(_target, result = {}) {
+    const bridgeKey = typeof result.articleKey === 'string' && result.articleKey
+      ? result.articleKey
+      : `${location.pathname}${location.search}`;
+    return bridgeKey;
+  }
+
+  function draftKey(value = state.articleKey) {
+    return value || articleKey(state.target);
   }
 
   function isCurrentSession(panel, session) {
@@ -390,7 +444,13 @@
     const panel = getPanel();
     if (!panel) return;
 
-    panel.classList.toggle('mpse-busy', Boolean(isBusy));
+    const busy = Boolean(isBusy);
+    panel.classList.toggle('mpse-busy', busy);
+    const textarea = panel.querySelector('.mpse-inline-editor');
+    if (textarea) textarea.readOnly = busy;
+    for (const button of panel.querySelectorAll('[data-mpse-action]')) {
+      button.disabled = busy;
+    }
     const loading = panel.querySelector('.mpse-inline-loading');
     if (loading && text) loading.textContent = text;
   }
@@ -404,26 +464,37 @@
     if (!counter) return;
 
     const value = textarea.value || '';
-    const lineCount = Math.max(1, value.split('\n').length);
-    counter.textContent = `${lineCount} 行 · ${value.length} 字符 · ${latestEditorMode}`;
+    const lines = lineCount(value);
+    counter.textContent = `${lines} 行 · ${value.length} 字符 · ${latestEditorMode}`;
   }
 
-  function syncLineNumbers() {
+  function lineCount(value) {
+    let count = 1;
+    for (let index = 0; index < value.length; index += 1) {
+      if (value.charCodeAt(index) === 10) count += 1;
+    }
+    return count;
+  }
+
+  function renderEditorChrome() {
+    state.renderFrame = 0;
     const panel = getPanel();
     const textarea = getTextarea();
     if (!panel || !textarea) return;
 
     const lines = panel.querySelector('.mpse-inline-lines');
     const highlightLayer = panel.querySelector('.mpse-highlight-layer');
-    const highlightCode = panel.querySelector('.mpse-highlight-code');
 
     const value = textarea.value || '';
-    const count = Math.max(1, value.split('\n').length);
-    const numbers = [];
-    for (let i = 1; i <= count; i += 1) numbers.push(String(i));
+    const count = lineCount(value);
 
     if (lines) {
-      lines.textContent = numbers.join('\n');
+      if (state.renderedLineCount !== count) {
+        const numbers = [];
+        for (let i = 1; i <= count; i += 1) numbers.push(String(i));
+        lines.textContent = numbers.join('\n');
+        state.renderedLineCount = count;
+      }
       lines.scrollTop = textarea.scrollTop;
     }
 
@@ -436,16 +507,38 @@
       wrap.style.height = `${height}px`;
     }
 
-    if (highlightCode) {
-      highlightCode.innerHTML = highlightHtml(value) + (value.endsWith('\n') ? '\n' : '');
-    }
-
     if (highlightLayer) {
       highlightLayer.scrollTop = textarea.scrollTop;
       highlightLayer.scrollLeft = textarea.scrollLeft;
     }
 
     updateCounter();
+  }
+
+  function renderHighlight() {
+    state.highlightTimer = 0;
+    const panel = getPanel();
+    const textarea = getTextarea();
+    const highlightCode = panel?.querySelector('.mpse-highlight-code');
+    if (!textarea || !highlightCode) return;
+    const value = textarea.value || '';
+    const fingerprint = sourceFingerprint(value);
+    if (fingerprint === state.highlightFingerprint) return;
+    highlightCode.innerHTML = highlightHtml(value) + (value.endsWith('\n') ? '\n' : '');
+    state.highlightFingerprint = fingerprint;
+  }
+
+  function syncLineNumbers(options = {}) {
+    if (options.immediate) {
+      if (state.renderFrame) window.cancelAnimationFrame(state.renderFrame);
+      state.renderFrame = 0;
+      renderEditorChrome();
+    } else if (!state.renderFrame) {
+      state.renderFrame = window.requestAnimationFrame(renderEditorChrome);
+    }
+
+    if (state.highlightTimer) window.clearTimeout(state.highlightTimer);
+    state.highlightTimer = window.setTimeout(renderHighlight, options.immediate ? 0 : 120);
   }
 
   function markDirty() {
@@ -460,7 +553,7 @@
     state.dirty = false;
     const panel = getPanel();
     if (panel) panel.classList.remove('mpse-dirty');
-    syncLineNumbers();
+    syncLineNumbers({ immediate: true });
   }
 
   function hideTarget(target) {
@@ -494,7 +587,12 @@
     target.style.visibility = state.oldVisibility || '';
 
     return () => {
-      if (!document.contains(target)) return;
+      if (
+        !state.active
+        || state.target !== target
+        || !getPanel()
+        || !document.contains(target)
+      ) return;
       target.style.display = previousDisplay;
       target.style.visibility = previousVisibility;
     };
@@ -514,13 +612,28 @@
     panel.id = INLINE_ID;
     panel.innerHTML = `
       <div class="mpse-inline-editor-shell">
-        <div class="mpse-inline-code-wrap" title="再次点击工具栏 HTML：有修改则原样保存并返回；无修改则直接返回">
+        <div class="mpse-inline-toolbar">
+          <strong>HTML 源码</strong>
+          <div class="mpse-mini-actions" aria-label="源码操作">
+            <button type="button" class="mpse-mini-action" data-mpse-action="reload">重新读取</button>
+            <button type="button" class="mpse-mini-action" data-mpse-action="format">格式化</button>
+            <button type="button" class="mpse-mini-action" data-mpse-action="copy">复制</button>
+            <button type="button" class="mpse-mini-action mpse-mini-action-save" data-mpse-action="save">保存</button>
+            <button type="button" class="mpse-mini-action mpse-mini-action-save" data-mpse-action="save-close">保存并退出</button>
+            <button type="button" class="mpse-mini-close" data-mpse-action="close" aria-label="取消并退出">×</button>
+          </div>
+        </div>
+        <div class="mpse-inline-code-wrap">
           <pre class="mpse-inline-lines" aria-hidden="true">1</pre>
           <div class="mpse-code-stage">
             <pre class="mpse-highlight-layer" aria-hidden="true"><code class="mpse-highlight-code"></code></pre>
             <textarea class="mpse-inline-editor" spellcheck="false" placeholder="正在读取微信公众号正文 HTML..." aria-label="微信公众号正文 HTML 源码"></textarea>
           </div>
           <div class="mpse-inline-loading">处理中...</div>
+        </div>
+        <div class="mpse-inline-footer">
+          <span class="mpse-inline-status" role="status" aria-live="polite"></span>
+          <span class="mpse-inline-counter"></span>
         </div>
       </div>
     `;
@@ -540,6 +653,7 @@
       }
     });
     textarea.addEventListener('keydown', async (event) => {
+      if (textarea.readOnly) return;
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
         event.preventDefault();
         await saveInline(false);
@@ -548,7 +662,7 @@
 
       if (event.key === 'Escape') {
         event.preventDefault();
-        await saveInline(true);
+        closeInline();
         return;
       }
 
@@ -573,7 +687,7 @@
         return;
       }
       if (action === 'format') {
-        setEditorValue(textarea, textarea.value, { toStart: false });
+        setEditorValue(textarea, textarea.value, { format: true, toStart: false });
         markDirty();
         showStatus('已格式化。建议再检查 section / p / span 层级。', 'ok');
         return;
@@ -601,7 +715,7 @@
 
   function rememberInlineDraft(textarea) {
     if (!textarea || !state.dirty || textarea.value === state.lastHtml) return;
-    const key = draftKey(state.target, lastLoadedHtml);
+    const key = draftKey();
     state.drafts.delete(key);
     state.drafts.set(key, textarea.value);
     while (state.drafts.size > 8) state.drafts.delete(state.drafts.keys().next().value);
@@ -610,8 +724,10 @@
   function applyLoadedSource(textarea, result, options = {}) {
     latestEditorMode = result.mode || 'unknown';
     lastLoadedHtml = typeof result.content === 'string' ? result.content : '';
+    state.bridgeArticleKey = typeof result.articleKey === 'string' ? result.articleKey : '';
+    state.articleKey = articleKey(state.target, result);
     const cleanHtml = setEditorValue(textarea, lastLoadedHtml);
-    const key = draftKey(state.target, lastLoadedHtml);
+    const key = draftKey();
     const draft = options.restoreDraft === false ? null : state.drafts.get(key);
     if (options.restoreDraft === false) state.drafts.delete(key);
     markClean(cleanHtml);
@@ -619,7 +735,6 @@
       textarea.value = draft;
       markDirty();
     }
-    syncLineNumbers();
   }
 
   function rebindInlineTarget(panel, target) {
@@ -657,14 +772,25 @@
     state.syncQueued = false;
     const session = state.session;
     const textarea = getTextarea();
+    const restore = latestEditorMode === 'dom-fallback' ? showTargetTemporarily() : null;
     try {
       const result = await readEditorContent(5000);
       if (!textarea || !isCurrentSession(panel, session)) return;
       const currentHtml = typeof result.content === 'string' ? result.content : '';
-      if (currentHtml === lastLoadedHtml) return;
+      const bridgeChanged = Boolean(
+        result.articleKey
+        && state.bridgeArticleKey
+        && result.articleKey !== state.bridgeArticleKey
+      );
+      const targetMissing = !state.target || !document.contains(state.target);
+      const replacement = currentHtml !== lastLoadedHtml || bridgeChanged || targetMissing
+        ? findEditorMountTarget(state.target)
+        : null;
+      const nextTarget = replacement || state.target;
+      const nextArticleKey = articleKey(nextTarget, result);
+      if (currentHtml === lastLoadedHtml && nextArticleKey === state.articleKey) return;
 
       rememberInlineDraft(textarea);
-      const replacement = findEditorMountTarget(state.target);
       if (replacement) rebindInlineTarget(panel, replacement);
       state.session += 1;
       applyLoadedSource(textarea, result);
@@ -676,6 +802,7 @@
         showStatus(`切换文章源码失败：${error.message}`, 'error');
       }
     } finally {
+      if (restore) restore();
       state.syncing = false;
       if (state.syncQueued && state.active) scheduleInlineSync();
     }
@@ -688,12 +815,7 @@
     if (existing) {
       if (options.recovering) return;
       if (existing.classList.contains('mpse-busy')) return;
-      const textarea = getTextarea();
-      if (!textarea || !state.dirty || textarea.value === state.lastHtml) {
-        closeInline({ force: true });
-        return;
-      }
-      await saveInline(true);
+      closeInline();
       return;
     }
 
@@ -743,7 +865,13 @@
   async function reloadInline() {
     const panel = getPanel();
     const textarea = getTextarea();
-    if (!panel || !textarea) return;
+    if (
+      !panel
+      || !textarea
+      || state.saving
+      || state.syncing
+      || panel.classList.contains('mpse-busy')
+    ) return;
     const session = state.session;
 
     if (state.dirty && textarea.value !== state.lastHtml) {
@@ -751,7 +879,7 @@
       if (!ok) return;
     }
 
-    const restore = showTargetTemporarily();
+    const restore = latestEditorMode === 'dom-fallback' ? showTargetTemporarily() : null;
     setBusy(true, '正在重新读取微信公众号正文...');
     showStatus('正在重新读取...');
 
@@ -771,26 +899,36 @@
     } finally {
       if (restore) restore();
       if (isCurrentSession(panel, session)) setBusy(false);
+      if (state.syncQueued && state.active) scheduleInlineSync();
     }
   }
 
   async function saveInline(closeAfter) {
     const panel = getPanel();
     const textarea = getTextarea();
-    if (!panel || !textarea || state.saving || panel.classList.contains('mpse-busy')) return;
+    if (
+      !panel
+      || !textarea
+      || state.saving
+      || state.syncing
+      || panel.classList.contains('mpse-busy')
+    ) return;
     const session = state.session;
 
     const html = textarea.value || '';
     const baselineHtml = lastLoadedHtml;
+    const baselineArticleKey = state.bridgeArticleKey;
+    const sourceDraftKey = draftKey();
 
     // 源码模式按编辑区内容原样写回。
     if (!state.dirty && html === state.lastHtml) {
+      state.drafts.delete(sourceDraftKey);
       if (closeAfter) closeInline({ force: true });
       return;
     }
 
     state.saving = true;
-    const restore = showTargetTemporarily();
+    const restore = latestEditorMode === 'dom-fallback' ? showTargetTemporarily() : null;
     let closed = false;
     setBusy(true, closeAfter ? '正在保存并返回...' : '正在保存...');
     showStatus('正在原样写回源码...');
@@ -798,7 +936,11 @@
     try {
       const transaction = await mutateEditorContent((current) => {
         const currentHtml = typeof current.content === 'string' ? current.content : '';
-        if (currentHtml !== baselineHtml) {
+        const currentArticleKey = typeof current.articleKey === 'string' ? current.articleKey : '';
+        if (
+          currentHtml !== baselineHtml
+          || (baselineArticleKey && currentArticleKey && currentArticleKey !== baselineArticleKey)
+        ) {
           const error = new Error('当前文章已经切换，已停止向旧会话写入');
           error.code = 'MPSE_SOURCE_SESSION_CHANGED';
           throw error;
@@ -809,8 +951,10 @@
       const result = transaction.write || transaction.read || {};
       latestEditorMode = result.mode || latestEditorMode;
       lastLoadedHtml = html;
+      state.bridgeArticleKey = transaction.read?.articleKey || state.bridgeArticleKey;
+      state.articleKey = articleKey(state.target, { articleKey: state.bridgeArticleKey });
+      state.drafts.delete(sourceDraftKey);
       markClean(html);
-      syncLineNumbers();
 
       if (result.apiError) {
         showStatus(`已用 DOM 兜底保存。原生 API 错误：${result.apiError.message}`, 'ok');
@@ -839,16 +983,30 @@
     const panel = getPanel();
     const textarea = getTextarea();
 
+    if (
+      !options.force
+      && (state.saving || state.syncing || panel?.classList.contains('mpse-busy'))
+    ) return;
+
     if (!options.force && panel && textarea && state.dirty && textarea.value !== state.lastHtml) {
       const ok = window.confirm('源码有未保存修改，确定退出源码模式吗？');
       if (!ok) return;
     }
 
+    state.drafts.delete(draftKey());
     state.active = false;
     state.session += 1;
     state.syncQueued = false;
     if (state.syncTimer) window.clearTimeout(state.syncTimer);
     state.syncTimer = 0;
+    if (state.renderFrame) window.cancelAnimationFrame(state.renderFrame);
+    if (state.highlightTimer) window.clearTimeout(state.highlightTimer);
+    state.renderFrame = 0;
+    state.highlightTimer = 0;
+    state.highlightFingerprint = '';
+    state.renderedLineCount = 0;
+    state.articleKey = '';
+    state.bridgeArticleKey = '';
     if (panel) panel.remove();
     restoreTarget();
     setToolbarActive(false);
@@ -894,10 +1052,25 @@
   function mutationTouchesEditorPage(records) {
     return records.some((record) => {
       if (isExtensionElement(record.target)) return false;
+      const target = record.target?.nodeType === Node.ELEMENT_NODE
+        ? record.target
+        : record.target?.parentElement;
+      if (
+        state.target
+        && target
+        && (target === state.target || state.target.contains?.(target))
+      ) {
+        return true;
+      }
       const changedNodes = [...Array.from(record.addedNodes || []), ...Array.from(record.removedNodes || [])];
       return changedNodes.some((node) => {
         const element = node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement;
-        return !element || !isExtensionElement(element);
+        if (!element || isExtensionElement(element)) return false;
+        return Boolean(
+          element.matches?.('#ueditor_0, #js_editorArea, .ProseMirror, .ql-editor, [contenteditable="true"]')
+          || element.querySelector?.('#ueditor_0, #js_editorArea, .ProseMirror, .ql-editor, [contenteditable="true"]')
+          || (state.target && (element === state.target || element.contains?.(state.target)))
+        );
       });
     });
   }
@@ -908,11 +1081,6 @@
 
     injectBridge();
     ensureButtons();
-    document.addEventListener('click', (event) => {
-      if (!state.active || isExtensionElement(event.target)) return;
-      scheduleInlineSync();
-    }, true);
-
     const observer = new MutationObserver((records) => {
       ensureButtons();
       if (state.active && mutationTouchesEditorPage(records)) scheduleInlineSync();
@@ -924,10 +1092,21 @@
 
     window.setInterval(() => {
       ensureButtons();
+      if (state.locationKey !== location.href) {
+        state.locationKey = location.href;
+        if (state.active) scheduleInlineSync(0);
+      }
       if (state.active && (!getPanel() || !state.target || !document.contains(state.target))) {
         scheduleInlineSync(0);
       }
     }, 2500);
+
+    window.addEventListener('beforeunload', (event) => {
+      const textarea = getTextarea();
+      if (!state.active || !state.dirty || !textarea || textarea.value === state.lastHtml) return;
+      event.preventDefault();
+      event.returnValue = '';
+    });
   }
 
   if (document.readyState === 'loading') {

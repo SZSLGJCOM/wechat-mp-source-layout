@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const VERSION = 'v0.10.0';
+  const VERSION = 'v0.11.0';
   const MENU_ID = 'mpse-img2-menu';
   const PANEL_ID = 'mpse-img2-panel';
   const BADGE_ID = 'mpse-img2-badge';
@@ -24,6 +24,9 @@
   const mutateEditorContent = bridgeClient && typeof bridgeClient.mutateContent === 'function'
     ? bridgeClient.mutateContent
     : () => Promise.reject(new Error('扩展桥接客户端未加载，请刷新页面后重试'));
+  const discardPastedImage = bridgeClient && typeof bridgeClient.discardPastedImage === 'function'
+    ? bridgeClient.discardPastedImage
+    : () => Promise.reject(new Error('扩展图片清理桥接未加载，请刷新页面后重试'));
 
   if (!imageGeometry) throw new Error('图片几何模块未加载，请刷新页面后重试');
   if (!snapshotMerge) throw new Error('图片写回合并模块未加载，请刷新页面后重试');
@@ -224,8 +227,10 @@
   function stableUrl(value) {
     return String(value || '')
       .replace(/&amp;/g, '&')
-      .replace(/^https?:\/\/mmbiz\.qpic\.cn\//, '//mmbiz.qpic.cn/')
-      .replace(/^https?:\/\/mmbiz\.qlogo\.cn\//, '//mmbiz.qlogo.cn/')
+      .replace(
+        /^https?:\/\/(mmbiz\.qpic\.cn|mmbiz\.qlogo\.cn|m\.qpic\.cn|mmsns\.qpic\.cn)\//,
+        '//$1/'
+      )
       .trim();
   }
 
@@ -1160,7 +1165,22 @@
     markChanged,
     setBadgeText,
     finishAdvancedBake,
-    schedulePositionTools
+    schedulePositionTools,
+    resolveImage: resolveBakeImage,
+    onBakePending() {
+      if (!state.commitTimer) return;
+      window.clearTimeout(state.commitTimer);
+      state.commitTimer = null;
+    },
+    onBakeSettled(image, identity, outcome) {
+      if (outcome === 'failed' && image?.isConnected) {
+        const key = imageIdentityKey(identity || imageSignature(image));
+        if (state.pendingSnapshots.has(key)) markChanged(image, 'bake', false, identity);
+      }
+      if (!imageBakePipeline?.hasPending() && state.needsCommit) {
+        scheduleContentCommit(outcome === 'failed' ? 'bake-fallback' : 'bake');
+      }
+    }
   });
 
   function resetImage() {
@@ -1194,7 +1214,7 @@
     const previous = state.pendingSnapshots.get(key);
     if (image === state.image) state.identity = imageSignature(image);
     const cropHost = getCropContainer(image);
-    return snapshotMerge.createSnapshot({
+    const snapshot = snapshotMerge.createSnapshot({
       identity,
       image,
       cropHost,
@@ -1207,6 +1227,41 @@
       imageAttributeNames: IMAGE_SOURCE_ATTRIBUTES,
       cropAttribute: CROP_ATTR
     });
+    const candidates = [
+      ...(previous?.nativePasteCandidates || []),
+      ...(image.__mpseNativePasteCandidates || [])
+    ];
+    const seenCandidates = new Set();
+    snapshot.nativePasteCandidates = [];
+    for (const candidate of candidates) {
+      const normalized = {
+        pasteId: String(candidate?.pasteId || ''),
+        cdnUrl: stableUrl(candidate?.cdnUrl || '')
+      };
+      const articleKey = String(candidate?.articleKey || '');
+      if (articleKey) normalized.articleKey = articleKey;
+      normalized.placement = candidate?.placement === 'replace' ? 'replace' : 'after';
+      if (candidate?.originalAttributes && typeof candidate.originalAttributes === 'object') {
+        normalized.originalAttributes = { ...candidate.originalAttributes };
+      }
+      if (candidate?.cleanupOwner === 'page-bridge') {
+        normalized.cleanupOwner = 'page-bridge';
+      }
+      const candidateKey = `${normalized.pasteId}|${normalized.cdnUrl}`;
+      if (candidateKey === '|' || seenCandidates.has(candidateKey)) continue;
+      seenCandidates.add(candidateKey);
+      snapshot.nativePasteCandidates.push(normalized);
+    }
+    delete image.__mpseNativePasteCandidates;
+    return snapshot;
+  }
+
+  function resolveBakeImage(identity) {
+    const target = findImageByIdentity(identity);
+    if (!target) return null;
+    const snapshot = state.pendingSnapshots.get(imageIdentityKey(identity));
+    const root = snapshot && (findEditableRoot(target) || target.ownerDocument.body);
+    return snapshot && root ? applySnapshotToTarget(target, root, snapshot) : target;
   }
 
   function markChanged(image, reason, schedule = true, identityOverride = null) {
@@ -1236,6 +1291,11 @@
 
     if (state.isDragging) {
       setBadgeText('待同步');
+      return;
+    }
+
+    if (imageBakePipeline?.hasPending()) {
+      state.commitTimer = null;
       return;
     }
 
@@ -1351,7 +1411,7 @@
 
   function applySnapshotToTarget(target, root, snapshot) {
     target = applyCropSnapshot(target, snapshot);
-    if (snapshot.imgAttributePatch) {
+    if (snapshot.imgAttributeAction === 'sync') {
       snapshotMerge.syncAttributes(
         target,
         snapshot.imgAttributePatch,
@@ -1378,13 +1438,158 @@
     return doc.getElementById('mpse-root');
   }
 
+  function removeNativePasteCandidateNode(root, target, image) {
+    if (!image) return;
+    const parent = image.parentElement;
+    image.remove();
+    if (
+      parent
+      && parent !== root
+      && parent !== target?.parentElement
+      && /^(?:P|FIGURE|SECTION)$/.test(parent.tagName)
+      && !parent.textContent.trim()
+      && !parent.querySelector('img,svg,video,canvas')
+    ) {
+      parent.remove();
+    }
+  }
+
+  function removeNativePasteCandidates(root, target, candidates, identity = {}) {
+    const pending = [];
+    let changed = false;
+
+    const imageSource = (image) => stableUrl(
+      image?.getAttribute('data-src') || image?.getAttribute('src') || ''
+    );
+    const clearPasteMarker = (image) => {
+      if (!image) return;
+      image.removeAttribute('data-mpse-native-paste-id');
+      image.removeAttribute('data-mpse-paste-for');
+    };
+    const matchRun = (images, start, sources) => {
+      if (start < 0 || !sources.length) return [];
+      const counts = sources.reduce((result, source) => {
+        result.set(source, (result.get(source) || 0) + 1);
+        return result;
+      }, new Map());
+      const matched = [];
+      for (const image of images.slice(start)) {
+        const source = imageSource(image);
+        const count = counts.get(source) || 0;
+        if (!count) break;
+        matched.push(image);
+        if (count === 1) counts.delete(source);
+        else counts.set(source, count - 1);
+        if (!counts.size) return matched;
+      }
+      return [];
+    };
+
+    for (const candidate of candidates || []) {
+      const pasteId = String(candidate?.pasteId || '');
+      const cdnUrl = stableUrl(candidate?.cdnUrl || '');
+      const placement = candidate?.placement === 'replace' ? 'replace' : 'after';
+      let matched = null;
+      if (pasteId) {
+        matched = Array.from(root.querySelectorAll('img')).find((image) => (
+          image.getAttribute('data-mpse-native-paste-id') === pasteId
+        )) || null;
+      }
+      if (matched) {
+        if (placement === 'replace' && (!target || matched === target)) {
+          target = matched;
+          clearPasteMarker(matched);
+        } else {
+          if (!target && placement === 'after' && Number.isInteger(identity.index)) {
+            const markerImages = Array.from(root.querySelectorAll('img'));
+            const matchedIndex = markerImages.indexOf(matched);
+            if (matchedIndex === identity.index + 1) {
+              target = markerImages[identity.index] || null;
+            }
+          }
+          removeNativePasteCandidateNode(root, target, matched);
+          if (matched === target) target = null;
+        }
+        changed = true;
+      } else if (cdnUrl) {
+        const sourceStillPresent = Array.from(root.querySelectorAll('img')).some((image) => (
+          imageSource(image) === cdnUrl
+        ));
+        if (sourceStillPresent) pending.push({ cdnUrl, placement });
+      } else if (pasteId) {
+        pending.push({ cdnUrl: '', placement });
+      }
+    }
+    if (!pending.length) return { changed, unresolved: [], target };
+    if (pending.some((candidate) => !candidate.cdnUrl)) {
+      return { changed, unresolved: pending, target };
+    }
+
+    let images = Array.from(root.querySelectorAll('img'));
+    const fallbackIndex = Number.isInteger(identity.index) && identity.index >= 0
+      ? Math.min(identity.index, images.length)
+      : -1;
+
+    const replaceIndex = pending.findIndex((candidate) => candidate.placement === 'replace');
+    if (replaceIndex >= 0) {
+      const replacement = pending[replaceIndex];
+      const replacementNode = target && imageSource(target) === replacement.cdnUrl
+        ? target
+        : (!target && fallbackIndex >= 0 && imageSource(images[fallbackIndex]) === replacement.cdnUrl
+          ? images[fallbackIndex]
+          : null);
+      if (!replacementNode) return { changed, unresolved: pending, target };
+      target = replacementNode;
+      clearPasteMarker(target);
+      pending.splice(replaceIndex, 1);
+      changed = true;
+    }
+    if (!pending.length) return { changed, unresolved: [], target };
+    if (pending.some((candidate) => candidate.placement !== 'after')) {
+      return { changed, unresolved: pending, target };
+    }
+
+    images = Array.from(root.querySelectorAll('img'));
+    const sources = pending.map((candidate) => candidate.cdnUrl);
+    let targetIndex = images.indexOf(target);
+    let matched = targetIndex >= 0 ? matchRun(images, targetIndex + 1, sources) : [];
+    if (!matched.length && targetIndex < 0 && fallbackIndex >= 0 && images[fallbackIndex]) {
+      matched = matchRun(images, fallbackIndex + 1, sources);
+      if (matched.length) {
+        target = images[fallbackIndex];
+        targetIndex = fallbackIndex;
+      } else {
+        matched = matchRun(images, fallbackIndex, sources);
+      }
+    }
+    if (!matched.length) return { changed, unresolved: pending, target };
+    for (const image of matched) {
+      removeNativePasteCandidateNode(root, target, image);
+      changed = true;
+    }
+    return { changed, unresolved: [], target };
+  }
+
   function applySnapshotToRoot(root, snapshot) {
     if (!snapshot || !snapshot.identity) return { changed: false, reason: 'no-snapshot' };
     if (!root) return { changed: false, reason: 'parse-failed' };
 
     let target = locateImageInHtml(root, snapshot.identity);
-    if (!target) return { changed: false, reason: 'image-not-found' };
-
+    const cleanup = removeNativePasteCandidates(
+      root,
+      target,
+      snapshot.nativePasteCandidates,
+      snapshot.identity
+    );
+    if (cleanup.unresolved.length) {
+      return { changed: false, reason: 'paste-candidate-not-found' };
+    }
+    target = cleanup.target;
+    if (!target) {
+      return cleanup.changed
+        ? { changed: true, reason: 'image-removed-candidates-cleaned' }
+        : { changed: false, reason: 'image-not-found' };
+    }
     applySnapshotToTarget(target, root, snapshot);
     return { changed: true, reason: 'ok' };
   }
@@ -1418,6 +1623,7 @@
 
   function commitBatchIsCurrent(batch) {
     return Boolean(batch.length && !state.isDragging
+      && !imageBakePipeline?.hasPending()
       && state.pendingSnapshots.size === batch.length
       && batch.every(({ key, snapshot }) => state.pendingSnapshots.get(key) === snapshot));
   }
@@ -1437,6 +1643,36 @@
       if (state.pendingSnapshots.get(key) === snapshot) state.pendingSnapshots.delete(key);
     }
     state.needsCommit = state.pendingSnapshots.size > 0;
+  }
+
+  async function handoffSnapshotCandidates(batch) {
+    for (const { snapshot } of batch) {
+      if (!snapshot?.nativePasteCandidates?.length) continue;
+      const locator = {
+        editId: String(snapshot.identity?.editId || ''),
+        sourceUrl: String(snapshot.identity?.src || ''),
+        index: Number.isInteger(snapshot.identity?.index) ? snapshot.identity.index : -1
+      };
+      const unresolved = [];
+      for (const candidate of [...snapshot.nativePasteCandidates].reverse()) {
+        if (candidate.cleanupOwner === 'page-bridge') {
+          unresolved.unshift(candidate);
+          continue;
+        }
+        try {
+          const result = await discardPastedImage(candidate, locator);
+          if (result?.cleanupScheduled) {
+            unresolved.unshift({ ...candidate, cleanupOwner: 'page-bridge' });
+          } else if (!result?.changed && !result?.confirmedAbsent) {
+            unresolved.unshift(candidate);
+          }
+        } catch (error) {
+          unresolved.unshift(candidate);
+          console.warn('[公众号源码排版助手] snapshot candidate handoff failed:', error);
+        }
+      }
+      snapshot.nativePasteCandidates = unresolved;
+    }
   }
 
   function restorePendingSnapshotsInEditor() {
@@ -1478,7 +1714,8 @@
       if (!result.changed) {
         const missingWasRemoved = result.reason === 'image-not-found'
           && result.failedKey
-          && !findImageByIdentity(result.failedSnapshot?.identity);
+          && !findImageByIdentity(result.failedSnapshot?.identity)
+          && !result.failedSnapshot?.nativePasteCandidates?.length;
         if (missingWasRemoved) {
           if (state.pendingSnapshots.get(result.failedKey) === result.failedSnapshot) {
             state.pendingSnapshots.delete(result.failedKey);
@@ -1492,6 +1729,7 @@
         state.commitRetryCount += 1;
         allowRetry = state.commitRetryCount < 3;
         state.needsCommit = true;
+        if (!allowRetry) await handoffSnapshotCandidates(batch);
         console.warn('[公众号源码排版助手] image html sync skipped:', result.reason);
         setBadgeText('仅预览');
         return;
@@ -1526,10 +1764,13 @@
         setBadgeText(cropPersisted ? '已同步' : '裁切未保留');
       }
     } catch (error) {
-      failed = true;
       state.needsCommit = state.pendingSnapshots.size > 0;
+      state.commitRetryCount += 1;
+      allowRetry = error?.code !== 'MPSE_WRITE_UNCERTAIN' && state.commitRetryCount < 3;
+      failed = !allowRetry;
+      if (!allowRetry) await handoffSnapshotCandidates(batch);
       console.warn('[公众号源码排版助手] image html sync failed:', error);
-      setBadgeText('同步失败');
+      setBadgeText(allowRetry ? '正在重试同步' : '同步失败');
     } finally {
       state.commitInFlight = false;
       state.commitPhase = '';

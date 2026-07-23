@@ -38,6 +38,284 @@ test('image commits preserve every pending image across serialized editor writes
   assert.match(imageTools, /const result = transaction\.value \|\| \{ changed: false, reason: 'empty-transaction' \}/);
   assert.match(imageTools, /state\.commitRetryCount < 3/);
   assert.match(imageTools, /state\.needsCommit = state\.pendingSnapshots\.size > 0/);
+  assert.match(imageTools, /async function handoffSnapshotCandidates\(batch\)/);
+  assert.match(imageTools, /result\?\.cleanupScheduled/);
+  assert.match(imageTools, /if \(!allowRetry\) await handoffSnapshotCandidates\(batch\)/);
+});
+
+test('temporary paste candidates can be cleaned after the original image disappears', () => {
+  const imageTools = readText('src/image-tools.js');
+  const start = imageTools.indexOf('  function removeNativePasteCandidateNode(root, target, image) {');
+  const end = imageTools.indexOf('  function restoreLatestSnapshotInEditor(snapshot) {', start);
+  assert.ok(start >= 0 && end > start, 'native paste cleanup functions must exist');
+
+  const cleanupSource = imageTools.slice(start, end);
+  const { removeNativePasteCandidates } = Function(
+    'stableUrl',
+    `${cleanupSource}\nreturn { removeNativePasteCandidates };`
+  )((value) => String(value || '').trim());
+
+  const createRoot = (attributes) => {
+    const root = {
+      images: [],
+      querySelectorAll(selector) {
+        return selector === 'img' ? this.images.filter((image) => !image.removed) : [];
+      }
+    };
+    const image = {
+      removed: false,
+      parentElement: root,
+      getAttribute(name) {
+        return attributes[name] || '';
+      },
+      remove() {
+        this.removed = true;
+      }
+    };
+    root.images.push(image);
+    return { root, image };
+  };
+
+  const marked = createRoot({
+    'data-mpse-native-paste-id': 'paste-marked',
+    'data-src': 'https://mmbiz.qpic.cn/marked.png'
+  });
+  const markedResult = removeNativePasteCandidates(marked.root, marked.image, [{
+    pasteId: 'paste-marked',
+    cdnUrl: 'https://mmbiz.qpic.cn/marked.png'
+  }], { index: 0 });
+  assert.equal(markedResult.changed, true);
+  assert.equal(markedResult.target, null);
+  assert.equal(marked.image.removed, true);
+  assert.deepEqual(markedResult.unresolved, []);
+
+  const unmarked = createRoot({
+    'data-src': 'https://mmbiz.qpic.cn/unmarked.png'
+  });
+  const unmarkedResult = removeNativePasteCandidates(unmarked.root, null, [{
+    pasteId: 'stripped-marker',
+    cdnUrl: 'https://mmbiz.qpic.cn/unmarked.png'
+  }], { index: 0 });
+  assert.equal(unmarkedResult.changed, true);
+  assert.equal(unmarked.image.removed, true);
+  assert.deepEqual(unmarkedResult.unresolved, []);
+
+  const replacement = createRoot({
+    'data-mpse-native-paste-id': 'paste-replace',
+    'data-src': 'https://mmbiz.qpic.cn/replacement.png'
+  });
+  replacement.image.removeAttribute = () => {};
+  const replacementResult = removeNativePasteCandidates(replacement.root, replacement.image, [{
+    pasteId: 'paste-replace',
+    cdnUrl: 'https://mmbiz.qpic.cn/replacement.png',
+    placement: 'replace'
+  }], { index: 0 });
+  assert.equal(replacementResult.changed, true);
+  assert.equal(replacementResult.target, replacement.image);
+  assert.equal(replacement.image.removed, false, 'an in-place replacement must be promoted, not deleted');
+  assert.deepEqual(replacementResult.unresolved, []);
+
+  const pairRoot = {
+    images: [],
+    querySelectorAll(selector) {
+      return selector === 'img' ? this.images.filter((image) => !image.removed) : [];
+    }
+  };
+  const pairImage = () => ({
+    removed: false,
+    parentElement: pairRoot,
+    getAttribute(name) {
+      return name === 'data-src' ? 'https://mmbiz.qpic.cn/shared-baked.png' : '';
+    },
+    remove() {
+      this.removed = true;
+    }
+  });
+  const promotedOriginal = pairImage();
+  const appendedCandidate = pairImage();
+  pairRoot.images.push(promotedOriginal, appendedCandidate);
+  const pairResult = removeNativePasteCandidates(pairRoot, null, [{
+    pasteId: 'stripped-appended-marker',
+    cdnUrl: 'https://mmbiz.qpic.cn/shared-baked.png',
+    placement: 'after'
+  }], { index: 0 });
+  assert.equal(pairResult.target, promotedOriginal);
+  assert.equal(promotedOriginal.removed, false);
+  assert.equal(appendedCandidate.removed, true);
+
+  const markedPairRoot = {
+    images: [],
+    querySelectorAll(selector) {
+      return selector === 'img' ? this.images.filter((image) => !image.removed) : [];
+    }
+  };
+  const markedPairImage = (attributes) => ({
+    removed: false,
+    parentElement: markedPairRoot,
+    getAttribute(name) {
+      return attributes[name] || '';
+    },
+    remove() {
+      this.removed = true;
+    }
+  });
+  const markedPairOriginal = markedPairImage({
+    'data-src': 'https://mmbiz.qpic.cn/marked-shared.png'
+  });
+  const markedPairCandidate = markedPairImage({
+    'data-mpse-native-paste-id': 'marked-after',
+    'data-src': 'https://mmbiz.qpic.cn/marked-shared.png'
+  });
+  markedPairRoot.images.push(markedPairOriginal, markedPairCandidate);
+  const markedPairResult = removeNativePasteCandidates(markedPairRoot, null, [{
+    pasteId: 'marked-after',
+    cdnUrl: 'https://mmbiz.qpic.cn/marked-shared.png',
+    placement: 'after'
+  }], { index: 0 });
+  assert.equal(markedPairResult.target, markedPairOriginal);
+  assert.equal(markedPairOriginal.removed, false);
+  assert.equal(markedPairCandidate.removed, true);
+});
+
+test('terminal image commit failures transfer candidate ownership explicitly', async () => {
+  const imageTools = readText('src/image-tools.js');
+  const start = imageTools.indexOf('  async function handoffSnapshotCandidates(batch) {');
+  const end = imageTools.indexOf('  function restorePendingSnapshotsInEditor() {', start);
+  assert.ok(start >= 0 && end > start, 'candidate handoff function must exist');
+
+  const calls = [];
+  const handoffSnapshotCandidates = Function(
+    'discardPastedImage',
+    `${imageTools.slice(start, end)}\nreturn handoffSnapshotCandidates;`
+  )(async (candidate, locator) => {
+    calls.push({ candidate, locator });
+    return candidate.pasteId === 'accepted'
+      ? { changed: false, cleanupScheduled: true }
+      : { changed: false, confirmedAbsent: false };
+  });
+  const snapshot = {
+    identity: {
+      editId: 'image-handoff',
+      src: 'https://mmbiz.qpic.cn/source-handoff.png',
+      index: 3
+    },
+    nativePasteCandidates: [
+      {
+        pasteId: 'accepted',
+        cdnUrl: 'https://mmbiz.qpic.cn/accepted.png',
+        articleKey: 'article-handoff',
+        placement: 'after'
+      },
+      {
+        pasteId: 'unresolved',
+        cdnUrl: 'https://mmbiz.qpic.cn/unresolved.png',
+        articleKey: 'article-handoff',
+        placement: 'replace'
+      }
+    ]
+  };
+
+  await handoffSnapshotCandidates([{ key: 'image-handoff', snapshot }]);
+
+  assert.deepEqual(snapshot.nativePasteCandidates, [
+    {
+      pasteId: 'accepted',
+      cdnUrl: 'https://mmbiz.qpic.cn/accepted.png',
+      articleKey: 'article-handoff',
+      placement: 'after',
+      cleanupOwner: 'page-bridge'
+    },
+    {
+      pasteId: 'unresolved',
+      cdnUrl: 'https://mmbiz.qpic.cn/unresolved.png',
+      articleKey: 'article-handoff',
+      placement: 'replace'
+    }
+  ]);
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[0].locator, {
+    editId: 'image-handoff',
+    sourceUrl: 'https://mmbiz.qpic.cn/source-handoff.png',
+    index: 3
+  });
+  assert.equal(calls[1].candidate.articleKey, 'article-handoff');
+});
+
+test('candidate cleanup still applies the snapshot to a promoted original image', () => {
+  const imageTools = readText('src/image-tools.js');
+  const start = imageTools.indexOf('  function removeNativePasteCandidateNode(root, target, image) {');
+  const end = imageTools.indexOf('  function restoreLatestSnapshotInEditor(snapshot) {', start);
+  const { applySnapshotToRoot } = Function(
+    'stableUrl',
+    'locateImageInHtml',
+    'applySnapshotToTarget',
+    `${imageTools.slice(start, end)}\nreturn { applySnapshotToRoot };`
+  )(
+    (value) => String(value || '').trim(),
+    () => null,
+    (target) => {
+      target.applied = true;
+      return target;
+    }
+  );
+
+  const root = {
+    images: [],
+    querySelectorAll(selector) {
+      return selector === 'img' ? this.images.filter((image) => !image.removed) : [];
+    }
+  };
+  const createImage = (attributes) => ({
+    applied: false,
+    removed: false,
+    parentElement: root,
+    getAttribute(name) {
+      return attributes[name] || '';
+    },
+    remove() {
+      this.removed = true;
+    }
+  });
+  const original = createImage({
+    'data-src': 'https://mmbiz.qpic.cn/shared-promote.png'
+  });
+  const candidate = createImage({
+    'data-mpse-native-paste-id': 'candidate-promote',
+    'data-src': 'https://mmbiz.qpic.cn/shared-promote.png'
+  });
+  root.images.push(original, candidate);
+
+  const result = applySnapshotToRoot(root, {
+    identity: { index: 0 },
+    nativePasteCandidates: [{
+      pasteId: 'candidate-promote',
+      cdnUrl: 'https://mmbiz.qpic.cn/shared-promote.png',
+      placement: 'after'
+    }]
+  });
+
+  assert.deepEqual(result, { changed: true, reason: 'ok' });
+  assert.equal(original.applied, true);
+  assert.equal(original.removed, false);
+  assert.equal(candidate.removed, true);
+});
+
+test('image baking and style snapshots share one serialized content commit gate', () => {
+  const imageTools = readText('src/image-tools.js');
+  const bakePipeline = readText('src/image-bake-pipeline.js');
+
+  assert.match(imageTools, /onBakePending\(\)[\s\S]*?window\.clearTimeout\(state\.commitTimer\)/);
+  assert.match(imageTools, /if \(imageBakePipeline\?\.hasPending\(\)\)[\s\S]*?return;/);
+  assert.match(imageTools, /onBakeSettled\(image, identity, outcome\)/);
+  assert.match(imageTools, /function resolveBakeImage\(identity\)[\s\S]*?applySnapshotToTarget\(target, root, snapshot\)/);
+  assert.match(bakePipeline, /function resolveJobImage\(job\)/);
+  assert.match(bakePipeline, /job\.recipe = bakeEngine\.recipeFromImage\(image\)/);
+  assert.match(bakePipeline, /if \(currentJob\.revision !== revision\)[\s\S]*?scheduleExecution\(key, currentJob\)/);
+  assert.match(bakePipeline, /rememberPasteCandidate\(currentJob, upload\)/);
+  assert.match(imageTools, /data-mpse-native-paste-id/);
+  assert.match(bakePipeline, /const target = resolveJobImage\(currentJob\)/);
+  assert.match(bakePipeline, /markChanged\(target, 'bake', false, metadata\.locatorIdentity\)/);
+  assert.doesNotMatch(bakePipeline, /execute\(image, key, generation\)/);
 });
 
 test('native selection reacquire remains scope-bound after editor DOM replacement', () => {

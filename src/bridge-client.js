@@ -1,15 +1,18 @@
 (() => {
   'use strict';
 
-  const VERSION = 'v0.10.0';
+  const VERSION = 'v0.11.0';
   const CONTENT_SOURCE = 'wechat-mp-source-layout:content';
   const PAGE_SOURCE = 'wechat-mp-source-layout:page';
   const CONTENT_CONFLICT_CODE = 'MPSE_CONTENT_CONFLICT';
   const MAX_CONTENT_CONFLICT_RETRIES = 2;
+  const BRIDGE_READY_TIMEOUT_MS = 5000;
 
   if (window.__MPSE_BRIDGE_CLIENT__
     && window.__MPSE_BRIDGE_CLIENT__.version === VERSION
-    && typeof window.__MPSE_BRIDGE_CLIENT__.mutateContent === 'function') return;
+    && typeof window.__MPSE_BRIDGE_CLIENT__.mutateContent === 'function'
+    && typeof window.__MPSE_BRIDGE_CLIENT__.pasteImage === 'function'
+    && typeof window.__MPSE_BRIDGE_CLIENT__.discardPastedImage === 'function') return;
 
   function getExtensionResourceUrl(path) {
     try {
@@ -42,8 +45,67 @@
     return true;
   }
 
-  function requestBridge(type, payload = {}, timeoutMs = 15000) {
-    if (!injectBridge()) return Promise.reject(new Error('扩展桥接脚本不可用，请刷新页面后重试'));
+  let bridgeReady = false;
+  let bridgeReadyPromise = null;
+
+  function waitForBridgeReady() {
+    if (bridgeReady) return Promise.resolve();
+    if (bridgeReadyPromise) return bridgeReadyPromise;
+
+    bridgeReadyPromise = new Promise((resolve, reject) => {
+      const probeId = `bridge-ready-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      let probeTimer = 0;
+      const timeout = window.setTimeout(() => {
+        cleanup();
+        bridgeReadyPromise = null;
+        reject(new Error('扩展桥接脚本未就绪，请刷新页面后重试'));
+      }, BRIDGE_READY_TIMEOUT_MS);
+
+      function cleanup() {
+        window.clearTimeout(timeout);
+        if (probeTimer) window.clearTimeout(probeTimer);
+        window.removeEventListener('message', onMessage);
+      }
+
+      function finish() {
+        if (bridgeReady) return;
+        bridgeReady = true;
+        cleanup();
+        resolve();
+      }
+
+      function onMessage(event) {
+        if (event.source !== window) return;
+        const message = event.data;
+        if (!message || message.source !== PAGE_SOURCE) return;
+        if (message.type === 'BRIDGE_READY' || (message.requestId === probeId && message.ok)) finish();
+      }
+
+      function probe() {
+        if (bridgeReady) return;
+        window.postMessage({
+          source: CONTENT_SOURCE,
+          requestId: probeId,
+          type: 'PING',
+          payload: {}
+        }, '*');
+        probeTimer = window.setTimeout(probe, 160);
+      }
+
+      window.addEventListener('message', onMessage);
+      if (!injectBridge()) {
+        cleanup();
+        bridgeReadyPromise = null;
+        reject(new Error('扩展桥接脚本不可用，请刷新页面后重试'));
+        return;
+      }
+      probe();
+    });
+
+    return bridgeReadyPromise;
+  }
+
+  function dispatchBridgeRequest(type, payload = {}, timeoutMs = 15000) {
     const requestId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
     return new Promise((resolve, reject) => {
@@ -78,6 +140,11 @@
       window.addEventListener('message', onMessage);
       window.postMessage({ source: CONTENT_SOURCE, requestId, type, payload }, '*');
     });
+  }
+
+  async function requestBridge(type, payload = {}, timeoutMs = 15000) {
+    await waitForBridgeReady();
+    return dispatchBridgeRequest(type, payload, timeoutMs);
   }
 
   let contentOperationQueue = Promise.resolve();
@@ -134,7 +201,8 @@
           const write = await requestBridge('SET_CONTENT', {
             content: mutation.content,
             expectedContent: currentContent,
-            expectedMode: read.mode || ''
+            expectedMode: read.mode || '',
+            expectedArticleKey: read.articleKey || ''
           }, 0);
           return { changed: true, content: mutation.content, read, write, value: mutation.value, conflictRetries };
         } catch (error) {
@@ -145,14 +213,44 @@
     });
   }
 
-  async function uploadImage(blob, filename = 'mpse-image.png') {
+  function pasteImage(blob, filename = 'mpse-image.png', locator = {}) {
     if (!(blob instanceof Blob) || !blob.size) return Promise.reject(new TypeError('Image blob is required'));
-    const bytes = await blob.arrayBuffer();
-    return requestBridge('UPLOAD_IMAGE', {
-      bytes,
-      mimeType: blob.type || 'image/png',
-      filename
-    }, 90000);
+    return enqueueContentOperation(async () => {
+      const bytes = await blob.arrayBuffer();
+      return requestBridge('PASTE_IMAGE', {
+        bytes,
+        mimeType: blob.type || 'image/png',
+        filename,
+        locator: {
+          editId: String(locator.editId || ''),
+          sourceUrl: String(locator.sourceUrl || ''),
+          index: Number.isInteger(locator.index) ? locator.index : -1
+        }
+      }, 0);
+    });
+  }
+
+  function discardPastedImage(candidate, locator = {}) {
+    const pasteId = String(candidate?.pasteId || '');
+    const cdnUrl = String(candidate?.cdnUrl || '');
+    const expectedArticleKey = String(candidate?.articleKey || '');
+    const placement = candidate?.placement === 'replace' ? 'replace' : 'after';
+    const originalAttributes = candidate?.originalAttributes && typeof candidate.originalAttributes === 'object'
+      ? { ...candidate.originalAttributes }
+      : {};
+    if (!pasteId && !cdnUrl) return Promise.resolve({ changed: false });
+    return enqueueContentOperation(() => requestBridge('DISCARD_PASTED_IMAGE', {
+      pasteId,
+      cdnUrl,
+      expectedArticleKey,
+      placement,
+      originalAttributes,
+      locator: {
+        editId: String(locator.editId || ''),
+        sourceUrl: String(locator.sourceUrl || ''),
+        index: Number.isInteger(locator.index) ? locator.index : -1
+      }
+    }, 0));
   }
 
   window.__MPSE_BRIDGE_CLIENT__ = Object.freeze({
@@ -162,7 +260,8 @@
     readContent,
     writeContent,
     mutateContent,
-    uploadImage,
+    pasteImage,
+    discardPastedImage,
     getResourceUrl: getExtensionResourceUrl
   });
 })();

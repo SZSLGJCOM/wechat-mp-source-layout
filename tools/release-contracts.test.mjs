@@ -45,7 +45,7 @@ test('release version and ASCII package folder stay consistent', () => {
   const releaseVersion = manifest.version_name || manifest.version;
 
   assert.equal(pkg.version, manifest.version);
-  assert.equal(releaseVersion, '0.10');
+  assert.equal(releaseVersion, '0.11');
   assert.ok(readme.includes(`当前版本：\`v${releaseVersion}\``));
   assert.ok(changelog.includes(`## v${releaseVersion} ·`));
   assert.ok(bridgeClient.includes(`const VERSION = 'v${manifest.version}';`));
@@ -217,6 +217,68 @@ test('real image snapshots own only the properties changed by the current operat
   assert.ok(Object.keys(afterRemovalEffect.cropRemovalImgStylePatch).length > 0);
 });
 
+test('style-only image snapshots never claim or delete native source attributes', () => {
+  const sourceNames = [
+    'src', 'data-src', 'data-backsrc', 'data-croporisrc',
+    'data-fileid', 'data-mediaid', 'data-w', 'data-ratio'
+  ];
+  const sourceImage = new FakeElement('img', {
+    src: 'https://mmbiz.qpic.cn/source.png',
+    'data-src': 'https://mmbiz.qpic.cn/source.png',
+    'data-fileid': 'native-file-id',
+    'data-w': '1080',
+    'data-ratio': '0.5625'
+  }, { opacity: '0.6' });
+  sourceImage.dataset = {};
+
+  const opacity = snapshotMerge.createSnapshot({
+    identity: { editId: 'img-source-owner' },
+    image: sourceImage,
+    reason: 'opacity',
+    imageAttributeNames: sourceNames
+  });
+  assert.equal(opacity.imgAttributeAction, 'none');
+  assert.deepEqual(opacity.imgAttributePatch, {});
+
+  const latestImage = new FakeElement('img', Object.fromEntries(
+    sourceNames
+      .filter((name) => sourceImage.getAttribute(name))
+      .map((name) => [name, sourceImage.getAttribute(name)])
+  ));
+  if (opacity.imgAttributeAction === 'sync') {
+    snapshotMerge.syncAttributes(latestImage, opacity.imgAttributePatch, (name) => sourceNames.includes(name));
+  }
+  assert.equal(latestImage.getAttribute('src'), 'https://mmbiz.qpic.cn/source.png');
+  assert.equal(latestImage.getAttribute('data-src'), 'https://mmbiz.qpic.cn/source.png');
+  assert.equal(latestImage.getAttribute('data-fileid'), 'native-file-id');
+  assert.equal(latestImage.getAttribute('data-w'), '1080');
+  assert.equal(latestImage.getAttribute('data-ratio'), '0.5625');
+
+  const baked = snapshotMerge.createSnapshot({
+    identity: { editId: 'img-source-owner' },
+    image: sourceImage,
+    previous: opacity,
+    reason: 'bake',
+    imageAttributeNames: sourceNames
+  });
+  assert.equal(baked.imgAttributeAction, 'sync');
+  assert.equal(baked.imgAttributePatch['data-fileid'], 'native-file-id');
+
+  const afterBakeStyle = snapshotMerge.createSnapshot({
+    identity: { editId: 'img-source-owner' },
+    image: sourceImage,
+    previous: baked,
+    reason: 'opacity',
+    imageAttributeNames: sourceNames
+  });
+  assert.equal(afterBakeStyle.imgAttributeAction, 'sync');
+  assert.deepEqual(afterBakeStyle.imgAttributePatch, baked.imgAttributePatch);
+
+  const imageTools = readText('src/image-tools.js');
+  assert.match(imageTools, /if \(snapshot\.imgAttributeAction === 'sync'\)/);
+  assert.doesNotMatch(imageTools, /if \(snapshot\.imgAttributePatch\)/);
+});
+
 test('every crop-layout effect synchronizes the host metadata it mutates', () => {
   const identity = { editId: 'img-crop-metadata' };
   const image = new FakeElement('img');
@@ -369,13 +431,17 @@ test('bridge request implementation is centralized in bridge-client', () => {
 test('editor writes are serialized and uncertain JSAPI writes never fall back concurrently', () => {
   const pageBridge = readText('src/page-bridge.js');
 
-  assert.match(pageBridge, /let setContentQueue = Promise\.resolve\(\)/);
+  assert.match(pageBridge, /let editorWriteQueue = Promise\.resolve\(\)/);
+  assert.match(pageBridge, /function enqueueEditorWrite\(operation, options = \{\}\)/);
+  assert.match(pageBridge, /let editorWriteRevision = 0/);
+  assert.match(pageBridge, /\+\+editorWriteRevision/);
   assert.match(pageBridge, /function enqueueSetContent\(/);
+  assert.match(pageBridge, /function enqueueNativeImagePaste\(payload\) \{[\s\S]*?enqueueEditorWrite/);
   assert.match(pageBridge, /const SET_CONFIRM_TIMEOUT_MS = 5000/);
   assert.match(pageBridge, /invokeMpEditor\('mp_editor_set_content', \{ content \}, SET_CONFIRM_TIMEOUT_MS, api\)/);
   assert.match(pageBridge, /writeStateUncertain = true;[\s\S]*?throw uncertainWrite\(\)/);
   assert.match(pageBridge, /async function waitForPendingSetContent\(\) \{[\s\S]*?if \(writeStateUncertain\) throw uncertainWrite\(\)/);
-  assert.match(pageBridge, /await enqueueSetContent\(html, expectedContent, expectedMode\)/);
+  assert.match(pageBridge, /await enqueueSetContent\(html, expectedContent, expectedMode, expectedArticleKey\)/);
 });
 
 test('all editor tools share one atomic content mutation queue', () => {

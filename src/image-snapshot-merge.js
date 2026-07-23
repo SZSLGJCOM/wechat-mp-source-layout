@@ -244,12 +244,17 @@
     }
 
     const isCropAttribute = (name) => name === cropAttribute || name.startsWith('data-mpse-');
+    const ownsImageAttributes = reason === 'bake' || reason === 'reset';
+    const imgAttributeAction = ownsImageAttributes
+      ? 'sync'
+      : (previous?.imgAttributeAction === 'sync' ? 'sync' : 'none');
     return {
       identity,
       cropAction,
-      imgAttributePatch: reason === 'bake' || reason === 'reset'
+      imgAttributeAction,
+      imgAttributePatch: ownsImageAttributes
         ? captureAttributes(image, (name) => imageAttributeNames.includes(name))
-        : (previous?.imgAttributePatch || {}),
+        : (imgAttributeAction === 'sync' ? { ...(previous?.imgAttributePatch || {}) } : {}),
       imgStylePatch,
       hostStylePatch,
       hostData: cropAction === 'ensure' && cropHostElement && ownsHostData
