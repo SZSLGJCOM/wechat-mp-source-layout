@@ -5,7 +5,11 @@
   const TOGGLE_BUTTON_ID = 'mpse-mobile-preview-button';
   const HTML_BUTTON_ID = 'mpse-toolbar-button';
   const PANEL_WIDTH = 250;
-  const PREVIEW_MAX_HEIGHT = 570;
+  const IPHONE_17_PRO_MAX_WIDTH_MM = 78;
+  const IPHONE_17_PRO_MAX_HEIGHT_MM = 163.4;
+  const PREVIEW_HEIGHT = PANEL_WIDTH
+    * IPHONE_17_PRO_MAX_HEIGHT_MM
+    / IPHONE_17_PRO_MAX_WIDTH_MM;
   const MIN_VIEWPORT_WIDTH = 1280;
   const VIEWPORT_MARGIN = 14;
   const RESERVED_RIGHT = 76;
@@ -94,7 +98,7 @@
 
   function clampPosition(left, top) {
     const height = state.root.getBoundingClientRect().height
-      || Math.min(PREVIEW_MAX_HEIGHT, Math.max(430, innerHeight - 180));
+      || PREVIEW_HEIGHT;
     const maxLeft = Math.max(VIEWPORT_MARGIN, innerWidth - PANEL_WIDTH - VIEWPORT_MARGIN);
     const maxTop = Math.max(VIEWPORT_MARGIN, innerHeight - height - VIEWPORT_MARGIN);
     return {

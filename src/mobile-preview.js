@@ -3,7 +3,7 @@
 
   const ROOT_ID = 'mpse-mobile-preview';
   const FRAME_ID = 'mpse-mobile-preview-frame';
-  const ARTICLE_WIDTH = 375;
+  const ARTICLE_WIDTH = 440;
   const RENDER_DELAY_MS = 120;
   const REBIND_INTERVAL_MS = 1400;
   const DANGEROUS_ELEMENTS = [
@@ -70,7 +70,8 @@
     .account{color:#576b95}
     main:empty::before{display:block;padding:72px 14px;color:#b2b2b2;font-size:15px;line-height:1.8;text-align:center;content:"开始编辑正文后，这里会实时显示手机阅读效果。"}
     main img,main svg,main video,main canvas{max-width:100%}
-    main img,main video{height:auto}
+    main [data-mpse-image-crop]{max-width:100%}
+    main [data-mpse-image-crop] img{max-width:none}
     main table{max-width:100%;border-collapse:collapse}
     main pre{max-width:100%;overflow:auto;white-space:pre-wrap}
     main a{color:#576b95;text-decoration:none}
@@ -269,12 +270,23 @@
     if (!content || !meta || !title || !author) return false;
 
     content.innerHTML = snapshot.html;
+    normalizeMediaAspectRatios(content);
     title.textContent = snapshot.title;
     author.textContent = snapshot.author;
     author.hidden = !snapshot.author;
     meta.hidden = !snapshot.title && !snapshot.author;
     state.root.dataset.previewMode = snapshot.mode;
     return true;
+  }
+
+  function normalizeMediaAspectRatios(content) {
+    for (const media of content.querySelectorAll('img, video')) {
+      if (media.closest('[data-mpse-image-crop]')) continue;
+      media.style.setProperty('max-width', '100%', 'important');
+      const objectFit = media.ownerDocument.defaultView.getComputedStyle(media).objectFit;
+      if (objectFit && objectFit !== 'fill') continue;
+      media.style.setProperty('height', 'auto', 'important');
+    }
   }
 
   function renderPreview() {

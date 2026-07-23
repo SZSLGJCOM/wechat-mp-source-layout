@@ -23,14 +23,14 @@ test('mobile preview is loaded after source mode and before editor effect tools'
   assert.ok(controls.split(/\r?\n/).length < 300);
 });
 
-test('preview uses an isolated script-free 375 pixel article document', () => {
-  assert.match(preview, /const ARTICLE_WIDTH = 375/);
+test('preview uses the isolated script-free iPhone 17 Pro Max layout width', () => {
+  assert.match(preview, /const ARTICLE_WIDTH = 440/);
   assert.match(preview, /sandbox="allow-same-origin"/);
   assert.doesNotMatch(preview, /allow-scripts/);
   assert.match(preview, /Content-Security-Policy/);
   assert.match(preview, /default-src 'none'/);
   assert.match(preview, /width=\$\{ARTICLE_WIDTH\}/);
-  assert.match(overlay, /#mpse-mobile-preview-frame[\s\S]*?width: 375px/);
+  assert.match(overlay, /#mpse-mobile-preview-frame[\s\S]*?width: 440px/);
 });
 
 test('preview sanitizer removes active content while preserving article markup', () => {
@@ -73,7 +73,9 @@ test('mobile preview switch follows HTML in the native toolbar', () => {
 
 test('smaller phone defaults to the right edge and preserves bounded drag position', () => {
   assert.match(controls, /const PANEL_WIDTH = 250/);
-  assert.match(controls, /const PREVIEW_MAX_HEIGHT = 570/);
+  assert.match(controls, /const IPHONE_17_PRO_MAX_WIDTH_MM = 78/);
+  assert.match(controls, /const IPHONE_17_PRO_MAX_HEIGHT_MM = 163\.4/);
+  assert.match(controls, /const PREVIEW_HEIGHT = PANEL_WIDTH[\s\S]*?IPHONE_17_PRO_MAX_HEIGHT_MM[\s\S]*?IPHONE_17_PRO_MAX_WIDTH_MM/);
   assert.match(controls, /left: innerWidth - RESERVED_RIGHT - PANEL_WIDTH/);
   assert.match(controls, /event\.target\.closest\?\.\('\.mpse-preview-viewport'\)/);
   assert.match(controls, /device\.setPointerCapture\(event\.pointerId\)/);
@@ -81,6 +83,17 @@ test('smaller phone defaults to the right edge and preserves bounded drag positi
   assert.match(controls, /sessionStorage\.setItem\('mpse-mobile-preview-position'/);
   assert.match(controls, /Math\.min\(Math\.max\(left, VIEWPORT_MARGIN\), maxLeft\)/);
   assert.match(overlay, /#mpse-mobile-preview \{[\s\S]*?width: 250px/);
-  assert.match(overlay, /height: min\(570px, calc\(100vh - 180px\)\)/);
+  assert.match(overlay, /aspect-ratio: 78 \/ 163\.4/);
   assert.doesNotMatch(preview, /mpse-preview-toolbar|mpse-preview-collapsed/);
+});
+
+test('preview media keeps its aspect ratio without breaking managed crops', () => {
+  const normalize = preview.match(/function normalizeMediaAspectRatios\(content\) \{[\s\S]*?\n  \}/);
+  assert.ok(normalize);
+  assert.match(normalize[0], /querySelectorAll\('img, video'\)/);
+  assert.match(normalize[0], /if \(media\.closest\('\[data-mpse-image-crop\]'\)\) continue/);
+  assert.match(normalize[0], /setProperty\('max-width', '100%', 'important'\)/);
+  assert.match(normalize[0], /if \(objectFit && objectFit !== 'fill'\) continue/);
+  assert.match(normalize[0], /setProperty\('height', 'auto', 'important'\)/);
+  assert.match(preview, /main \[data-mpse-image-crop\] img\{max-width:none\}/);
 });

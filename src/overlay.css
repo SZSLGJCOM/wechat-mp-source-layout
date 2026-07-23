@@ -22,17 +22,42 @@
 }
 
 #mpse-mobile-preview .mpse-preview-device {
+  position: relative;
   width: 250px;
-  height: min(570px, calc(100vh - 180px));
-  min-height: 430px;
-  padding: 6px;
-  border: 1px solid #08090a;
-  border-radius: 38px;
-  background: linear-gradient(145deg, #2d3033 0%, #090a0b 42%, #24272a 100%);
+  height: auto;
+  min-height: 0;
+  aspect-ratio: 78 / 163.4;
+  padding: 3px 5px;
+  border: 1px solid #16191c;
+  border-radius: 39px;
+  background: linear-gradient(145deg, #72777c 0%, #17191b 25%, #070809 58%, #3b3f43 100%);
   box-shadow:
     0 22px 46px rgba(26, 31, 36, 0.18),
     0 6px 16px rgba(26, 31, 36, 0.12),
     inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+}
+
+#mpse-mobile-preview .mpse-preview-device::before,
+#mpse-mobile-preview .mpse-preview-device::after {
+  position: absolute;
+  width: 3px;
+  border-radius: 3px;
+  background: linear-gradient(#555b60, #17191b);
+  content: "";
+}
+
+#mpse-mobile-preview .mpse-preview-device::before {
+  top: 76px;
+  left: -3px;
+  height: 48px;
+  box-shadow: 0 58px 0 #25282b;
+}
+
+#mpse-mobile-preview .mpse-preview-device::after {
+  top: 104px;
+  right: -3px;
+  height: 72px;
+  box-shadow: 0 226px 0 -1px #25282b;
 }
 
 #mpse-mobile-preview .mpse-preview-device,
@@ -56,9 +81,10 @@
   display: flex;
   flex-direction: column;
   position: relative;
+  z-index: 1;
   width: 100%;
   height: 100%;
-  border-radius: 32px;
+  border-radius: 35px;
   background: #fff;
   overflow: hidden;
 }
@@ -170,7 +196,7 @@
   position: absolute;
   top: 0;
   left: 0;
-  width: 375px;
+  width: 440px;
   min-height: 100%;
   border: 0;
   outline: 0;
