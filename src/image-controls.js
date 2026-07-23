@@ -43,9 +43,12 @@
       hideTools,
       positionTools,
       schedulePositionTools,
-      markChanged
+      markChanged,
+      prepareAdvancedPreview,
+      requestAdvancedBake
     } = dependencies;
 
+    const ADVANCED_EFFECTS = new Set(['shadow', 'glow', 'feather', 'stroke', 'color']);
     const APPEARANCE_EFFECTS = {
       opacity: {
         activeKey: 'mpseOpacityOn',
@@ -779,6 +782,10 @@
           restoreAppearanceBase(image, config, host);
         }
       }
+      if (image.dataset.mpseBaked === '1') {
+        finishAdvancedBake(image, true);
+        return;
+      }
       const hasAlphaEffect = image.dataset.mpseShadowOn === '1'
         || image.dataset.mpseGlowOn === '1'
         || image.dataset.mpseFeatherOn === '1'
@@ -794,6 +801,20 @@
         rebuildManagedFilter(image);
       }
       if (image.dataset.mpseStrokeOn === '1') clearStrokeOutline(image);
+    }
+
+    function finishAdvancedBake(image, baked) {
+      if (!image) return;
+      migrateLegacyBoxShadow(image);
+      migrateLegacyFeather(image);
+      if (image.dataset.mpseFilterBase !== undefined) {
+        restoreStyleBase(image, 'mpseFilterBase', FILTER_STYLE_PROPS);
+      } else if (baked) {
+        setStyle(image, 'filter', '');
+      }
+      if (image.dataset.mpseStrokeBase !== undefined) restoreStrokeOutline(image);
+      if (baked) image.dataset.mpseBaked = '1';
+      else delete image.dataset.mpseBaked;
     }
 
     function renderCropAppearance(image) {
@@ -970,11 +991,13 @@
 
     function panelTipForEffect(effect) {
       if (effect === 'size') return '选中框、拖动和缩放使用微信编辑器原生能力；这里仅设置精确宽度与对齐。';
-      if (effect === 'shadow') return '阴影跟随图片 Alpha 轮廓，不会把透明区域当作容器边框。';
-      if (effect === 'glow') return '发光沿图片 Alpha 轮廓生成，由两层柔光组成。';
-      if (effect === 'feather') return '羽化沿图片 Alpha 轮廓向内柔化，不按容器边框计算；拖到 0 可恢复原状。';
-      if (effect === 'stroke') return '描边跟随图片 alpha 透明轮廓，不再沿图片容器画矩形框。';
-      if (effect === 'opacity') return '滑块 100% 为完全不透明；“恢复”会还原应用效果前的透明度。';
+      const bakedHint = '调整停下后会自动烘焙成 PNG 并上传微信，正文不保存滤镜代码。';
+      if (effect === 'shadow') return `阴影跟随图片 Alpha 轮廓，不会把透明区域当作容器边框。${bakedHint}`;
+      if (effect === 'glow') return `发光沿图片 Alpha 轮廓生成，由两层柔光组成。${bakedHint}`;
+      if (effect === 'feather') return `羽化沿图片 Alpha 轮廓向内柔化，不按容器边框计算；拖到 0 可恢复原状。${bakedHint}`;
+      if (effect === 'stroke') return `描边跟随图片 Alpha 透明轮廓，不再沿图片容器画矩形框。${bakedHint}`;
+      if (effect === 'opacity') return `滑块 100% 为完全不透明；“恢复”会还原应用效果前的透明度。${bakedHint}`;
+      if (effect === 'color') return `色彩调整先实时预览。${bakedHint}`;
       return '只有实际调整后才会同步到正文 HTML';
     }
 
@@ -1083,6 +1106,9 @@
     function applyEffect(effect, values, changedField = '') {
       const image = state.image;
       if (!image || !image.isConnected) return;
+      if (ADVANCED_EFFECTS.has(effect) && typeof prepareAdvancedPreview === 'function') {
+        prepareAdvancedPreview(image);
+      }
       captureImageBase(image);
       const layoutHost = getLayoutHost(image);
 
@@ -1246,7 +1272,11 @@
       const changeReason = effect === 'size'
         ? (!changedField ? 'size' : (changedField === 'align' ? 'size-align' : 'size-width'))
         : effect;
-      markChanged(image, changeReason);
+      if (ADVANCED_EFFECTS.has(effect) && typeof requestAdvancedBake === 'function') {
+        requestAdvancedBake(image, changeReason);
+      } else {
+        markChanged(image, changeReason);
+      }
       setButtonStates();
       schedulePositionTools();
     }
@@ -1277,6 +1307,9 @@
       const image = state.image;
       if (!image || !image.isConnected || effect === 'size') return;
       if (!hasManagedEffect(image, effect)) return;
+      if (ADVANCED_EFFECTS.has(effect) && typeof prepareAdvancedPreview === 'function') {
+        prepareAdvancedPreview(image);
+      }
 
       if (effect === 'radius') {
         delete image.dataset.mpseRadiusOn;
@@ -1357,7 +1390,11 @@
       }
 
       if (commit) {
-        markChanged(image, `clear-${effect}`);
+        if (ADVANCED_EFFECTS.has(effect) && typeof requestAdvancedBake === 'function') {
+          requestAdvancedBake(image, `clear-${effect}`);
+        } else {
+          markChanged(image, `clear-${effect}`);
+        }
         setButtonStates();
         schedulePositionTools();
       }
@@ -1399,7 +1436,8 @@
       applyEffect,
       clearEffect,
       hasManagedEffect,
-      getCaptionNode
+      getCaptionNode,
+      finishAdvancedBake
     });
   }
 

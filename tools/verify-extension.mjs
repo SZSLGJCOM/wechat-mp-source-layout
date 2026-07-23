@@ -61,6 +61,7 @@ function checkManifest() {
 
   assert(js[0] === 'src/bridge-client.js', 'src/bridge-client.js must be the first content script');
   for (const file of [...js, ...css]) assertFile(file);
+  if (manifest.background?.service_worker) assertFile(manifest.background.service_worker);
 
   const accessibleResources = manifest.web_accessible_resources
     ?.flatMap((entry) => entry.resources || []) || [];
@@ -147,6 +148,9 @@ function checkProductWording() {
     'src/image-controls.js',
     'src/image-snapshot-merge.js',
     'src/image-effect-records.js',
+    'src/image-bake.js',
+    'src/image-bake-pipeline.js',
+    'src/image-background.js',
     'src/image-tools.js',
     'src/svg-tools.js',
     'src/svg-block-tools.js',
@@ -167,6 +171,9 @@ function checkCommentHygiene() {
     'src/image-controls.js',
     'src/image-snapshot-merge.js',
     'src/image-effect-records.js',
+    'src/image-bake.js',
+    'src/image-bake-pipeline.js',
+    'src/image-background.js',
     'src/image-tools.js',
     'src/page-bridge.js',
     'src/svg-tools.js',

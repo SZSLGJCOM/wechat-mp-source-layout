@@ -58,7 +58,7 @@ test('image identities stay stable while article order and sources change', () =
   assert.match(imageTools, /function ensureImageEditId\(image\)/);
   assert.match(imageTools, /getAttr\(image, 'data-mpse-image-id'\)/);
   assert.match(imageTools, /image\.setAttribute\('data-mpse-image-id', value\)/);
-  assert.match(imageTools, /ensureImageEditId\(image\);[\s\S]*?const snapshot = snapshotCurrentImage\(image, reason\)/);
+  assert.match(imageTools, /ensureImageEditId\(image\);[\s\S]*?const snapshot = snapshotCurrentImage\(image, reason, identityOverride\)/);
   assert.match(imageTools, /editId: getAttr\(image, 'data-mpse-image-id'\)/);
   assert.match(imageTools, /const position = identity\.editId \? 'stable'/);
   assert.match(imageTools, /const primary = identity\.editId \|\| identity\.fileId/);
@@ -199,7 +199,7 @@ test('transparent images remain selectable and opacity starts at 100%', () => {
 
 test('effect records are restored after the editor replaces a selected image node', () => {
   const imageTools = readText('src/image-tools.js');
-  assert.match(imageTools, /effectRecords\.remember\(snapshot\.identity, snapshot\.imgData, snapshot\.cropCreateHostData\)/);
+  assert.match(imageTools, /effectRecords\.remember\(imageSignature\(image\), snapshot\.imgData, snapshot\.cropCreateHostData\)/);
   assert.match(imageTools, /function restoreEffectRecord\(image\) \{[\s\S]*?effectRecords\.find\(identity\)[\s\S]*?copyManagedData\(\{ imgData: record\.data \}, image\)/);
   assert.match(imageTools, /snapshotMerge\.syncAttributes\([\s\S]*?record\.hostData/);
   assert.match(imageTools, /state\.identity = restoreEffectRecord\(best\)/);

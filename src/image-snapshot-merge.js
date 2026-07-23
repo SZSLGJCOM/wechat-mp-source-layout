@@ -20,7 +20,8 @@
     shadow: ['box-shadow'],
     glow: ['box-shadow'],
     feather: featherMask,
-    stroke: ['outline', 'outline-offset']
+    stroke: ['outline', 'outline-offset'],
+    bake: ['box-shadow', ...featherMask, 'outline', 'outline-offset']
   };
   const alphaFilterEffects = new Set(Object.keys(alphaEffectCleanup));
   const appearance = {
@@ -33,6 +34,7 @@
     stroke: ['filter', 'outline', 'outline-offset'],
     opacity: ['opacity'],
     color: ['filter'],
+    bake: ['filter', 'box-shadow', ...featherMask, 'outline', 'outline-offset'],
     rotate: ['transform', 'transform-origin'],
     frame,
     circle: [...frame, 'width', 'height', 'max-width', 'object-fit', 'display', 'margin-left', 'margin-right']
@@ -141,7 +143,7 @@
   function createSnapshot(options) {
     const {
       identity, image, cropHost: cropHostElement, carrier: carrierElement, block: blockElement, caption, previous, reason = '',
-      managedDataKeys = [], cropAttribute = 'data-mpse-image-crop'
+      managedDataKeys = [], imageAttributeNames = [], cropAttribute = 'data-mpse-image-crop'
     } = options || {};
     if (!identity || !image) return null;
     const effect = effectFromReason(reason);
@@ -245,6 +247,9 @@
     return {
       identity,
       cropAction,
+      imgAttributePatch: reason === 'bake' || reason === 'reset'
+        ? captureAttributes(image, (name) => imageAttributeNames.includes(name))
+        : (previous?.imgAttributePatch || {}),
       imgStylePatch,
       hostStylePatch,
       hostData: cropAction === 'ensure' && cropHostElement && ownsHostData

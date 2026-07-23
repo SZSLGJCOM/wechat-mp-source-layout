@@ -22,7 +22,7 @@ test('repository exposes one-command extension verification', () => {
   assert.equal(pkg.scripts?.check, 'node tools/verify-extension.mjs');
   assert.equal(
     pkg.scripts?.test,
-    'node --test tools/release-contracts.test.mjs tools/source-mode-contracts.test.mjs tools/mobile-preview-contracts.test.mjs tools/image-interaction-contracts.test.mjs tools/image-effects.test.mjs tools/image-geometry.test.mjs tools/image-state-contracts.test.mjs tools/bridge-client.test.mjs tools/page-bridge.test.mjs'
+    'node --test tools/release-contracts.test.mjs tools/source-mode-contracts.test.mjs tools/mobile-preview-contracts.test.mjs tools/image-interaction-contracts.test.mjs tools/image-effects.test.mjs tools/image-bake.test.mjs tools/image-geometry.test.mjs tools/image-state-contracts.test.mjs tools/bridge-client.test.mjs tools/page-bridge.test.mjs'
   );
   assert.equal(pkg.scripts?.package, 'node tools/package-extension.mjs');
 
@@ -80,6 +80,8 @@ test('content scripts load the shared bridge client before dependent modules', (
     'src/image-controls.js',
     'src/image-snapshot-merge.js',
     'src/image-effect-records.js',
+    'src/image-bake.js',
+    'src/image-bake-pipeline.js',
     'src/image-tools.js',
     'src/svg-tools.js',
     'src/svg-block-tools.js'

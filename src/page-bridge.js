@@ -10,6 +10,7 @@
   const SET_CONFIRM_TIMEOUT_MS = 5000;
   const EDITOR_INPUT_IDLE_MS = 160;
   const EDITOR_INPUT_WAIT_TIMEOUT_MS = 2500;
+  const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 
   if (window.__MP_SOURCE_EDITOR_BRIDGE_INSTALLED__) {
     return;
@@ -439,6 +440,100 @@
     if (writeStateUncertain) throw uncertainWrite();
   }
 
+  let uploadContextCache = null;
+
+  function matchPageValue(source, names) {
+    for (const name of names) {
+      const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const match = String(source || '').match(new RegExp(`(?:["']?${escaped}["']?)\\s*[:=]\\s*["']([^"']+)["']`, 'i'));
+      if (match && match[1]) return match[1];
+    }
+    return '';
+  }
+
+  async function getUploadContext() {
+    const pageUrl = new URL(location.href);
+    const token = pageUrl.searchParams.get('token') || '';
+    if (!/^\d+$/.test(token)) throw new Error('当前编辑页面缺少有效登录令牌');
+    if (uploadContextCache?.token === token && uploadContextCache.expiresAt > Date.now()) {
+      return uploadContextCache;
+    }
+
+    const response = await fetch(`/cgi-bin/masssendpage?t=mass/send&token=${encodeURIComponent(token)}&lang=zh_CN`, {
+      method: 'GET',
+      credentials: 'same-origin',
+      cache: 'no-store'
+    });
+    if (!response.ok) throw new Error(`无法读取微信素材上传参数（HTTP ${response.status}）`);
+    const source = await response.text();
+    const ticket = matchPageValue(source, ['ticket', 'upload_ticket']);
+    const ticketId = matchPageValue(source, ['user_name', 'ticket_id']);
+    if (!ticket || !ticketId) throw new Error('微信素材上传参数已失效，请刷新编辑页面后重试');
+    uploadContextCache = {
+      token,
+      ticket,
+      ticketId,
+      expiresAt: Date.now() + 5 * 60 * 1000
+    };
+    return uploadContextCache;
+  }
+
+  function validatedImagePayload(payload) {
+    const bytes = payload?.bytes;
+    const mimeType = String(payload?.mimeType || '');
+    if (!(bytes instanceof ArrayBuffer)) throw new Error('烘焙图片数据无效');
+    if (!['image/png', 'image/jpeg'].includes(mimeType)) throw new Error('只允许上传 PNG 或 JPEG 图片');
+    if (!bytes.byteLength || bytes.byteLength > MAX_UPLOAD_BYTES) throw new Error('烘焙图片超过微信 10MB 上传限制');
+    const extension = mimeType === 'image/jpeg' ? 'jpg' : 'png';
+    const requestedName = String(payload?.filename || '').replace(/[^a-zA-Z0-9._-]/g, '').slice(0, 80);
+    const filename = requestedName && requestedName.toLowerCase().endsWith(`.${extension}`)
+      ? requestedName
+      : `mpse-image-${Date.now()}.${extension}`;
+    return { blob: new Blob([bytes], { type: mimeType }), mimeType, filename };
+  }
+
+  async function uploadImage(payload) {
+    const image = validatedImagePayload(payload);
+    const context = await getUploadContext();
+    const query = new URLSearchParams({
+      action: 'upload_material',
+      f: 'json',
+      scene: '1',
+      writetype: 'doublewrite',
+      groupid: '1',
+      ticket_id: context.ticketId,
+      ticket: context.ticket,
+      svr_time: String(Math.floor(Date.now() / 1000)),
+      seq: '1',
+      token: context.token,
+      lang: 'zh_CN'
+    });
+    const form = new FormData();
+    form.append('file', image.blob, image.filename);
+    const response = await fetch(`/cgi-bin/filetransfer?${query}`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      body: form
+    });
+    if (!response.ok) throw new Error(`微信图片上传失败（HTTP ${response.status}）`);
+    const body = await response.json();
+    const ret = Number(body?.base_resp?.ret ?? body?.errcode ?? -1);
+    if (ret !== 0) {
+      const error = new Error(body?.base_resp?.err_msg || body?.errmsg || `微信图片上传失败（${ret}）`);
+      error.code = `MPSE_WECHAT_UPLOAD_${ret}`;
+      throw error;
+    }
+    const cdnUrl = String(body?.cdn_url || body?.url || '').trim();
+    if (!/^https?:\/\/(?:mmbiz\.qpic\.cn|mmbiz\.qlogo\.cn|m\.qpic\.cn)\//i.test(cdnUrl)) {
+      throw new Error('微信上传成功，但没有返回可用于正文的 CDN 地址');
+    }
+    return {
+      cdnUrl,
+      fileId: String(body?.content || body?.fileid || ''),
+      mimeType: image.mimeType
+    };
+  }
+
   function postResponse(requestId, type, ok, data, error) {
     window.postMessage({
       source: PAGE_SOURCE,
@@ -481,6 +576,12 @@
         const expectedMode = payload && typeof payload.expectedMode === 'string' ? payload.expectedMode : '';
         const result = await enqueueSetContent(html, expectedContent, expectedMode);
         postResponse(requestId, 'SET_CONTENT_RESULT', true, result);
+        return;
+      }
+
+      if (type === 'UPLOAD_IMAGE') {
+        const result = await uploadImage(payload || {});
+        postResponse(requestId, 'UPLOAD_IMAGE_RESULT', true, result);
         return;
       }
 

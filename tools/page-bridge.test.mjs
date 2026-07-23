@@ -81,7 +81,13 @@ function createPageHarness(invoke, options = {}) {
     window,
     document,
     Node: { ELEMENT_NODE: 1 },
-    location: { href: 'https://mp.weixin.qq.com/cgi-bin/appmsg' },
+    location: { href: options.href || 'https://mp.weixin.qq.com/cgi-bin/appmsg' },
+    fetch: options.fetch || globalThis.fetch,
+    URL,
+    URLSearchParams,
+    Blob,
+    FormData,
+    ArrayBuffer,
     console,
     setTimeout,
     clearTimeout
@@ -403,4 +409,127 @@ test('a confirmed SET failure releases the queue for the next write', async () =
   assert.equal(first.ok, false);
   assert.equal(second.ok, true);
   assert.equal(setCalls, 2);
+});
+
+test('image upload uses the logged-in WeChat material endpoint and returns only its CDN asset', async () => {
+  const requests = [];
+  const harness = createPageHarness(() => {
+    throw new Error('editor JSAPI must not be used for uploads');
+  }, {
+    href: 'https://mp.weixin.qq.com/cgi-bin/appmsg?token=123456&lang=zh_CN',
+    fetch: async (url, init) => {
+      requests.push({ url: String(url), init });
+      if (requests.length === 1) {
+        return {
+          ok: true,
+          status: 200,
+          async text() {
+            return 'ticket:"upload-ticket", user_name:"gh_material_owner"';
+          }
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {
+            base_resp: { ret: 0 },
+            content: '987654',
+            cdn_url: 'https://mmbiz.qpic.cn/mmbiz_png/baked.png'
+          };
+        }
+      };
+    }
+  });
+
+  const bytes = new Uint8Array([137, 80, 78, 71]).buffer;
+  const response = await harness.request('UPLOAD_IMAGE', {
+    bytes,
+    mimeType: 'image/png',
+    filename: 'article-effect.png'
+  });
+
+  assert.equal(response.ok, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(response.data)), {
+    cdnUrl: 'https://mmbiz.qpic.cn/mmbiz_png/baked.png',
+    fileId: '987654',
+    mimeType: 'image/png'
+  });
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0].url, '/cgi-bin/masssendpage?t=mass/send&token=123456&lang=zh_CN');
+  assert.match(requests[1].url, /^\/cgi-bin\/filetransfer\?/);
+  const query = new URL(requests[1].url, 'https://mp.weixin.qq.com').searchParams;
+  assert.equal(query.get('action'), 'upload_material');
+  assert.equal(query.get('writetype'), 'doublewrite');
+  assert.equal(query.get('ticket_id'), 'gh_material_owner');
+  assert.equal(query.get('ticket'), 'upload-ticket');
+  assert.equal(query.get('token'), '123456');
+  assert.equal(requests[1].init.method, 'POST');
+  assert.equal(requests[1].init.credentials, 'same-origin');
+  const file = requests[1].init.body.get('file');
+  assert.equal(file.name, 'article-effect.png');
+  assert.equal(file.type, 'image/png');
+  assert.equal(file.size, bytes.byteLength);
+});
+
+test('image upload rejects invalid payloads before touching the network', async () => {
+  let fetchCalls = 0;
+  const harness = createPageHarness(() => {}, {
+    href: 'https://mp.weixin.qq.com/cgi-bin/appmsg?token=123456',
+    fetch: async () => {
+      fetchCalls += 1;
+      throw new Error('network must not be reached');
+    }
+  });
+
+  const invalidMime = await harness.request('UPLOAD_IMAGE', {
+    bytes: new Uint8Array([1]).buffer,
+    mimeType: 'image/webp'
+  });
+  assert.equal(invalidMime.ok, false);
+  assert.match(invalidMime.error.message, /PNG 或 JPEG/);
+
+  const oversized = await harness.request('UPLOAD_IMAGE', {
+    bytes: new ArrayBuffer((10 * 1024 * 1024) + 1),
+    mimeType: 'image/png'
+  });
+  assert.equal(oversized.ok, false);
+  assert.match(oversized.error.message, /10MB/);
+  assert.equal(fetchCalls, 0);
+});
+
+test('image upload never accepts a non-WeChat URL as a successful article asset', async () => {
+  let fetchCalls = 0;
+  const harness = createPageHarness(() => {}, {
+    href: 'https://mp.weixin.qq.com/cgi-bin/appmsg?token=123456',
+    fetch: async () => {
+      fetchCalls += 1;
+      if (fetchCalls === 1) {
+        return {
+          ok: true,
+          status: 200,
+          async text() {
+            return 'ticket:"upload-ticket", user_name:"gh_material_owner"';
+          }
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {
+            base_resp: { ret: 0 },
+            cdn_url: 'https://untrusted.example/baked.png'
+          };
+        }
+      };
+    }
+  });
+
+  const response = await harness.request('UPLOAD_IMAGE', {
+    bytes: new Uint8Array([1]).buffer,
+    mimeType: 'image/png'
+  });
+  assert.equal(response.ok, false);
+  assert.match(response.error.message, /CDN 地址/);
 });

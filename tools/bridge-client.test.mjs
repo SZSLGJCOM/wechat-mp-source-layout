@@ -53,7 +53,9 @@ function createBridgeHarness(handleRequest) {
     queueMicrotask,
     setTimeout,
     clearTimeout,
-    URL
+    URL,
+    Blob,
+    ArrayBuffer
   });
   vm.runInContext(source, context, { filename: 'src/bridge-client.js' });
 
@@ -191,4 +193,39 @@ test('content conflicts stop after two retries without an unconditional write', 
   await assert.rejects(client.mutateContent((read) => `${read.content}!`), /content changed again/);
   assert.equal(getCount, 3);
   assert.equal(setCount, 3);
+});
+
+test('image uploads transfer binary data with a bounded long-running timeout', async () => {
+  let captured = null;
+  const { client, scheduledTimeouts } = createBridgeHarness((message, respond) => {
+    captured = message;
+    respond({
+      data: {
+        cdnUrl: 'https://mmbiz.qpic.cn/mmbiz_png/baked.png',
+        fileId: '123',
+        mimeType: 'image/png'
+      }
+    });
+  });
+
+  const blob = new Blob([new Uint8Array([137, 80, 78, 71])], { type: 'image/png' });
+  const result = await client.uploadImage(blob, 'baked.png');
+
+  assert.equal(captured.type, 'UPLOAD_IMAGE');
+  assert.ok(captured.payload.bytes instanceof ArrayBuffer);
+  assert.equal(captured.payload.bytes.byteLength, blob.size);
+  assert.equal(captured.payload.mimeType, 'image/png');
+  assert.equal(captured.payload.filename, 'baked.png');
+  assert.ok(scheduledTimeouts.includes(90000));
+  assert.equal(result.cdnUrl, 'https://mmbiz.qpic.cn/mmbiz_png/baked.png');
+});
+
+test('image uploads reject empty input before posting to the page bridge', async () => {
+  let requestCalls = 0;
+  const { client } = createBridgeHarness(() => {
+    requestCalls += 1;
+  });
+
+  await assert.rejects(client.uploadImage(new Blob([], { type: 'image/png' })), /Image blob is required/);
+  assert.equal(requestCalls, 0);
 });

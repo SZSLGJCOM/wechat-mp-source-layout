@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const STORAGE_KEY = 'mpse:image-effect-records:v1';
+  const STORAGE_KEY = 'mpse:image-effect-records:v2';
   const DEFAULT_LIMIT = 120;
 
   function compactHash(value) {
@@ -35,11 +35,78 @@
       .filter(([key, value]) => typeof key === 'string' && typeof value === 'string'));
   }
 
+  function encodePrivate(value) {
+    const text = String(value || '');
+    if (!text) return '';
+    return btoa(encodeURIComponent(text));
+  }
+
+  function decodePrivate(value) {
+    if (!value) return '';
+    try {
+      return decodeURIComponent(atob(String(value)));
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function cleanStoredAsset(asset) {
+    if (!asset || typeof asset !== 'object' || Array.isArray(asset)) return {};
+    return {
+      sourceUrl: typeof asset.sourceUrl === 'string' ? asset.sourceUrl : '',
+      bakedUrl: typeof asset.bakedUrl === 'string' ? asset.bakedUrl : '',
+      sourceAttributes: cleanData(asset.sourceAttributes),
+      width: Math.max(0, Math.round(Number(asset.width) || 0)),
+      height: Math.max(0, Math.round(Number(asset.height) || 0)),
+      recipeKey: typeof asset.recipeKey === 'string' ? asset.recipeKey : ''
+    };
+  }
+
+  function serializeSourceAttributes(attributes) {
+    const cleaned = cleanData(attributes);
+    return Object.fromEntries(Object.entries(cleaned).map(([name, value]) => [
+      name,
+      ['src', 'data-src', 'data-backsrc', 'data-croporisrc'].includes(name) ? encodePrivate(value) : value
+    ]));
+  }
+
+  function deserializeSourceAttributes(attributes) {
+    const cleaned = cleanData(attributes);
+    return Object.fromEntries(Object.entries(cleaned).map(([name, value]) => [
+      name,
+      ['src', 'data-src', 'data-backsrc', 'data-croporisrc'].includes(name) ? decodePrivate(value) : value
+    ]));
+  }
+
+  function serializeAsset(asset) {
+    const cleaned = cleanStoredAsset(asset);
+    return {
+      ...cleaned,
+      sourceUrl: encodePrivate(cleaned.sourceUrl),
+      bakedUrl: encodePrivate(cleaned.bakedUrl),
+      sourceAttributes: serializeSourceAttributes(cleaned.sourceAttributes)
+    };
+  }
+
+  function deserializeAsset(asset) {
+    const cleaned = cleanStoredAsset(asset);
+    return {
+      ...cleaned,
+      sourceUrl: decodePrivate(cleaned.sourceUrl),
+      bakedUrl: decodePrivate(cleaned.bakedUrl),
+      sourceAttributes: deserializeSourceAttributes(cleaned.sourceAttributes)
+    };
+  }
+
+  function hasAsset(asset) {
+    return Boolean(asset && (asset.sourceUrl || asset.bakedUrl || Object.keys(asset.sourceAttributes || {}).length));
+  }
+
   function create(options = {}) {
     let storage = options.storage || null;
     if (!storage) {
       try {
-        storage = globalThis.sessionStorage;
+        storage = globalThis.localStorage;
       } catch (_) {
         storage = null;
       }
@@ -57,6 +124,7 @@
             editId: typeof record.editId === 'string' ? record.editId : '',
             data: cleanData(record.data),
             hostData: cleanData(record.hostData),
+            asset: cleanStoredAsset(record.asset),
             updatedAt: Number(record.updatedAt) || 0
           }))
           .slice(0, limit);
@@ -69,33 +137,47 @@
       try {
         if (storage && storage.setItem) storage.setItem(STORAGE_KEY, JSON.stringify(records.slice(0, limit)));
       } catch (_) {
-        // In-memory records still protect the active editing session when storage is unavailable.
+        // Memory records keep the current editing session usable when durable storage is unavailable.
       }
     }
 
-    function find(identity) {
+    function matchingRecords(identity) {
       const aliases = new Set(identityAliases(identity));
-      const record = records.find((candidate) => candidate.aliases.some((alias) => aliases.has(alias)));
+      return records.filter((record) => record.aliases.some((alias) => aliases.has(alias)));
+    }
+
+    function find(identity) {
+      const record = matchingRecords(identity)[0];
       return record ? {
         editId: record.editId,
         data: { ...record.data },
-        hostData: { ...record.hostData }
+        hostData: { ...record.hostData },
+        asset: deserializeAsset(record.asset)
       } : null;
     }
 
-    function remember(identity, data, hostData = {}) {
+    function upsert(identity, data, hostData, asset) {
       const aliases = identityAliases(identity);
       if (!aliases.length) return false;
-      const aliasSet = new Set(aliases);
-      records = records.filter((record) => !record.aliases.some((alias) => aliasSet.has(alias)));
+      const matches = matchingRecords(identity);
+      const mergedAliases = Array.from(new Set([
+        ...aliases,
+        ...matches.flatMap((record) => record.aliases)
+      ]));
       const cleaned = cleanData(data);
       const cleanedHostData = cleanData(hostData);
-      if (Object.keys(cleaned).length || Object.keys(cleanedHostData).length) {
+      const storedAsset = asset === undefined
+        ? (matches[0]?.asset || {})
+        : serializeAsset(asset);
+      const matchSet = new Set(matches);
+      records = records.filter((record) => !matchSet.has(record));
+      if (Object.keys(cleaned).length || Object.keys(cleanedHostData).length || hasAsset(storedAsset)) {
         records.unshift({
-          aliases,
-          editId: typeof identity.editId === 'string' ? identity.editId : '',
+          aliases: mergedAliases,
+          editId: typeof identity.editId === 'string' ? identity.editId : (matches[0]?.editId || ''),
           data: cleaned,
           hostData: cleanedHostData,
+          asset: storedAsset,
           updatedAt: Date.now()
         });
       }
@@ -104,7 +186,24 @@
       return true;
     }
 
-    return Object.freeze({ find, remember });
+    function remember(identity, data, hostData = {}) {
+      return upsert(identity, data, hostData, undefined);
+    }
+
+    function rememberAsset(identity, asset) {
+      const current = find(identity);
+      return upsert(identity, current?.data || {}, current?.hostData || {}, asset);
+    }
+
+    function forget(identity) {
+      const matches = new Set(matchingRecords(identity));
+      if (!matches.size) return false;
+      records = records.filter((record) => !matches.has(record));
+      persist();
+      return true;
+    }
+
+    return Object.freeze({ find, remember, rememberAsset, forget });
   }
 
   globalThis.__MPSE_IMAGE_EFFECT_RECORDS__ = Object.freeze({ create, identityAliases });

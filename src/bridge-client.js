@@ -145,6 +145,16 @@
     });
   }
 
+  async function uploadImage(blob, filename = 'mpse-image.png') {
+    if (!(blob instanceof Blob) || !blob.size) return Promise.reject(new TypeError('Image blob is required'));
+    const bytes = await blob.arrayBuffer();
+    return requestBridge('UPLOAD_IMAGE', {
+      bytes,
+      mimeType: blob.type || 'image/png',
+      filename
+    }, 90000);
+  }
+
   window.__MPSE_BRIDGE_CLIENT__ = Object.freeze({
     version: VERSION,
     inject: injectBridge,
@@ -152,6 +162,7 @@
     readContent,
     writeContent,
     mutateContent,
+    uploadImage,
     getResourceUrl: getExtensionResourceUrl
   });
 })();

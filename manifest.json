@@ -7,8 +7,15 @@
   "version_name": "0.10",
   "permissions": [],
   "host_permissions": [
-    "https://mp.weixin.qq.com/*"
+    "https://mp.weixin.qq.com/*",
+    "https://mmbiz.qpic.cn/*",
+    "https://mmbiz.qlogo.cn/*",
+    "https://m.qpic.cn/*",
+    "https://mmsns.qpic.cn/*"
   ],
+  "background": {
+    "service_worker": "src/image-background.js"
+  },
   "content_scripts": [
     {
       "matches": [
@@ -23,6 +30,8 @@
         "src/image-controls.js",
         "src/image-snapshot-merge.js",
         "src/image-effect-records.js",
+        "src/image-bake.js",
+        "src/image-bake-pipeline.js",
         "src/image-tools.js",
         "src/svg-tools.js",
         "src/svg-block-tools.js"

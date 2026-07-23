@@ -13,6 +13,8 @@
   const imageGeometry = window.__MPSE_IMAGE_GEOMETRY__;
   const snapshotMerge = window.__MPSE_IMAGE_SNAPSHOT_MERGE__;
   const effectRecordFactory = window.__MPSE_IMAGE_EFFECT_RECORDS__;
+  const bakeEngine = window.__MPSE_IMAGE_BAKE__;
+  const bakePipelineFactory = window.__MPSE_IMAGE_BAKE_PIPELINE__;
   const injectBridge = bridgeClient && typeof bridgeClient.inject === 'function'
     ? bridgeClient.inject
     : () => false;
@@ -26,8 +28,10 @@
   if (!imageGeometry) throw new Error('图片几何模块未加载，请刷新页面后重试');
   if (!snapshotMerge) throw new Error('图片写回合并模块未加载，请刷新页面后重试');
   if (!effectRecordFactory) throw new Error('图片效果记录模块未加载，请刷新页面后重试');
+  if (!bakeEngine || !bakePipelineFactory) throw new Error('图片像素烘焙模块未加载，请刷新页面后重试');
 
   const effectRecords = effectRecordFactory.create();
+  const IMAGE_SOURCE_ATTRIBUTES = bakePipelineFactory.SOURCE_ATTRIBUTES;
 
   const MANAGED_DATA_KEYS = [
     'mpseGlowOn', 'mpseGlowBlur', 'mpseGlowSpread', 'mpseGlowOpacity', 'mpseGlowColor',
@@ -39,7 +43,7 @@
     'mpseFrameBorderWidth', 'mpseFramePadding', 'mpseFrameRadius', 'mpseFrameBorderColor', 'mpseFrameBackgroundColor',
     'mpseFeatherOn', 'mpseFeatherAmount', 'mpseFeatherBase',
     'mpseStrokeOn', 'mpseStrokeWidth', 'mpseStrokeColor', 'mpseStrokeOpacity', 'mpseStrokeBase',
-    'mpseOpacityOn', 'mpseOpacityValue', 'mpseOpacityBase'
+    'mpseOpacityOn', 'mpseOpacityValue', 'mpseOpacityBase', 'mpseBaked'
   ];
   const FRAME_STYLE_PROPS = [
     'border', 'border-top-width', 'border-right-width', 'border-bottom-width', 'border-left-width',
@@ -225,6 +229,15 @@
       .trim();
   }
 
+  function stableArticlePageKey() {
+    const search = new URLSearchParams(location.search);
+    const identity = ['appmsgid', 'draftid', 'media_id', 'itemidx', 'type']
+      .filter((name) => search.has(name))
+      .map((name) => `${name}=${search.get(name)}`)
+      .join('&');
+    return `${location.pathname}${identity ? `?${identity}` : ''}`;
+  }
+
   function getAttr(image, name) {
     return image && image.getAttribute ? (image.getAttribute(name) || '') : '';
   }
@@ -261,7 +274,7 @@
 
   function imageSignature(image) {
     return {
-      pageKey: `${location.pathname}${location.search}`,
+      pageKey: stableArticlePageKey(),
       index: imageIndexInArticle(image),
       scopeKey: editorScopeKey(image),
       editId: getAttr(image, 'data-mpse-image-id'),
@@ -1068,6 +1081,7 @@
   if (!controlsFactory || typeof controlsFactory.create !== 'function') {
     throw new Error('图片参数控制模块未加载，请刷新页面后重试');
   }
+  let imageBakePipeline = null;
   const imageControls = controlsFactory.create({
     MENU_ID,
     PANEL_ID,
@@ -1109,7 +1123,9 @@
     hideTools,
     positionTools,
     schedulePositionTools,
-    markChanged
+    markChanged,
+    prepareAdvancedPreview: (image) => imageBakePipeline?.preparePreview(image),
+    requestAdvancedBake: (image) => imageBakePipeline?.requestBake(image)
   });
   const {
     restoreImageBase,
@@ -1126,12 +1142,31 @@
     applyEffect,
     clearEffect,
     hasManagedEffect,
-    getCaptionNode
+    getCaptionNode,
+    finishAdvancedBake
   } = imageControls;
+
+  imageBakePipeline = bakePipelineFactory.create({
+    state,
+    records: effectRecords,
+    bridgeClient,
+    bakeEngine,
+    getAttr,
+    stableUrl,
+    imageSignature,
+    ensureImageEditId,
+    managedDataFromImage,
+    getCropContainer,
+    markChanged,
+    setBadgeText,
+    finishAdvancedBake,
+    schedulePositionTools
+  });
 
   function resetImage() {
     let image = state.image;
     if (!image || !image.isConnected) return;
+    imageBakePipeline.restoreOriginal(image, false);
     const hasExactBase = image.dataset.mpseImageBase !== undefined;
     if (!hasExactBase) {
       for (const effect of ['radius', 'spacing', 'shadow', 'glow', 'feather', 'stroke', 'opacity', 'color', 'rotate', 'frame', 'caption', 'circle']) {
@@ -1152,12 +1187,12 @@
     positionTools();
   }
 
-  function snapshotCurrentImage(image = state.image, reason = '') {
+  function snapshotCurrentImage(image = state.image, reason = '', identityOverride = null) {
     if (!image || !image.isConnected) return null;
-    const identity = imageSignature(image);
+    const identity = identityOverride || imageSignature(image);
     const key = imageIdentityKey(identity);
     const previous = state.pendingSnapshots.get(key);
-    if (image === state.image) state.identity = identity;
+    if (image === state.image) state.identity = imageSignature(image);
     const cropHost = getCropContainer(image);
     return snapshotMerge.createSnapshot({
       identity,
@@ -1169,20 +1204,21 @@
       previous,
       reason,
       managedDataKeys: MANAGED_DATA_KEYS,
+      imageAttributeNames: IMAGE_SOURCE_ATTRIBUTES,
       cropAttribute: CROP_ATTR
     });
   }
 
-  function markChanged(image, reason, schedule = true) {
+  function markChanged(image, reason, schedule = true, identityOverride = null) {
     if (!image || !image.ownerDocument) return;
     ensureImageEditId(image);
     image.setAttribute('data-mpse-image-edited', '1');
-    const snapshot = snapshotCurrentImage(image, reason);
+    const snapshot = snapshotCurrentImage(image, reason, identityOverride);
     if (!snapshot) return;
     snapshot.revision = ++state.editRevision;
     state.lastSnapshot = snapshot;
     state.pendingSnapshots.set(imageIdentityKey(snapshot.identity), snapshot);
-    effectRecords.remember(snapshot.identity, snapshot.imgData, snapshot.cropCreateHostData);
+    effectRecords.remember(imageSignature(image), snapshot.imgData, snapshot.cropCreateHostData);
     state.needsCommit = true;
 
     if (DEBUG) console.info('[公众号源码排版助手] image style applied', reason || '', image.getAttribute('style') || '');
@@ -1315,6 +1351,13 @@
 
   function applySnapshotToTarget(target, root, snapshot) {
     target = applyCropSnapshot(target, snapshot);
+    if (snapshot.imgAttributePatch) {
+      snapshotMerge.syncAttributes(
+        target,
+        snapshot.imgAttributePatch,
+        (name) => IMAGE_SOURCE_ATTRIBUTES.includes(name)
+      );
+    }
     snapshotMerge.applyStylePatch(target, snapshot.imgStylePatch);
     target.setAttribute('data-mpse-image-edited', '1');
     if (snapshot.identity.editId) target.setAttribute('data-mpse-image-id', snapshot.identity.editId);
