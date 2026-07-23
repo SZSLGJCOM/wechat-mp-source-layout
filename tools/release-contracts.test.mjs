@@ -22,7 +22,7 @@ test('repository exposes one-command extension verification', () => {
   assert.equal(pkg.scripts?.check, 'node tools/verify-extension.mjs');
   assert.equal(
     pkg.scripts?.test,
-    'node --test tools/release-contracts.test.mjs tools/source-mode-contracts.test.mjs tools/image-interaction-contracts.test.mjs tools/image-effects.test.mjs tools/image-geometry.test.mjs tools/image-state-contracts.test.mjs tools/bridge-client.test.mjs tools/page-bridge.test.mjs'
+    'node --test tools/release-contracts.test.mjs tools/source-mode-contracts.test.mjs tools/mobile-preview-contracts.test.mjs tools/image-interaction-contracts.test.mjs tools/image-effects.test.mjs tools/image-geometry.test.mjs tools/image-state-contracts.test.mjs tools/bridge-client.test.mjs tools/page-bridge.test.mjs'
   );
   assert.equal(pkg.scripts?.package, 'node tools/package-extension.mjs');
 
@@ -74,6 +74,7 @@ test('content scripts load the shared bridge client before dependent modules', (
   assert.deepEqual(js, [
     'src/bridge-client.js',
     'src/content.js',
+    'src/mobile-preview.js',
     'src/image-geometry.js',
     'src/image-controls.js',
     'src/image-snapshot-merge.js',
@@ -416,6 +417,7 @@ test('public release files avoid internal release-log wording', () => {
     'CHANGELOG.md',
     'docs/wechat-interface-notes.md',
     'src/content.js',
+    'src/mobile-preview.js',
     'src/image-geometry.js',
     'src/image-controls.js',
     'src/image-snapshot-merge.js',
@@ -436,6 +438,7 @@ test('public release files avoid internal release-log wording', () => {
 test('production comments are concise and professional', () => {
   for (const file of [
     'src/content.js',
+    'src/mobile-preview.js',
     'src/image-geometry.js',
     'src/image-controls.js',
     'src/image-snapshot-merge.js',

@@ -281,7 +281,7 @@
   function isExtensionElement(node) {
     if (node && node.nodeType !== Node.ELEMENT_NODE) node = node.parentElement;
     if (!node || !node.closest) return false;
-    return Boolean(node.closest(`#${INLINE_ID}, #${TOOLBAR_BUTTON_ID}, #${FLOATING_BUTTON_ID}`));
+    return Boolean(node.closest(`#${INLINE_ID}, #${TOOLBAR_BUTTON_ID}, #${FLOATING_BUTTON_ID}, #mpse-mobile-preview`));
   }
 
   function isVisibleElement(element) {

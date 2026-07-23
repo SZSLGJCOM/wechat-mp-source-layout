@@ -17,6 +17,7 @@
       "js": [
         "src/bridge-client.js",
         "src/content.js",
+        "src/mobile-preview.js",
         "src/image-geometry.js",
         "src/image-controls.js",
         "src/image-snapshot-merge.js",
