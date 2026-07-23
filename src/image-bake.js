@@ -228,8 +228,7 @@
       + '</svg>';
   }
 
-  async function bitmapFromBlob(blob) {
-    if (typeof createImageBitmap === 'function') return createImageBitmap(blob);
+  function imageElementFromBlob(blob) {
     return new Promise((resolve, reject) => {
       const url = URL.createObjectURL(blob);
       const image = new Image();
@@ -239,10 +238,31 @@
       };
       image.onerror = () => {
         URL.revokeObjectURL(url);
-        reject(new Error('无法解码原始图片'));
+        reject(new Error('图片元素解码失败'));
       };
       image.src = url;
     });
+  }
+
+  async function bitmapFromBlob(blob, label) {
+    let bitmapError = null;
+    if (typeof createImageBitmap === 'function') {
+      try {
+        return await createImageBitmap(blob);
+      } catch (error) {
+        bitmapError = error;
+      }
+    }
+    try {
+      return await imageElementFromBlob(blob);
+    } catch (_) {
+      const error = new Error(`${label}无法解码，素材可能已损坏或实际内容不是图片`);
+      error.code = label === '原图'
+        ? 'MPSE_IMAGE_SOURCE_DECODE_FAILED'
+        : 'MPSE_BAKE_RENDER_DECODE_FAILED';
+      error.cause = bitmapError;
+      throw error;
+    }
   }
 
   function canvasFor(width, height) {
@@ -265,8 +285,29 @@
     });
   }
 
+  function blobToDataUrl(blob) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ''));
+      reader.onerror = () => reject(reader.error || new Error('无法读取标准化图片'));
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  async function normalizedSourceDataUrl(bitmap, width, height) {
+    const canvas = canvasFor(width, height);
+    const context = canvas.getContext('2d', { alpha: true, colorSpace: 'srgb' });
+    if (!context) throw new Error('当前浏览器不支持图片像素标准化');
+    context.clearRect(0, 0, width, height);
+    context.drawImage(bitmap, 0, 0, width, height);
+    return blobToDataUrl(await canvasBlob(canvas));
+  }
+
   async function rasterize(svg, width, height) {
-    const bitmap = await bitmapFromBlob(new Blob([svg], { type: 'image/svg+xml;charset=utf-8' }));
+    const bitmap = await bitmapFromBlob(
+      new Blob([svg], { type: 'image/svg+xml;charset=utf-8' }),
+      '烘焙图像'
+    );
     try {
       const canvas = canvasFor(width, height);
       const context = canvas.getContext('2d', { alpha: true, colorSpace: 'srgb' });
@@ -293,17 +334,26 @@
       throw new Error('没有可烘焙的图片或高级效果');
     }
     const sourceBlob = await fetch(dataUrl).then((response) => response.blob());
-    const sourceBitmap = await bitmapFromBlob(sourceBlob);
+    const sourceBitmap = await bitmapFromBlob(sourceBlob, '原图');
     const source = sourceDimensions(sourceBitmap);
-    if (typeof sourceBitmap.close === 'function') sourceBitmap.close();
-    if (!source.width || !source.height) throw new Error('无法读取原图尺寸');
-
-    const displayWidth = Math.max(1, Number(options.displayWidth) || Math.min(source.width, 800));
-    let contentWidth = Math.min(source.width, Math.round(displayWidth * 3));
-    let contentHeight = Math.max(1, Math.round(contentWidth * source.height / source.width));
-    const initialEdgeScale = Math.min(1, MAX_OUTPUT_EDGE / Math.max(contentWidth, contentHeight));
-    contentWidth = Math.max(1, Math.round(contentWidth * initialEdgeScale));
-    contentHeight = Math.max(1, Math.round(contentHeight * initialEdgeScale));
+    let displayWidth;
+    let contentWidth;
+    let contentHeight;
+    let renderDataUrl = dataUrl;
+    try {
+      if (!source.width || !source.height) throw new Error('无法读取原图尺寸');
+      displayWidth = Math.max(1, Number(options.displayWidth) || Math.min(source.width, 800));
+      contentWidth = Math.min(source.width, Math.round(displayWidth * 3));
+      contentHeight = Math.max(1, Math.round(contentWidth * source.height / source.width));
+      const initialEdgeScale = Math.min(1, MAX_OUTPUT_EDGE / Math.max(contentWidth, contentHeight));
+      contentWidth = Math.max(1, Math.round(contentWidth * initialEdgeScale));
+      contentHeight = Math.max(1, Math.round(contentHeight * initialEdgeScale));
+      if (!['image/png', 'image/jpeg'].includes(sourceBlob.type)) {
+        renderDataUrl = await normalizedSourceDataUrl(sourceBitmap, contentWidth, contentHeight);
+      }
+    } finally {
+      if (typeof sourceBitmap.close === 'function') sourceBitmap.close();
+    }
     const maxBytes = Math.max(1024, Number(options.maxBytes) || MAX_OUTPUT_BYTES);
 
     let result = null;
@@ -320,7 +370,7 @@
         contentHeight = Math.max(1, Math.floor(contentHeight * edgeScale));
         continue;
       }
-      const svg = buildSvg({ dataUrl, recipe, contentWidth, contentHeight, scale, padding });
+      const svg = buildSvg({ dataUrl: renderDataUrl, recipe, contentWidth, contentHeight, scale, padding });
       const blob = await rasterize(svg, outputWidth, outputHeight);
       result = { blob, width: outputWidth, height: outputHeight, contentWidth, contentHeight, padding, scale };
       if (blob.size <= maxBytes) return result;

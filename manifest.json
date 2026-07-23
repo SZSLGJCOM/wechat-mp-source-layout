@@ -26,6 +26,7 @@
         "src/image-controls.js",
         "src/image-snapshot-merge.js",
         "src/image-effect-records.js",
+        "src/image-source.js",
         "src/image-bake.js",
         "src/image-bake-pipeline.js",
         "src/image-tools.js",

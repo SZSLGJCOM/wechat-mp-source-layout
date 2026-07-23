@@ -5,6 +5,7 @@ import { FakeElement, readJson, readText } from './test-helpers.mjs';
 
 await import(new URL('../src/image-bake.js', import.meta.url));
 await import(new URL('../src/image-effect-records.js', import.meta.url));
+await import(new URL('../src/image-source.js', import.meta.url));
 await import(new URL('../src/image-bake-pipeline.js', import.meta.url));
 
 const bake = globalThis.__MPSE_IMAGE_BAKE__;
@@ -244,8 +245,8 @@ test('an in-flight paste keeps superseded candidates for one final cleanup commi
 
   try {
     const image = new FakeElement('img', {
-      src: 'data:image/png;base64,AA==',
-      'data-src': 'data:image/png;base64,AA=='
+      src: 'data:image/png;base64,iVBORw0KGgo=',
+      'data-src': 'data:image/png;base64,iVBORw0KGgo='
     });
     image.dataset = { recipeRevision: '1' };
     image.isConnected = true;
@@ -373,8 +374,8 @@ test('a cleanup wait cannot settle a newer bake revision', async () => {
   try {
     const createImage = () => {
       const image = new FakeElement('img', {
-        src: 'data:image/png;base64,AA==',
-        'data-src': 'data:image/png;base64,AA==',
+        src: 'data:image/png;base64,iVBORw0KGgo=',
+        'data-src': 'data:image/png;base64,iVBORw0KGgo=',
         'data-mpse-image-id': 'img-cleanup-race'
       });
       image.dataset = { recipeRevision: '1' };
@@ -503,6 +504,6 @@ test('manifest allows HTTPS image reads without a WeChat CDN allowlist', () => {
   assert.deepEqual(manifest.host_permissions, ['https://*/*']);
   const background = readText('src/image-background.js');
   assert.match(background, /validateUrl\(response\.url\)/);
+  assert.match(background, /imageSource\.validateBytes\(buffer\)/);
   assert.doesNotMatch(background, /ALLOWED_IMAGE_HOSTS|MPSE_IMAGE_HOST_NOT_ALLOWED|只允许读取微信图片域名/);
-  assert.doesNotMatch(background, /ALLOWED_IMAGE_TYPES[\s\S]*image\/svg\+xml/);
 });

@@ -19,16 +19,9 @@
     'data-backsrc',
     'data-croporisrc'
   ]);
-  const MAX_SOURCE_BYTES = 16 * 1024 * 1024;
+  const imageSource = globalThis.__MPSE_IMAGE_SOURCE__;
+  const MAX_SOURCE_BYTES = imageSource.MAX_SOURCE_BYTES;
   const BAKE_DELAY_MS = 680;
-  const ALLOWED_SOURCE_TYPES = new Set([
-    'image/png',
-    'image/jpeg',
-    'image/gif',
-    'image/webp',
-    'image/avif',
-    'image/bmp'
-  ]);
   const ADVANCED_DATA_KEYS = Object.freeze([
     'mpseGlowOn', 'mpseGlowBlur', 'mpseGlowSpread', 'mpseGlowOpacity', 'mpseGlowColor',
     'mpseBrightness', 'mpseContrast', 'mpseSaturate', 'mpseGray', 'mpseColorOn',
@@ -313,23 +306,18 @@
       return metadata;
     }
 
-    function blobToDataUrl(blob) {
-      return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(String(reader.result || ''));
-        reader.onerror = () => reject(reader.error || new Error('无法读取原始图片'));
-        reader.readAsDataURL(blob);
-      });
+    async function validatedBlobDataUrl(blob) {
+      const buffer = await blob.arrayBuffer();
+      const source = imageSource.validateBytes(buffer);
+      return imageSource.dataUrl(source);
     }
 
     async function directFetchDataUrl(url) {
       const response = await fetch(url, { credentials: 'same-origin', cache: 'force-cache' });
       if (!response.ok) throw new Error(`原图读取失败（HTTP ${response.status}）`);
       const blob = await response.blob();
-      const mimeType = String(blob.type || '').toLowerCase().split(';')[0];
-      if (!ALLOWED_SOURCE_TYPES.has(mimeType)) throw new Error('原始素材不是有效的光栅图片');
       if (blob.size > MAX_SOURCE_BYTES) throw new Error('原图超过 16MB，无法进行像素烘焙');
-      return blobToDataUrl(blob);
+      return validatedBlobDataUrl(blob);
     }
 
     function backgroundFetchDataUrl(url) {
@@ -355,9 +343,8 @@
       const url = absoluteSourceUrl(value);
       if (!url) throw new Error('没有找到可烘焙的原始图片');
       if (url.startsWith('data:image/')) {
-        const mimeType = url.slice(5, url.indexOf(';') > 0 ? url.indexOf(';') : url.indexOf(',')).toLowerCase();
-        if (!ALLOWED_SOURCE_TYPES.has(mimeType)) throw new Error('原始素材不是有效的光栅图片');
-        return url;
+        const blob = await fetch(url).then((response) => response.blob());
+        return validatedBlobDataUrl(blob);
       }
       if (url.startsWith('blob:') || new URL(url).origin === location.origin) {
         return directFetchDataUrl(url);

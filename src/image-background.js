@@ -1,15 +1,9 @@
 (() => {
   'use strict';
 
-  const MAX_SOURCE_BYTES = 16 * 1024 * 1024;
-  const ALLOWED_IMAGE_TYPES = new Set([
-    'image/png',
-    'image/jpeg',
-    'image/gif',
-    'image/webp',
-    'image/avif',
-    'image/bmp'
-  ]);
+  importScripts('image-source.js');
+  const imageSource = globalThis.__MPSE_IMAGE_SOURCE__;
+  const MAX_SOURCE_BYTES = imageSource.MAX_SOURCE_BYTES;
 
   function asError(error) {
     return {
@@ -43,16 +37,6 @@
     }
   }
 
-  function bytesToBase64(buffer) {
-    const bytes = new Uint8Array(buffer);
-    const chunks = [];
-    const chunkSize = 0x8000;
-    for (let offset = 0; offset < bytes.length; offset += chunkSize) {
-      chunks.push(String.fromCharCode(...bytes.subarray(offset, offset + chunkSize)));
-    }
-    return btoa(chunks.join(''));
-  }
-
   async function fetchImage(url) {
     const response = await fetch(validateUrl(url), {
       method: 'GET',
@@ -72,23 +56,12 @@
       error.code = 'MPSE_IMAGE_SOURCE_TOO_LARGE';
       throw error;
     }
-    const blob = await response.blob();
-    const mimeType = String(blob.type || '').toLowerCase().split(';')[0];
-    if (!ALLOWED_IMAGE_TYPES.has(mimeType)) {
-      const error = new Error('素材地址没有返回有效图片');
-      error.code = 'MPSE_IMAGE_INVALID_MIME';
-      throw error;
-    }
-    if (blob.size > MAX_SOURCE_BYTES) {
-      const error = new Error('原图超过 16MB，无法进行像素烘焙');
-      error.code = 'MPSE_IMAGE_SOURCE_TOO_LARGE';
-      throw error;
-    }
-    const buffer = await blob.arrayBuffer();
+    const buffer = await response.arrayBuffer();
+    const source = imageSource.validateBytes(buffer);
     return {
-      dataUrl: `data:${mimeType};base64,${bytesToBase64(buffer)}`,
-      mimeType,
-      size: blob.size
+      dataUrl: imageSource.dataUrl(source),
+      mimeType: source.mimeType,
+      size: source.size
     };
   }
 

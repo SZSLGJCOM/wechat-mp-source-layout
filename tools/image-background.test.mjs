@@ -7,6 +7,7 @@ import { readText } from './test-helpers.mjs';
 function createWorker(fetchImage) {
   let listener = null;
   const context = {
+    ArrayBuffer,
     URL,
     Uint8Array,
     fetch: fetchImage,
@@ -21,7 +22,12 @@ function createWorker(fetchImage) {
       }
     }
   };
-  vm.runInNewContext(readText('src/image-background.js'), context);
+  vm.createContext(context);
+  context.importScripts = (path) => {
+    assert.equal(path, 'image-source.js');
+    vm.runInContext(readText('src/image-source.js'), context);
+  };
+  vm.runInContext(readText('src/image-background.js'), context);
   assert.equal(typeof listener, 'function');
   return listener;
 }
@@ -40,7 +46,9 @@ test('background reads HTTPS article images from non-WeChat origins', async () =
       ok: true,
       url,
       headers: { get: () => null },
-      blob: async () => new Blob([Uint8Array.of(1, 2, 3)], { type: 'image/png' })
+      arrayBuffer: async () => Uint8Array.from([
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a
+      ]).buffer
     };
   });
 
