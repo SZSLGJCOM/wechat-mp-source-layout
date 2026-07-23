@@ -546,7 +546,7 @@ class FakeClipboardEvent {
   }
 }
 
-test('image bake is handed to the editor paste handler and keeps the original until confirmation', async () => {
+test('image bake removes a late native-paste duplicate without losing the original state', async () => {
   const original = fakeImage({
     src: 'https://mmbiz.qpic.cn/source.png',
     'data-src': 'https://mmbiz.qpic.cn/source.png',
@@ -647,6 +647,25 @@ test('image bake is handed to the editor paste handler and keeps the original un
     placement: 'after',
     cleanupPending: false
   });
+
+  canonicalContent = [
+    '<p><img data-mpse-image-id="image-7"',
+    ' data-mpse-glow-on="1" style="width:70%"',
+    ' data-src="https://mmbiz.qpic.cn/mmbiz_png/baked.png?wx_fmt=png&amp;from=appmsg"></p>',
+    '<p><img data-src="https://mmbiz.qpic.cn/mmbiz_png/baked.png?wx_fmt=png&amp;from=appmsg"></p>'
+  ].join('');
+  harness.runTimer(1000);
+  await nextTurn();
+  await nextTurn();
+
+  assert.equal((canonicalContent.match(/<img\b/g) || []).length, 1);
+  assert.match(canonicalContent, /data-mpse-image-id="image-7"/);
+  assert.match(canonicalContent, /data-mpse-glow-on="1"/);
+  assert.match(canonicalContent, /style="width:70%"/);
+  assert.ok(
+    [...harness.timers.values()].some((timer) => timer.delay === 2000),
+    'the cleanup guard must keep watching for a late editor reconciliation'
+  );
 });
 
 test('an in-place native paste is restored without deleting the target image', async () => {

@@ -11,6 +11,7 @@
   const EDITOR_INPUT_IDLE_MS = 160;
   const EDITOR_INPUT_WAIT_TIMEOUT_MS = 2500;
   const MAX_PASTE_IMAGE_BYTES = 10 * 1024 * 1024;
+  const POST_PASTE_STABILITY_CHECKS = 4;
 
   if (window.__MP_SOURCE_EDITOR_BRIDGE_INSTALLED__) {
     return;
@@ -1092,6 +1093,17 @@
       releaseNativePasteInputLock(context);
     }
 
+    if (placement === 'after') {
+      schedulePastedImageCleanup({
+        pasteId,
+        cdnUrl,
+        expectedArticleKey: baseline.articleKey,
+        placement,
+        originalAttributes: context.originalAttributes,
+        locator
+      }, POST_PASTE_STABILITY_CHECKS);
+    }
+
     return {
       pasteId,
       cdnUrl,
@@ -1147,6 +1159,10 @@
     container.innerHTML = current.content;
     const candidate = findPastedImageForDiscard(container, payload);
     if (!candidate) {
+      const target = locateImageForPaste(container, payload?.locator || {});
+      if (payload?.placement !== 'replace' && target) {
+        return { changed: false, confirmedAbsent: true };
+      }
       const cdnUrl = normalizedWechatCdnUrl(payload?.cdnUrl);
       const sourceStillPresent = Boolean(cdnUrl) && Array.from(container.querySelectorAll('img'))
         .some((image) => imageSource(image) === cdnUrl);
@@ -1198,18 +1214,22 @@
     pendingPastedImageCleanups.delete(key);
   }
 
-  function schedulePastedImageCleanup(payload) {
+  function schedulePastedImageCleanup(payload, stabilityChecks = 0) {
     const key = pastedImageCleanupKey(payload);
     if (key === '||') return false;
+    const requestedStabilityChecks = Math.max(0, Number(stabilityChecks) || 0);
     let entry = pendingPastedImageCleanups.get(key);
     if (!entry) {
       entry = {
         payload,
         attempts: 0,
         createdAt: Date.now(),
-        timer: 0
+        timer: 0,
+        stabilityChecks: requestedStabilityChecks
       };
       pendingPastedImageCleanups.set(key, entry);
+    } else {
+      entry.stabilityChecks = Math.max(entry.stabilityChecks, requestedStabilityChecks);
     }
     if (entry.timer) return true;
     const delay = Math.min(30000, 1000 * (2 ** Math.min(entry.attempts, 5)));
@@ -1224,8 +1244,11 @@
       try {
         const result = await enqueueEditorWrite(() => discardPastedImage(entry.payload));
         if (result.changed || result.confirmedAbsent) {
-          forgetPastedImageCleanup(key);
-          return;
+          if (entry.stabilityChecks <= 1) {
+            forgetPastedImageCleanup(key);
+            return;
+          }
+          entry.stabilityChecks -= 1;
         }
       } catch (error) {
         console.warn('[公众号源码排版助手] pasted image cleanup retry failed:', error);
