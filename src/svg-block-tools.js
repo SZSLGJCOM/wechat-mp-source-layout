@@ -145,7 +145,7 @@
 
   function isExtensionElement(node) {
     if (!node || !node.closest) return false;
-    return Boolean(node.closest(`#${PANEL_ID}, #${BOX_ID}, #${BADGE_ID}, #mpse-svg2-panel, #mpse-svg2-pick-button, #mpse-img2-menu, #mpse-img2-panel, #mpse-img2-badge, #mpse-inline-panel, #mpse-toolbar-button, #mpse-floating-button`));
+    return Boolean(node.closest(`#${PANEL_ID}, #${BOX_ID}, #${BADGE_ID}, #mpse-svg2-panel, #mpse-svg2-pick-button, #mpse-img2-menu, #mpse-img2-panel, #mpse-img2-badge, #mpse-inline-panel, #mpse-toolbar-button, #mpse-floating-button, #mpse-mobile-preview, #mpse-mobile-preview-button`));
   }
 
   function isVisibleElement(element) {

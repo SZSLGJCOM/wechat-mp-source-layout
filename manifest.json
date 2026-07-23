@@ -18,6 +18,7 @@
         "src/bridge-client.js",
         "src/content.js",
         "src/mobile-preview.js",
+        "src/mobile-preview-controls.js",
         "src/image-geometry.js",
         "src/image-controls.js",
         "src/image-snapshot-merge.js",

@@ -111,7 +111,7 @@
 
   function isExtensionElement(node) {
     if (!node || !node.closest) return false;
-    return Boolean(node.closest(`#${PANEL_ID}, #${PICK_BUTTON_ID}, #mpse-svgb-menu, #mpse-svgb-panel, #mpse-svgb-box, #mpse-svgb-badge, #mpse-img2-menu, #mpse-img2-panel, #mpse-img2-badge, #mpse-inline-panel, #mpse-toolbar-button, #mpse-floating-button`));
+    return Boolean(node.closest(`#${PANEL_ID}, #${PICK_BUTTON_ID}, #mpse-svgb-menu, #mpse-svgb-panel, #mpse-svgb-box, #mpse-svgb-badge, #mpse-img2-menu, #mpse-img2-panel, #mpse-img2-badge, #mpse-inline-panel, #mpse-toolbar-button, #mpse-floating-button, #mpse-mobile-preview, #mpse-mobile-preview-button`));
   }
 
   function findEditableRoot(node) {

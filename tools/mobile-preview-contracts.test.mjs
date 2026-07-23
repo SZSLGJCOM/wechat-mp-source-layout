@@ -4,6 +4,7 @@ import test from 'node:test';
 import { readJson, readText } from './test-helpers.mjs';
 
 const preview = readText('src/mobile-preview.js');
+const controls = readText('src/mobile-preview-controls.js');
 const overlay = readText('src/overlay.css');
 
 test('mobile preview is loaded after source mode and before editor effect tools', () => {
@@ -11,11 +12,15 @@ test('mobile preview is loaded after source mode and before editor effect tools'
   const scripts = manifest.content_scripts?.[0]?.js || [];
   const sourceIndex = scripts.indexOf('src/content.js');
   const previewIndex = scripts.indexOf('src/mobile-preview.js');
+  const controlsIndex = scripts.indexOf('src/mobile-preview-controls.js');
   const imageIndex = scripts.indexOf('src/image-geometry.js');
 
   assert.ok(sourceIndex >= 0);
   assert.equal(previewIndex, sourceIndex + 1);
-  assert.equal(imageIndex, previewIndex + 1);
+  assert.equal(controlsIndex, previewIndex + 1);
+  assert.equal(imageIndex, controlsIndex + 1);
+  assert.ok(preview.split(/\r?\n/).length < 500);
+  assert.ok(controls.split(/\r?\n/).length < 300);
 });
 
 test('preview uses an isolated script-free 375 pixel article document', () => {
@@ -57,12 +62,25 @@ test('editor replacements and direct style changes share one debounced refresh l
   assert.match(preview, /if \(fingerprint === state\.fingerprint\) return/);
 });
 
-test('phone preview only occupies a sufficiently wide desktop gutter and can collapse', () => {
-  assert.match(preview, /const MIN_VIEWPORT_WIDTH = 1580/);
-  assert.match(preview, /const MIN_GUTTER_WIDTH = 394/);
-  assert.match(preview, /gutter >= \(state\.collapsed \? width \+ 20 : MIN_GUTTER_WIDTH\)/);
-  assert.match(preview, /state\.root\.hidden = !canShow/);
-  assert.match(preview, /requestAnimationFrame\(positionPreview\)/);
-  assert.match(preview, /sessionStorage\.setItem\('mpse-mobile-preview-collapsed'/);
-  assert.match(overlay, /#mpse-mobile-preview\.mpse-preview-collapsed[\s\S]*?width: 132px/);
+test('mobile preview switch follows HTML in the native toolbar', () => {
+  assert.match(controls, /const HTML_BUTTON_ID = 'mpse-toolbar-button'/);
+  assert.match(controls, /button\.textContent = '手机预览'/);
+  assert.match(controls, /htmlButton\.insertAdjacentElement\('afterend', button\)/);
+  assert.match(controls, /button\.setAttribute\('aria-pressed', state\.enabled \? 'true' : 'false'\)/);
+  assert.match(controls, /sessionStorage\.setItem\('mpse-mobile-preview-enabled'/);
+  assert.match(overlay, /#mpse-mobile-preview-button\.mpse-active/);
+});
+
+test('smaller phone defaults to the right edge and preserves bounded drag position', () => {
+  assert.match(controls, /const PANEL_WIDTH = 250/);
+  assert.match(controls, /const PREVIEW_MAX_HEIGHT = 570/);
+  assert.match(controls, /left: innerWidth - RESERVED_RIGHT - PANEL_WIDTH/);
+  assert.match(controls, /event\.target\.closest\?\.\('\.mpse-preview-viewport'\)/);
+  assert.match(controls, /device\.setPointerCapture\(event\.pointerId\)/);
+  assert.match(controls, /state\.userPosition = applyPosition/);
+  assert.match(controls, /sessionStorage\.setItem\('mpse-mobile-preview-position'/);
+  assert.match(controls, /Math\.min\(Math\.max\(left, VIEWPORT_MARGIN\), maxLeft\)/);
+  assert.match(overlay, /#mpse-mobile-preview \{[\s\S]*?width: 250px/);
+  assert.match(overlay, /height: min\(570px, calc\(100vh - 180px\)\)/);
+  assert.doesNotMatch(preview, /mpse-preview-toolbar|mpse-preview-collapsed/);
 });

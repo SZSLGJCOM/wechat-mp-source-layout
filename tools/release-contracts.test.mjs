@@ -75,6 +75,7 @@ test('content scripts load the shared bridge client before dependent modules', (
     'src/bridge-client.js',
     'src/content.js',
     'src/mobile-preview.js',
+    'src/mobile-preview-controls.js',
     'src/image-geometry.js',
     'src/image-controls.js',
     'src/image-snapshot-merge.js',
@@ -418,6 +419,7 @@ test('public release files avoid internal release-log wording', () => {
     'docs/wechat-interface-notes.md',
     'src/content.js',
     'src/mobile-preview.js',
+    'src/mobile-preview-controls.js',
     'src/image-geometry.js',
     'src/image-controls.js',
     'src/image-snapshot-merge.js',
@@ -439,6 +441,7 @@ test('production comments are concise and professional', () => {
   for (const file of [
     'src/content.js',
     'src/mobile-preview.js',
+    'src/mobile-preview-controls.js',
     'src/image-geometry.js',
     'src/image-controls.js',
     'src/image-snapshot-merge.js',

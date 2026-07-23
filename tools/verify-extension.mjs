@@ -142,6 +142,7 @@ function checkProductWording() {
     'docs/wechat-interface-notes.md',
     'src/content.js',
     'src/mobile-preview.js',
+    'src/mobile-preview-controls.js',
     'src/image-geometry.js',
     'src/image-controls.js',
     'src/image-snapshot-merge.js',
@@ -161,6 +162,7 @@ function checkCommentHygiene() {
   for (const file of [
     'src/content.js',
     'src/mobile-preview.js',
+    'src/mobile-preview-controls.js',
     'src/image-geometry.js',
     'src/image-controls.js',
     'src/image-snapshot-merge.js',

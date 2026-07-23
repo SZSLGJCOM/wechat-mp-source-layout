@@ -4,10 +4,6 @@
   const ROOT_ID = 'mpse-mobile-preview';
   const FRAME_ID = 'mpse-mobile-preview-frame';
   const ARTICLE_WIDTH = 375;
-  const PANEL_WIDTH = 370;
-  const COLLAPSED_WIDTH = 132;
-  const MIN_VIEWPORT_WIDTH = 1580;
-  const MIN_GUTTER_WIDTH = 394;
   const RENDER_DELAY_MS = 120;
   const REBIND_INTERVAL_MS = 1400;
   const DANGEROUS_ELEMENTS = [
@@ -22,12 +18,9 @@
   const state = {
     root: null,
     frame: null,
-    collapsed: false,
     renderTimer: 0,
-    positionFrame: 0,
     fingerprint: '',
-    documentObservers: new Map(),
-    lastSurfaceRect: null
+    documentObservers: new Map()
   };
 
   function isEditorPage() {
@@ -98,17 +91,10 @@
 
     const root = document.createElement('aside');
     root.id = ROOT_ID;
+    root.hidden = true;
     root.setAttribute('aria-label', '微信公众号手机实时预览');
     root.innerHTML = `
-      <div class="mpse-preview-toolbar">
-        <span class="mpse-preview-phone-icon" aria-hidden="true"></span>
-        <span class="mpse-preview-heading">手机预览</span>
-        <span class="mpse-preview-live"><i></i>实时</span>
-        <button class="mpse-preview-toggle" type="button" aria-expanded="true" aria-label="收起手机预览" title="收起手机预览">
-          <span aria-hidden="true">›</span>
-        </button>
-      </div>
-      <div class="mpse-preview-device">
+      <div class="mpse-preview-device" title="拖动手机顶部可移动预览">
         <div class="mpse-preview-screen">
           <div class="mpse-preview-status">
             <span class="mpse-preview-time"></span>
@@ -130,17 +116,9 @@
 
     state.root = root;
     state.frame = root.querySelector(`#${FRAME_ID}`);
-    state.collapsed = readCollapsedPreference();
-    root.classList.toggle('mpse-preview-collapsed', state.collapsed);
-    syncToggleState();
-
-    root.querySelector('.mpse-preview-toggle').addEventListener('click', () => {
-      state.collapsed = !state.collapsed;
-      root.classList.toggle('mpse-preview-collapsed', state.collapsed);
-      saveCollapsedPreference();
-      syncToggleState();
-      schedulePosition();
-      if (!state.collapsed) scheduleRender(0);
+    root.addEventListener('mpse-mobile-preview:show', () => {
+      updateFrameGeometry();
+      scheduleRender(0);
     });
     state.frame.addEventListener('load', () => {
       installFrameGuards();
@@ -151,30 +129,6 @@
     state.frame.srcdoc = frameMarkup();
     document.body.appendChild(root);
     updateClock();
-  }
-
-  function readCollapsedPreference() {
-    try {
-      return sessionStorage.getItem('mpse-mobile-preview-collapsed') === '1';
-    } catch (_) {
-      return false;
-    }
-  }
-
-  function saveCollapsedPreference() {
-    try {
-      sessionStorage.setItem('mpse-mobile-preview-collapsed', state.collapsed ? '1' : '0');
-    } catch (_) {
-      // Session storage may be unavailable under restrictive browser policies.
-    }
-  }
-
-  function syncToggleState() {
-    const button = state.root?.querySelector('.mpse-preview-toggle');
-    if (!button) return;
-    button.setAttribute('aria-expanded', state.collapsed ? 'false' : 'true');
-    button.setAttribute('aria-label', state.collapsed ? '展开手机预览' : '收起手机预览');
-    button.title = state.collapsed ? '展开手机预览' : '收起手机预览';
   }
 
   function updateClock() {
@@ -325,7 +279,7 @@
 
   function renderPreview() {
     state.renderTimer = 0;
-    if (!state.root || state.collapsed || state.root.hidden) return;
+    if (!state.root || state.root.hidden) return;
     const snapshot = readArticleSnapshot();
     snapshot.html = sanitizeHtml(snapshot.html);
     const fingerprint = sourceFingerprint(`${snapshot.mode}\0${snapshot.title}\0${snapshot.author}\0${snapshot.html}`);
@@ -346,63 +300,11 @@
 
   function updateFrameGeometry() {
     const viewport = state.root?.querySelector('.mpse-preview-viewport');
-    if (!viewport || !state.frame || state.collapsed) return;
+    if (!viewport || !state.frame) return;
     const scale = viewport.clientWidth / ARTICLE_WIDTH;
     if (!Number.isFinite(scale) || scale <= 0) return;
     state.frame.style.transform = `scale(${scale})`;
     state.frame.style.height = `${Math.ceil(viewport.clientHeight / scale)}px`;
-  }
-
-  function findEditorSurfaceRect() {
-    const selectors = [
-      '.edui-editor', '.edui-editor-body', '.edui-editor-iframeholder',
-      '#js_editorArea', '#ueditor_0', 'iframe[id*="ueditor"]', 'iframe[name*="ueditor"]',
-      '#mpse-inline-panel'
-    ];
-    const candidates = [];
-    for (const node of document.querySelectorAll(selectors.join(','))) {
-      if (isOwnPreviewNode(node)) continue;
-      const rect = node.getBoundingClientRect();
-      if (rect.width < 360 || rect.height < 120 || rect.right <= innerWidth * 0.42) continue;
-      const style = getComputedStyle(node);
-      if (style.display === 'none' || style.visibility === 'hidden') continue;
-      candidates.push({
-        rect,
-        score: rect.right + Math.min(rect.width, 1000) + Math.min(rect.height, 1000)
-      });
-    }
-    candidates.sort((left, right) => right.score - left.score);
-    if (candidates[0]) {
-      state.lastSurfaceRect = candidates[0].rect;
-      return candidates[0].rect;
-    }
-    return state.lastSurfaceRect;
-  }
-
-  function positionPreview() {
-    state.positionFrame = 0;
-    if (!state.root) return;
-    const surface = findEditorSurfaceRect();
-    const width = state.collapsed ? COLLAPSED_WIDTH : PANEL_WIDTH;
-    const reservedRight = 64;
-    const availableRight = innerWidth - reservedRight;
-    const gutter = surface ? availableRight - surface.right : 0;
-    const canShow = innerWidth >= MIN_VIEWPORT_WIDTH
-      && surface
-      && gutter >= (state.collapsed ? width + 20 : MIN_GUTTER_WIDTH);
-
-    state.root.hidden = !canShow;
-    if (!canShow) return;
-    const left = surface.right + Math.max(16, (gutter - width) / 2);
-    const top = Math.max(184, Math.min(surface.top - 10, innerHeight - 620));
-    state.root.style.left = `${Math.round(left)}px`;
-    state.root.style.top = `${Math.round(top)}px`;
-    updateFrameGeometry();
-  }
-
-  function schedulePosition() {
-    if (state.positionFrame) return;
-    state.positionFrame = requestAnimationFrame(positionPreview);
   }
 
   function bindDocuments() {
@@ -422,7 +324,6 @@
       const observer = new MutationObserver((records) => {
         if (records.some((record) => !isOwnPreviewNode(record.target))) {
           scheduleRender();
-          schedulePosition();
         }
       });
       observer.observe(targetDocument.documentElement, {
@@ -440,14 +341,10 @@
     if (!isEditorPage()) return;
     createPreview();
     bindDocuments();
-    window.addEventListener('resize', schedulePosition, { passive: true });
-    window.addEventListener('scroll', schedulePosition, { passive: true });
-    schedulePosition();
     scheduleRender(0);
     window.setInterval(() => {
       bindDocuments();
       updateClock();
-      schedulePosition();
       scheduleRender();
     }, REBIND_INTERVAL_MS);
   }
