@@ -19,7 +19,7 @@
     shadow: ['box-shadow'],
     glow: ['box-shadow'],
     feather: ['mask-image', '-webkit-mask-image', 'mask-size', '-webkit-mask-size', 'mask-repeat', '-webkit-mask-repeat', 'mask-position', '-webkit-mask-position'],
-    stroke: ['outline', 'outline-offset'],
+    stroke: ['filter', 'outline', 'outline-offset'],
     opacity: ['opacity'],
     color: ['filter'],
     rotate: ['transform', 'transform-origin'],
@@ -38,8 +38,10 @@
   const cropCreateHost = Array.from(new Set([...cropHost, ...Object.values(appearance).flat()]));
   const resetImage = Array.from(new Set([...cropCreateImage, ...Object.values(appearance).flat()]));
   const carrier = [...frame, 'display', 'box-shadow', 'opacity', 'outline', 'outline-offset'];
-  const cropHostEffects = new Set(['radius', 'size', 'spacing', 'shadow', 'glow', 'feather', 'stroke', 'opacity', 'rotate', 'frame', 'circle']);
+  const cropHostEffects = new Set(['radius', 'size', 'spacing', 'shadow', 'glow', 'feather', 'opacity', 'rotate', 'frame', 'circle']);
+  const cropDualTargetEffects = new Set(['feather', 'opacity']);
   const cropGeometryReasons = new Set(['resize', 'crop', 'crop-pan', 'crop-zoom', 'crop-reset', 'circle']);
+  const cropMetadataEffects = new Set(['size', 'radius', 'spacing', 'rotate', 'frame']);
   const cropRemovalReasons = new Set(['crop-exit', 'crop-reset', 'reset']);
   const cropSizeImage = ['position', 'left', 'top', 'width', 'height'];
   const cropSizeWidthHost = [...frame, 'width', 'max-width', 'display', 'margin-bottom', 'transform'];
@@ -52,7 +54,7 @@
   }
 
   function targetForEffect(image, cropHost, effect) {
-    return effect !== 'color' && cropHost && cropHostEffects.has(effect) ? cropHost : image;
+    return !['color', 'stroke'].includes(effect) && cropHost && cropHostEffects.has(effect) ? cropHost : image;
   }
 
   function cropIntent(cropHost, reason) {
@@ -60,7 +62,7 @@
     return {
       action: cropHost ? 'ensure' : (cropRemovalReasons.has(reason) ? 'remove' : 'preserve'),
       ownsStructure: Boolean(cropHost && cropGeometryReasons.has(effect)),
-      ownsHostData: Boolean(cropHost && (cropGeometryReasons.has(effect) || effect === 'size'))
+      ownsHostData: Boolean(cropHost && (cropGeometryReasons.has(effect) || cropMetadataEffects.has(effect)))
     };
   }
 
@@ -156,9 +158,22 @@
       blockProperties.add('text-align');
     } else {
       effectProperties = stylePropertiesForReason(reason, effect, finalHasHost);
-      effectTargetsHost = effect !== 'color' && finalHasHost && cropHostEffects.has(effect);
-      const targetProperties = effectTargetsHost ? hostProperties : imageProperties;
-      for (const property of effectProperties) targetProperties.add(property);
+      effectTargetsHost = !['color', 'stroke'].includes(effect) && finalHasHost && cropHostEffects.has(effect);
+      if (effect === 'stroke') {
+        for (const property of effectProperties) imageProperties.add(property);
+        if (finalHasHost) {
+          hostProperties.add('outline');
+          hostProperties.add('outline-offset');
+        }
+      } else if (finalHasHost && cropDualTargetEffects.has(effect)) {
+        for (const property of effectProperties) {
+          imageProperties.add(property);
+          hostProperties.add(property);
+        }
+      } else {
+        const targetProperties = effectTargetsHost ? hostProperties : imageProperties;
+        for (const property of effectProperties) targetProperties.add(property);
+      }
       if (reason === 'size-align' || reason === 'size') blockProperties.add('text-align');
     }
 
@@ -184,8 +199,20 @@
     } else {
       imgStylePatch = { ...(previous?.imgStylePatch || {}) };
       hostStylePatch = { ...(previous?.hostStylePatch || {}) };
-      const effectPatch = captureStylePatch(targetForEffect(image, cropHostElement, effect), effectProperties);
-      Object.assign(effectTargetsHost ? hostStylePatch : imgStylePatch, effectPatch);
+      if (effect === 'stroke') {
+        Object.assign(imgStylePatch, captureStylePatch(image, effectProperties));
+        if (cropHostElement) Object.assign(hostStylePatch, captureStylePatch(cropHostElement, ['outline', 'outline-offset']));
+      } else if (cropHostElement && cropDualTargetEffects.has(effect)) {
+        if (finalHasHost) {
+          Object.assign(imgStylePatch, captureStylePatch(image, effectProperties));
+          Object.assign(hostStylePatch, captureStylePatch(cropHostElement, effectProperties));
+        } else {
+          Object.assign(imgStylePatch, captureStylePatch(cropHostElement, effectProperties));
+        }
+      } else {
+        const effectPatch = captureStylePatch(targetForEffect(image, cropHostElement, effect), effectProperties);
+        Object.assign(effectTargetsHost ? hostStylePatch : imgStylePatch, effectPatch);
+      }
     }
 
     let captionAction = previous?.captionAction || 'none';

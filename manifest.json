@@ -3,8 +3,8 @@
   "name": "公众号源码排版助手",
   "short_name": "源码排版",
   "description": "微信公众号图文编辑页 Chrome 扩展，支持 HTML 源码编辑、图片参数微调、多图 SVG 动效与成品复原管理。",
-  "version": "1.0.0",
-  "version_name": "1.0.0",
+  "version": "0.10.0",
+  "version_name": "0.10",
   "permissions": [],
   "host_permissions": [
     "https://mp.weixin.qq.com/*"
@@ -20,6 +20,7 @@
         "src/image-geometry.js",
         "src/image-controls.js",
         "src/image-snapshot-merge.js",
+        "src/image-effect-records.js",
         "src/image-tools.js",
         "src/svg-tools.js",
         "src/svg-block-tools.js"

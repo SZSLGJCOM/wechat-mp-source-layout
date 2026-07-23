@@ -146,7 +146,7 @@ test('only visible dialogs that overlap the editor area block image tools', () =
   assert.doesNotMatch(globalSelectors[1], /\[role="dialog"\]/);
 });
 
-test('image appearance effects are reversible and follow the crop container', () => {
+test('image appearance effects are reversible and alpha stroke stays on the media', () => {
   const imageTools = readText('src/image-tools.js');
   const imageControls = readText('src/image-controls.js');
 
@@ -157,7 +157,9 @@ test('image appearance effects are reversible and follow the crop container', ()
   assert.match(imageControls, /mpseStrokeOn/);
   assert.match(imageControls, /mpseOpacityOn/);
   assert.match(imageControls, /mask-image/);
-  assert.match(imageControls, /outline-offset/);
+  assert.match(imageControls, /function alphaStrokeFilter\(image\)/);
+  assert.match(imageControls, /drop-shadow\(\$\{width\}px 0 0/);
+  assert.doesNotMatch(imageControls, /return \{ outline: `\$\{width\}px solid/);
 });
 
 test('native box shadow survives clearing managed shadow or glow inside crop', () => {
@@ -187,7 +189,18 @@ test('transparent images remain selectable and opacity starts at 100%', () => {
   const imageControls = readText('src/image-controls.js');
 
   assert.match(imageControls, /function readOpacityPercent\(image, fallback = 100\) \{[\s\S]*?if \(!raw\) return fallback;/);
+  assert.match(imageControls, /image\.dataset\.mpseOpacityOn = '1';[\s\S]*?image\.dataset\.mpseOpacityValue = String\(value\)/);
+  assert.doesNotMatch(imageControls, /if \(value >= 100\)/);
   assert.doesNotMatch(imageTools, /style\.display === 'none' \|\| style\.visibility === 'hidden' \|\| style\.opacity === '0'/);
+});
+
+test('effect records are restored after the editor replaces a selected image node', () => {
+  const imageTools = readText('src/image-tools.js');
+  assert.match(imageTools, /effectRecords\.remember\(snapshot\.identity, snapshot\.imgData, snapshot\.cropCreateHostData\)/);
+  assert.match(imageTools, /function restoreEffectRecord\(image\) \{[\s\S]*?effectRecords\.find\(identity\)[\s\S]*?copyManagedData\(\{ imgData: record\.data \}, image\)/);
+  assert.match(imageTools, /snapshotMerge\.syncAttributes\([\s\S]*?record\.hostData/);
+  assert.match(imageTools, /state\.identity = restoreEffectRecord\(best\)/);
+  assert.match(imageTools, /state\.identity = restoreEffectRecord\(image\)/);
 });
 
 test('image editing core modules stay below the maintainability limit', () => {

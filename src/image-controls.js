@@ -53,12 +53,6 @@
         valueKeys: ['mpseFeatherAmount'],
         props: ['mask-image', '-webkit-mask-image', 'mask-size', '-webkit-mask-size', 'mask-repeat', '-webkit-mask-repeat', 'mask-position', '-webkit-mask-position']
       },
-      stroke: {
-        activeKey: 'mpseStrokeOn',
-        baseKey: 'mpseStrokeBase',
-        valueKeys: ['mpseStrokeWidth', 'mpseStrokeColor', 'mpseStrokeOpacity'],
-        props: ['outline', 'outline-offset']
-      },
       opacity: {
         activeKey: 'mpseOpacityOn',
         baseKey: 'mpseOpacityBase',
@@ -70,6 +64,8 @@
     const FRAME_APPEARANCE_PROPS = [...new Set([...frameStyleProps, 'overflow', 'vertical-align'])];
     const SPACING_STYLE_PROPS = ['display', 'margin-top', 'margin-bottom'];
     const CIRCLE_STYLE_PROPS = ['width', 'height', 'max-width', 'object-fit', 'display', 'margin-left', 'margin-right'];
+    const FILTER_STYLE_PROPS = ['filter'];
+    const STROKE_CLEANUP_PROPS = ['outline', 'outline-offset'];
     const IMAGE_BASE_STYLE_PROPS = [
       'border-radius', 'overflow', 'width', 'max-width', 'height', 'display',
       'margin-left', 'margin-right', 'margin-top', 'margin-bottom', 'box-shadow',
@@ -256,14 +252,131 @@
       return `rgba(${color.r}, ${color.g}, ${color.b}, ${clamp(opacity, 0, 1)})`;
     }
 
-    function rebuildFilter(image) {
-      const brightness = getDataNumber(image, 'mpseBrightness', 100);
-      const contrast = getDataNumber(image, 'mpseContrast', 100);
-      const saturate = getDataNumber(image, 'mpseSaturate', 100);
-      const gray = getDataNumber(image, 'mpseGray', 0);
-      const parts = [`brightness(${brightness}%)`, `contrast(${contrast}%)`, `saturate(${saturate}%)`];
-      if (gray > 0) parts.push(`grayscale(${gray}%)`);
-      setStyle(image, 'filter', parts.join(' '));
+    function readStyleBaseValue(image, key, prop) {
+      try {
+        const entry = JSON.parse(image.dataset[key] || '{}')[prop];
+        return entry && typeof entry === 'object' ? String(entry.value || '') : String(entry || '');
+      } catch (_) {
+        return '';
+      }
+    }
+
+    function alphaStrokeFilter(image) {
+      const width = clamp(getDataNumber(image, 'mpseStrokeWidth', 0), 0, 20);
+      if (width <= 0) return '';
+      const color = getDataString(image, 'mpseStrokeColor', '#07c160');
+      const opacity = clamp(getDataNumber(image, 'mpseStrokeOpacity', 100), 0, 100) / 100;
+      const rgba = hexToRgba(color, opacity, '#07c160');
+      return [
+        `drop-shadow(${width}px 0 0 ${rgba})`,
+        `drop-shadow(${-width}px 0 0 ${rgba})`,
+        `drop-shadow(0 ${width}px 0 ${rgba})`,
+        `drop-shadow(0 ${-width}px 0 ${rgba})`
+      ].join(' ');
+    }
+
+    function rebuildManagedFilter(image) {
+      const parts = [];
+      const base = readStyleBaseValue(image, 'mpseFilterBase', 'filter');
+      if (base && base.toLowerCase() !== 'none') parts.push(base);
+
+      if (image.dataset.mpseColorOn === '1') {
+        const brightness = getDataNumber(image, 'mpseBrightness', 100);
+        const contrast = getDataNumber(image, 'mpseContrast', 100);
+        const saturate = getDataNumber(image, 'mpseSaturate', 100);
+        const gray = getDataNumber(image, 'mpseGray', 0);
+        parts.push(`brightness(${brightness}%)`, `contrast(${contrast}%)`, `saturate(${saturate}%)`);
+        if (gray > 0) parts.push(`grayscale(${gray}%)`);
+      }
+
+      if (image.dataset.mpseStrokeOn === '1') parts.push(alphaStrokeFilter(image));
+      setStyle(image, 'filter', parts.filter(Boolean).join(' '));
+    }
+
+    function migrateColorFilterBase(image) {
+      if (image.dataset.mpseFilterBase !== undefined || image.dataset.mpseColorBase === undefined) return false;
+      image.dataset.mpseFilterBase = image.dataset.mpseColorBase;
+      delete image.dataset.mpseColorBase;
+      return true;
+    }
+
+    function captureManagedFilterBase(image) {
+      if (image.dataset.mpseFilterBase !== undefined || migrateColorFilterBase(image)) return;
+      captureStyleBase(image, 'mpseFilterBase', FILTER_STYLE_PROPS);
+    }
+
+    function releaseManagedFilter(image) {
+      if (image.dataset.mpseColorOn === '1' || image.dataset.mpseStrokeOn === '1') {
+        rebuildManagedFilter(image);
+        return;
+      }
+      if (image.dataset.mpseFilterBase !== undefined) restoreStyleBase(image, 'mpseFilterBase', FILTER_STYLE_PROPS);
+    }
+
+    function captureStrokeOutlineBase(image) {
+      if (!image || image.dataset.mpseStrokeBase !== undefined) {
+        if (!image) return;
+        try {
+          const base = JSON.parse(image.dataset.mpseStrokeBase || '{}');
+          if (!base.image) image.dataset.mpseStrokeBase = JSON.stringify({ image: base, host: null });
+        } catch (_) {
+          image.dataset.mpseStrokeBase = JSON.stringify({ image: null, host: null });
+        }
+        return;
+      }
+      const host = getAppearanceHost(image);
+      image.dataset.mpseStrokeBase = JSON.stringify({
+        image: captureInlineStyles(image, STROKE_CLEANUP_PROPS),
+        host: host !== image ? captureInlineStyles(host, STROKE_CLEANUP_PROPS) : null
+      });
+    }
+
+    function clearStrokeOutline(image) {
+      if (!image) return;
+      clearAppearanceProperties(image, STROKE_CLEANUP_PROPS);
+      const host = getAppearanceHost(image);
+      if (host !== image) clearAppearanceProperties(host, STROKE_CLEANUP_PROPS);
+    }
+
+    function restoreStrokeOutline(image) {
+      if (!image || image.dataset.mpseStrokeBase === undefined) return;
+      let base = { image: null, host: null };
+      try {
+        base = JSON.parse(image.dataset.mpseStrokeBase || '{}');
+        if (!base.image) base = { image: base, host: null };
+      } catch (_) {
+        base = { image: null, host: null };
+      }
+      const host = getAppearanceHost(image);
+      if (base.image) restoreInlineStyles(image, base.image);
+      else clearAppearanceProperties(image, STROKE_CLEANUP_PROPS);
+      if (host !== image) {
+        if (base.host) restoreInlineStyles(host, base.host);
+        else clearAppearanceProperties(host, STROKE_CLEANUP_PROPS);
+      }
+      delete image.dataset.mpseStrokeBase;
+    }
+
+    function applyStrokeEffect(image, values) {
+      const width = clamp(values.width, 0, 20);
+      if (width <= 0) {
+        clearStrokeEffect(image);
+        return;
+      }
+      captureStrokeOutlineBase(image);
+      clearStrokeOutline(image);
+      captureManagedFilterBase(image);
+      image.dataset.mpseStrokeOn = '1';
+      image.dataset.mpseStrokeWidth = String(width);
+      image.dataset.mpseStrokeColor = values.strokeColor || '#07c160';
+      image.dataset.mpseStrokeOpacity = String(clamp(values.opacity, 0, 100));
+      rebuildManagedFilter(image);
+    }
+
+    function clearStrokeEffect(image) {
+      for (const key of ['mpseStrokeOn', 'mpseStrokeWidth', 'mpseStrokeColor', 'mpseStrokeOpacity']) delete image.dataset[key];
+      restoreStrokeOutline(image);
+      releaseManagedFilter(image);
     }
 
     function applyGlowBoxShadow(image, values) {
@@ -552,6 +665,35 @@
       for (const prop of props) setStyle(target, prop, '');
     }
 
+    function captureAppearanceBase(image, config) {
+      if (!image || image.dataset[config.baseKey] !== undefined) return;
+      const host = getAppearanceHost(image);
+      image.dataset[config.baseKey] = JSON.stringify({
+        image: captureInlineStyles(image, config.props),
+        host: host !== image ? captureInlineStyles(host, config.props) : null
+      });
+    }
+
+    function readAppearanceBase(image, config) {
+      try {
+        const base = JSON.parse(image.dataset[config.baseKey] || '{}');
+        if (base && base.image) return base;
+        return { image: base, host: null };
+      } catch (_) {
+        return { image: null, host: null };
+      }
+    }
+
+    function restoreAppearanceBase(image, config, host) {
+      const base = readAppearanceBase(image, config);
+      if (base.image) restoreInlineStyles(image, base.image);
+      else clearAppearanceProperties(image, config.props);
+      if (host !== image) {
+        if (base.host) restoreInlineStyles(host, base.host);
+        else clearAppearanceProperties(host, config.props);
+      }
+    }
+
     function getAppearanceStyles(image, effect) {
       if (effect === 'feather') {
         const amount = clamp(getDataNumber(image, 'mpseFeatherAmount', 0), 0, 45);
@@ -568,12 +710,6 @@
           '-webkit-mask-position': 'center'
         };
       }
-      if (effect === 'stroke') {
-        const width = clamp(getDataNumber(image, 'mpseStrokeWidth', 0), 0, 20);
-        const color = getDataString(image, 'mpseStrokeColor', '#07c160');
-        const opacity = clamp(getDataNumber(image, 'mpseStrokeOpacity', 100), 0, 100) / 100;
-        return { outline: `${width}px solid ${hexToRgba(color, opacity, '#07c160')}`, 'outline-offset': '0px' };
-      }
       if (effect === 'opacity') {
         return { opacity: String(clamp(getDataNumber(image, 'mpseOpacityValue', 100), 0, 100) / 100) };
       }
@@ -583,21 +719,27 @@
     function renderAppearance(image) {
       if (!image || !image.style) return;
       const host = getAppearanceHost(image);
-      for (const effect of ['feather', 'stroke', 'opacity']) {
+      for (const effect of ['feather', 'opacity']) {
         const config = appearanceConfig(effect);
         const enabled = isAppearanceEnabled(image, effect);
         const hasBase = image.dataset[config.baseKey] !== undefined;
-        if (host !== image && (enabled || hasBase)) clearAppearanceProperties(host, config.props);
+        if (host !== image && (enabled || hasBase)) clearAppearanceProperties(image, config.props);
         if (enabled) {
-          if (host !== image) clearAppearanceProperties(image, config.props);
           setStyles(host, getAppearanceStyles(image, effect));
         } else if (hasBase) {
-          applyStyleBase(image, config.baseKey, config.props, image);
+          restoreAppearanceBase(image, config, host);
         }
       }
       if (image.dataset.mpseBaseBoxShadow !== undefined
         || image.dataset.mpseShadowOn === '1'
         || image.dataset.mpseGlowOn === '1') rebuildManagedBoxShadow(image);
+      if (image.dataset.mpseFilterBase !== undefined
+        || image.dataset.mpseColorOn === '1'
+        || image.dataset.mpseStrokeOn === '1') {
+        migrateColorFilterBase(image);
+        rebuildManagedFilter(image);
+      }
+      if (image.dataset.mpseStrokeOn === '1') clearStrokeOutline(image);
     }
 
     function renderCropAppearance(image) {
@@ -619,7 +761,7 @@
     function applyAppearanceEffect(image, effect, values) {
       const config = appearanceConfig(effect);
       if (!config || !image) return;
-      captureStyleBase(image, config.baseKey, config.props);
+      captureAppearanceBase(image, config);
 
       if (effect === 'feather') {
         const amount = clamp(values.amount, 0, 45);
@@ -631,24 +773,8 @@
         image.dataset.mpseFeatherAmount = String(amount);
       }
 
-      if (effect === 'stroke') {
-        const width = clamp(values.width, 0, 20);
-        if (width <= 0) {
-          clearAppearanceEffect(image, effect);
-          return;
-        }
-        image.dataset.mpseStrokeOn = '1';
-        image.dataset.mpseStrokeWidth = String(width);
-        image.dataset.mpseStrokeColor = values.strokeColor || '#07c160';
-        image.dataset.mpseStrokeOpacity = String(clamp(values.opacity, 0, 100));
-      }
-
       if (effect === 'opacity') {
         const value = clamp(values.value, 0, 100);
-        if (value >= 100) {
-          clearAppearanceEffect(image, effect);
-          return;
-        }
         image.dataset.mpseOpacityOn = '1';
         image.dataset.mpseOpacityValue = String(value);
       }
@@ -802,8 +928,8 @@
       if (effect === 'size') return '选中框、拖动和缩放使用微信编辑器原生能力；这里仅设置精确宽度与对齐。';
       if (effect === 'shadow' || effect === 'glow') return '阴影/发光的边角跟随图片圆角；需要圆角请单独调“圆角”。';
       if (effect === 'feather') return '羽化作用于图片或裁切容器的边缘，拖到 0 可恢复原状。';
-      if (effect === 'stroke') return '描边不改变图片尺寸，也不会影响阴影、发光或相框。';
-      if (effect === 'opacity') return '透明度作用于整张图片；调回 100% 可恢复原始透明度。';
+      if (effect === 'stroke') return '描边跟随图片 alpha 透明轮廓，不再沿图片容器画矩形框。';
+      if (effect === 'opacity') return '滑块 100% 为完全不透明；“恢复”会还原应用效果前的透明度。';
       return '只有实际调整后才会同步到正文 HTML';
     }
 
@@ -815,6 +941,7 @@
       if (!image) return false;
       if (effect === 'shadow') return image.dataset.mpseShadowOn === '1';
       if (effect === 'glow') return image.dataset.mpseGlowOn === '1';
+      if (effect === 'stroke') return image.dataset.mpseStrokeOn === '1';
       if (appearanceConfig(effect)) return isAppearanceEnabled(image, effect);
       return getAppliedEffects(image).has(effect);
     }
@@ -999,16 +1126,17 @@
         applyGlowBoxShadow(image, values);
       }
 
+      if (effect === 'stroke') applyStrokeEffect(image, values);
       if (appearanceConfig(effect)) applyAppearanceEffect(image, effect, values);
 
       if (effect === 'color') {
-        captureStyleBase(image, 'mpseColorBase', ['filter']);
+        captureManagedFilterBase(image);
         image.dataset.mpseColorOn = '1';
         image.dataset.mpseBrightness = String(clamp(values.brightness, 40, 180));
         image.dataset.mpseContrast = String(clamp(values.contrast, 40, 180));
         image.dataset.mpseSaturate = String(clamp(values.saturate, 0, 240));
         image.dataset.mpseGray = String(clamp(values.gray, 0, 100));
-        rebuildFilter(image);
+        rebuildManagedFilter(image);
       }
 
       if (effect === 'rotate') {
@@ -1083,6 +1211,8 @@
       if (effect === 'spacing') return image.dataset.mpseSpacingOn === '1' || image.dataset.mpseSpacingBase !== undefined;
       if (effect === 'shadow') return image.dataset.mpseShadowOn === '1';
       if (effect === 'glow') return image.dataset.mpseGlowOn === '1';
+      if (effect === 'stroke') return image.dataset.mpseStrokeOn === '1'
+        || image.dataset.mpseStrokeBase !== undefined;
       if (appearanceConfig(effect)) {
         const config = appearanceConfig(effect);
         return image.dataset[config.activeKey] === '1' || image.dataset[config.baseKey] !== undefined;
@@ -1147,10 +1277,12 @@
           restoreBaseBoxShadow(image);
         }
       }
+      if (effect === 'stroke') clearStrokeEffect(image);
       if (appearanceConfig(effect)) clearAppearanceEffect(image, effect);
       if (effect === 'color') {
+        migrateColorFilterBase(image);
         for (const key of ['mpseColorOn', 'mpseBrightness', 'mpseContrast', 'mpseSaturate', 'mpseGray']) delete image.dataset[key];
-        restoreStyleBase(image, 'mpseColorBase', ['filter']);
+        releaseManagedFilter(image);
       }
       if (effect === 'rotate') {
         delete image.dataset.mpseRotate;

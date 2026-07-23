@@ -22,7 +22,7 @@ test('repository exposes one-command extension verification', () => {
   assert.equal(pkg.scripts?.check, 'node tools/verify-extension.mjs');
   assert.equal(
     pkg.scripts?.test,
-    'node --test tools/release-contracts.test.mjs tools/image-interaction-contracts.test.mjs tools/image-geometry.test.mjs tools/image-state-contracts.test.mjs tools/bridge-client.test.mjs tools/page-bridge.test.mjs'
+    'node --test tools/release-contracts.test.mjs tools/image-interaction-contracts.test.mjs tools/image-effects.test.mjs tools/image-geometry.test.mjs tools/image-state-contracts.test.mjs tools/bridge-client.test.mjs tools/page-bridge.test.mjs'
   );
   assert.equal(pkg.scripts?.package, 'node tools/package-extension.mjs');
 
@@ -45,7 +45,7 @@ test('release version and ASCII package folder stay consistent', () => {
   const releaseVersion = manifest.version_name || manifest.version;
 
   assert.equal(pkg.version, manifest.version);
-  assert.equal(releaseVersion, '1.0.0');
+  assert.equal(releaseVersion, '0.10');
   assert.ok(readme.includes(`当前版本：\`v${releaseVersion}\``));
   assert.ok(changelog.includes(`## v${releaseVersion} ·`));
   assert.ok(bridgeClient.includes(`const VERSION = 'v${manifest.version}';`));
@@ -77,6 +77,7 @@ test('content scripts load the shared bridge client before dependent modules', (
     'src/image-geometry.js',
     'src/image-controls.js',
     'src/image-snapshot-merge.js',
+    'src/image-effect-records.js',
     'src/image-tools.js',
     'src/svg-tools.js',
     'src/svg-block-tools.js'
@@ -94,6 +95,7 @@ test('image snapshot patches preserve the latest native styles and attributes', 
   assert.equal(snapshotMerge.effectFromReason('size-align'), 'size');
   assert.equal(snapshotMerge.targetForEffect(imageTarget, hostTarget, 'shadow'), hostTarget);
   assert.equal(snapshotMerge.targetForEffect(imageTarget, hostTarget, 'color'), imageTarget);
+  assert.equal(snapshotMerge.targetForEffect(imageTarget, hostTarget, 'stroke'), imageTarget);
 
   const localImage = new FakeElement('img', {}, { width: '52%', opacity: '0.7' });
   const patch = snapshotMerge.captureStylePatch(localImage, ['width']);
@@ -163,8 +165,15 @@ test('real image snapshots own only the properties changed by the current operat
     width: '52%', translate: '40px 10px', opacity: '0.6', filter: 'brightness(90%)', 'box-shadow': '0 4px 9px #000'
   });
   const opacity = snapshotMerge.createSnapshot({ identity, image, cropHost: host, reason: 'opacity' });
+  assert.deepEqual(Object.keys(opacity.imgStylePatch), ['opacity']);
   assert.deepEqual(Object.keys(opacity.hostStylePatch), ['opacity']);
   assert.equal(opacity.hostDataAction, 'none');
+
+  host.style.setProperty('outline', '4px solid red');
+  image.style.setProperty('filter', 'drop-shadow(0 0 4px red)');
+  const stroke = snapshotMerge.createSnapshot({ identity, image, cropHost: host, reason: 'stroke' });
+  assert.equal(stroke.imgStylePatch.filter.value, 'drop-shadow(0 0 4px red)');
+  assert.equal(stroke.hostStylePatch.outline.value, '4px solid red');
 
   const crop = snapshotMerge.createSnapshot({ identity, image, cropHost: host, reason: 'crop' });
   assert.equal(crop.hostStylePatch.translate.value, '40px 10px');
@@ -185,6 +194,33 @@ test('real image snapshots own only the properties changed by the current operat
   const afterRemovalEffect = snapshotMerge.createSnapshot({ identity, image, previous: removed, reason: 'opacity' });
   assert.equal(afterRemovalEffect.cropAction, 'remove');
   assert.ok(Object.keys(afterRemovalEffect.cropRemovalImgStylePatch).length > 0);
+});
+
+test('every crop-layout effect synchronizes the host metadata it mutates', () => {
+  const identity = { editId: 'img-crop-metadata' };
+  const image = new FakeElement('img');
+  image.dataset = {};
+  const host = new FakeElement('span', {
+    'data-mpse-image-crop': '1',
+    'data-mpse-crop-layout': '{"alignment":"right"}'
+  });
+
+  for (const effect of ['size', 'radius', 'spacing', 'rotate', 'frame', 'circle']) {
+    const snapshot = snapshotMerge.createSnapshot({
+      identity,
+      image,
+      cropHost: host,
+      reason: effect,
+      cropAttribute: 'data-mpse-image-crop'
+    });
+    assert.equal(snapshot.hostDataAction, 'sync', `${effect} must own crop metadata`);
+    assert.equal(snapshot.hostData['data-mpse-crop-layout'], '{"alignment":"right"}');
+  }
+
+  for (const effect of ['shadow', 'glow', 'feather', 'stroke', 'color', 'opacity']) {
+    const snapshot = snapshotMerge.createSnapshot({ identity, image, cropHost: host, reason: effect });
+    assert.equal(snapshot.hostDataAction, 'none', `${effect} must not claim unrelated crop metadata`);
+  }
 });
 
 test('pending crop topology survives a stale editor DOM replacement', () => {

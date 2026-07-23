@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const VERSION = 'v1.0.0';
+  const VERSION = 'v0.10.0';
   const MENU_ID = 'mpse-img2-menu';
   const PANEL_ID = 'mpse-img2-panel';
   const BADGE_ID = 'mpse-img2-badge';
@@ -12,6 +12,7 @@
   const bridgeClient = window.__MPSE_BRIDGE_CLIENT__;
   const imageGeometry = window.__MPSE_IMAGE_GEOMETRY__;
   const snapshotMerge = window.__MPSE_IMAGE_SNAPSHOT_MERGE__;
+  const effectRecordFactory = window.__MPSE_IMAGE_EFFECT_RECORDS__;
   const injectBridge = bridgeClient && typeof bridgeClient.inject === 'function'
     ? bridgeClient.inject
     : () => false;
@@ -24,12 +25,15 @@
 
   if (!imageGeometry) throw new Error('图片几何模块未加载，请刷新页面后重试');
   if (!snapshotMerge) throw new Error('图片写回合并模块未加载，请刷新页面后重试');
+  if (!effectRecordFactory) throw new Error('图片效果记录模块未加载，请刷新页面后重试');
+
+  const effectRecords = effectRecordFactory.create();
 
   const MANAGED_DATA_KEYS = [
     'mpseGlowOn', 'mpseGlowBlur', 'mpseGlowSpread', 'mpseGlowOpacity', 'mpseGlowColor',
     'mpseBrightness', 'mpseContrast', 'mpseSaturate', 'mpseGray', 'mpseColorOn', 'mpseRotate', 'mpseRotateOn',
     'mpseShadowOn', 'mpseShadowX', 'mpseShadowY', 'mpseShadowBlur', 'mpseShadowSpread', 'mpseShadowOpacity', 'mpseShadowColor',
-    'mpseBaseBoxShadow', 'mpseCircleOn', 'mpseCircleBase', 'mpseCircleDiameter', 'mpseColorBase', 'mpseRotateBase', 'mpseFrameBase',
+    'mpseBaseBoxShadow', 'mpseCircleOn', 'mpseCircleBase', 'mpseCircleDiameter', 'mpseFilterBase', 'mpseColorBase', 'mpseRotateBase', 'mpseFrameBase',
     'mpseImageBase', 'mpseRadiusOn', 'mpseRadiusValue',
     'mpseSpacingOn', 'mpseSpacingBase', 'mpseFrameOn',
     'mpseFrameBorderWidth', 'mpseFramePadding', 'mpseFrameRadius', 'mpseFrameBorderColor', 'mpseFrameBackgroundColor',
@@ -257,6 +261,7 @@
 
   function imageSignature(image) {
     return {
+      pageKey: `${location.pathname}${location.search}`,
       index: imageIndexInArticle(image),
       scopeKey: editorScopeKey(image),
       editId: getAttr(image, 'data-mpse-image-id'),
@@ -1180,6 +1185,7 @@
     snapshot.revision = ++state.editRevision;
     state.lastSnapshot = snapshot;
     state.pendingSnapshots.set(imageIdentityKey(snapshot.identity), snapshot);
+    effectRecords.remember(snapshot.identity, snapshot.imgData, snapshot.cropCreateHostData);
     state.needsCommit = true;
 
     if (DEBUG) console.info('[公众号源码排版助手] image style applied', reason || '', image.getAttribute('style') || '');
@@ -1239,6 +1245,40 @@
         target.removeAttribute(attr);
       }
     }
+  }
+
+  function managedDataFromImage(image) {
+    return MANAGED_DATA_KEYS.reduce((data, key) => {
+      if (image && image.dataset && image.dataset[key] !== undefined) data[key] = image.dataset[key];
+      return data;
+    }, {});
+  }
+
+  function restoreEffectRecord(image) {
+    if (!image) return null;
+    const identity = imageSignature(image);
+    const record = effectRecords.find(identity);
+    if (record) {
+      if (!identity.editId && record.editId) image.setAttribute('data-mpse-image-id', record.editId);
+      copyManagedData({ imgData: record.data }, image);
+      const host = getCropContainer(image);
+      if (host && Object.keys(record.hostData || {}).length) {
+        snapshotMerge.syncAttributes(
+          host,
+          record.hostData,
+          (name) => name === CROP_ATTR || name.startsWith('data-mpse-')
+        );
+      }
+      rebuildFrameAppearance(image);
+      renderAppearance(image);
+      return imageSignature(image);
+    }
+    const currentData = managedDataFromImage(image);
+    if (Object.keys(currentData).length) {
+      effectRecords.remember(identity, currentData);
+      return imageSignature(image);
+    }
+    return identity;
   }
 
   function replaceOrRemoveCaption(targetImage, root, snapshot) {
@@ -1492,7 +1532,7 @@
     const best = findImageByIdentity(identity);
     if (best) {
       state.image = best;
-      state.identity = imageSignature(best);
+      state.identity = restoreEffectRecord(best);
       revealToolElements();
       setButtonStates();
       refreshVisiblePanel();
@@ -1511,7 +1551,7 @@
     cancelScheduledReacquire();
     state.selectionRevision += 1;
     state.image = image;
-    state.identity = imageSignature(image);
+    state.identity = restoreEffectRecord(image);
     revealToolElements();
     setButtonStates();
     refreshVisiblePanel();
