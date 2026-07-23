@@ -558,6 +558,17 @@
     }
   }
 
+  function normalizedImageUrl(value) {
+    const raw = String(value || '').trim();
+    if (/^(?:data:image\/|blob:)/i.test(raw)) return raw;
+    try {
+      const url = new URL(raw, location.href);
+      return ['http:', 'https:'].includes(url.protocol) ? url.href : '';
+    } catch (_) {
+      return '';
+    }
+  }
+
   const NATIVE_IMAGE_ATTRIBUTES = Object.freeze([
     'src',
     'data-src',
@@ -588,6 +599,27 @@
       || image?.src
       || ''
     );
+  }
+
+  function wechatAssetKey(value) {
+    const normalized = normalizedWechatCdnUrl(value);
+    if (!normalized) return '';
+    const url = new URL(normalized);
+    return `${url.hostname}${url.pathname}`;
+  }
+
+  function imageMatchesWechatAsset(image, value) {
+    const expected = wechatAssetKey(value);
+    if (!image || !expected) return false;
+    const sources = [
+      image.getAttribute?.('data-src'),
+      image.getAttribute?.('src'),
+      image.getAttribute?.('data-backsrc'),
+      image.getAttribute?.('data-croporisrc'),
+      image.currentSrc,
+      image.src
+    ];
+    return sources.some((source) => wechatAssetKey(source) === expected);
   }
 
   function rawImageSource(image) {
@@ -625,9 +657,9 @@
       const exact = images.find((image) => image.getAttribute('data-mpse-image-id') === editId);
       if (exact) return exact;
     }
-    const sourceUrl = normalizedWechatCdnUrl(locator.sourceUrl);
+    const sourceUrl = normalizedImageUrl(locator.sourceUrl);
     if (sourceUrl) {
-      const matches = images.filter((image) => imageSource(image) === sourceUrl);
+      const matches = images.filter((image) => normalizedImageUrl(rawImageSource(image)) === sourceUrl);
       if (matches.length === 1) return matches[0];
       const index = Number(locator.index);
       if (Number.isInteger(index) && index >= 0 && matches.includes(images[index])) {
@@ -780,8 +812,7 @@
         const readiness = await invokeMpEditor('mp_editor_get_isready', undefined, 3000, api);
         if (readiness?.isReady && readiness?.isNew) {
           await invokeMpEditor('mp_editor_set_selection', {
-            container: image,
-            selectAfter: true
+            container: image
           }, 3000, api);
           return 'mp-editor-jsapi';
         }
@@ -793,8 +824,7 @@
     const doc = editor.ownerDocument;
     const selection = doc.getSelection();
     const range = doc.createRange();
-    range.setStartAfter(image);
-    range.collapse(true);
+    range.selectNode(image);
     selection.removeAllRanges();
     selection.addRange(range);
     editor.focus();
@@ -906,7 +936,9 @@
   function contentHasImageSource(content, cdnUrl) {
     const container = document.createElement('div');
     container.innerHTML = String(content || '');
-    return Array.from(container.querySelectorAll('img')).some((image) => imageSource(image) === cdnUrl);
+    return Array.from(container.querySelectorAll('img')).some((image) => (
+      imageSource(image) === cdnUrl || imageMatchesWechatAsset(image, cdnUrl)
+    ));
   }
 
   async function confirmPastedImageInContent(cdnUrl, epoch, baseline, context) {
@@ -1093,16 +1125,14 @@
       releaseNativePasteInputLock(context);
     }
 
-    if (placement === 'after') {
-      schedulePastedImageCleanup({
-        pasteId,
-        cdnUrl,
-        expectedArticleKey: baseline.articleKey,
-        placement,
-        originalAttributes: context.originalAttributes,
-        locator
-      }, POST_PASTE_STABILITY_CHECKS);
-    }
+    schedulePastedImageCleanup({
+      pasteId,
+      cdnUrl,
+      expectedArticleKey: baseline.articleKey,
+      placement: 'after',
+      originalAttributes: context.originalAttributes,
+      locator
+    }, POST_PASTE_STABILITY_CHECKS);
 
     return {
       pasteId,
@@ -1113,12 +1143,13 @@
       selectionMode,
       articleKey: baseline.articleKey,
       placement,
-      cleanupPending: false
+      cleanupPending: placement === 'after'
     };
   }
 
   function findPastedImageForDiscard(root, payload) {
-    const images = Array.from(root?.querySelectorAll?.('img') || []);
+    const images = Array.from(root?.querySelectorAll?.('img') || [])
+      .filter((image) => image?.isConnected !== false);
     const pasteId = String(payload?.pasteId || '');
     const locator = payload?.locator || {};
     const target = locateImageForPaste(root, locator);
@@ -1130,17 +1161,27 @@
     if (payload?.placement === 'replace') {
       if (marked) return marked;
       if (!cdnUrl) return null;
-      if (target && imageSource(target) === cdnUrl) return target;
+      if (target && imageMatchesWechatAsset(target, cdnUrl)) return target;
       const index = Number(locator.index);
       const indexed = Number.isInteger(index) && index >= 0 ? images[index] || null : null;
-      return indexed && imageSource(indexed) === cdnUrl ? indexed : null;
+      return indexed && imageMatchesWechatAsset(indexed, cdnUrl) ? indexed : null;
     }
 
     if (marked) return marked;
-    if (!target || !cdnUrl) return null;
-    const targetIndex = images.indexOf(target);
-    const adjacent = targetIndex >= 0 ? images[targetIndex + 1] : null;
-    return adjacent && imageSource(adjacent) === cdnUrl ? adjacent : null;
+    if (!cdnUrl) return null;
+    if (target) {
+      const targetIndex = images.indexOf(target);
+      const adjacent = targetIndex >= 0 ? images[targetIndex + 1] : null;
+      if (adjacent && imageMatchesWechatAsset(adjacent, cdnUrl)) return adjacent;
+    }
+
+    const index = Number(locator.index);
+    if (!Number.isInteger(index) || index < 0) return null;
+    const indexedTarget = images[index] || null;
+    const indexedCandidate = images[index + 1] || null;
+    return indexedTarget && indexedCandidate && imageMatchesWechatAsset(indexedCandidate, cdnUrl)
+      ? indexedCandidate
+      : null;
   }
 
   async function discardPastedImage(payload) {
@@ -1155,30 +1196,46 @@
     if (expectedArticleKey && current.articleKey !== expectedArticleKey) {
       throw contentConflict(current.mode);
     }
+    const placement = payload?.placement === 'replace' ? 'replace' : 'after';
+    const originalAttributes = normalizedNativeAttributeRecord(payload?.originalAttributes);
+    const originalSource = normalizedImageUrl(
+      originalAttributes['data-src'] || originalAttributes.src
+    );
+    if (placement === 'replace' && !originalSource) {
+      return { changed: false, confirmedAbsent: false };
+    }
+
+    let liveChanged = false;
+    const liveCandidate = findPastedImageForDiscard(editor, payload);
+    if (liveCandidate) {
+      if (placement === 'replace') {
+        syncNativeImageAttributes(liveCandidate, originalAttributes);
+        liveCandidate.removeAttribute('data-mpse-native-paste-id');
+        liveCandidate.removeAttribute('data-mpse-paste-for');
+      } else {
+        removeEmptyPasteWrapper(liveCandidate, editor);
+      }
+      dispatchEditorEvents(editor, '');
+      liveChanged = true;
+    }
+
     const container = document.createElement('div');
     container.innerHTML = current.content;
     const candidate = findPastedImageForDiscard(container, payload);
     if (!candidate) {
       const target = locateImageForPaste(container, payload?.locator || {});
       if (payload?.placement !== 'replace' && target) {
-        return { changed: false, confirmedAbsent: true };
+        return { changed: liveChanged, confirmedAbsent: true };
       }
       const cdnUrl = normalizedWechatCdnUrl(payload?.cdnUrl);
       const sourceStillPresent = Boolean(cdnUrl) && Array.from(container.querySelectorAll('img'))
-        .some((image) => imageSource(image) === cdnUrl);
+        .some((image) => imageMatchesWechatAsset(image, cdnUrl));
       return {
-        changed: false,
+        changed: liveChanged,
         confirmedAbsent: Boolean(cdnUrl && !sourceStillPresent)
       };
     }
-    if (payload?.placement === 'replace') {
-      const originalAttributes = normalizedNativeAttributeRecord(payload?.originalAttributes);
-      const originalSource = normalizedWechatCdnUrl(
-        originalAttributes['data-src'] || originalAttributes.src
-      );
-      if (!originalSource) {
-        return { changed: false, confirmedAbsent: false };
-      }
+    if (placement === 'replace') {
       syncNativeImageAttributes(candidate, originalAttributes);
       candidate.removeAttribute('data-mpse-native-paste-id');
       candidate.removeAttribute('data-mpse-paste-for');
@@ -1242,7 +1299,10 @@
       }
       entry.attempts += 1;
       try {
-        const result = await enqueueEditorWrite(() => discardPastedImage(entry.payload));
+        const result = await enqueueEditorWrite(
+          () => discardPastedImage(entry.payload),
+          { invalidateRevision: false }
+        );
         if (result.changed || result.confirmedAbsent) {
           if (entry.stabilityChecks <= 1) {
             forgetPastedImageCleanup(key);
@@ -1280,7 +1340,7 @@
           error: asErrorPayload(error)
         };
       }
-    });
+    }, { invalidateRevision: false });
   }
 
   function postResponse(requestId, type, ok, data, error) {

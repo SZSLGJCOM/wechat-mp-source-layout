@@ -96,8 +96,9 @@ test('temporary paste candidates can be cleaned after the original image disappe
     pasteId: 'stripped-marker',
     cdnUrl: 'https://mmbiz.qpic.cn/unmarked.png'
   }], { index: 0 });
-  assert.equal(unmarkedResult.changed, true);
-  assert.equal(unmarked.image.removed, true);
+  assert.equal(unmarkedResult.changed, false);
+  assert.equal(unmarkedResult.target, unmarked.image);
+  assert.equal(unmarked.image.removed, false);
   assert.deepEqual(unmarkedResult.unresolved, []);
 
   const replacement = createRoot({
@@ -121,22 +122,22 @@ test('temporary paste candidates can be cleaned after the original image disappe
       return selector === 'img' ? this.images.filter((image) => !image.removed) : [];
     }
   };
-  const pairImage = () => ({
+  const pairImage = (source) => ({
     removed: false,
     parentElement: pairRoot,
     getAttribute(name) {
-      return name === 'data-src' ? 'https://mmbiz.qpic.cn/shared-baked.png' : '';
+      return name === 'data-src' ? source : '';
     },
     remove() {
       this.removed = true;
     }
   });
-  const promotedOriginal = pairImage();
-  const appendedCandidate = pairImage();
+  const promotedOriginal = pairImage('https://mmbiz.qpic.cn/shared-baked.png?wx_fmt=png&from=appmsg');
+  const appendedCandidate = pairImage('https://mmbiz.qpic.cn/shared-baked.png?wx_fmt=png&tp=webp&wxfrom=5');
   pairRoot.images.push(promotedOriginal, appendedCandidate);
   const pairResult = removeNativePasteCandidates(pairRoot, null, [{
     pasteId: 'stripped-appended-marker',
-    cdnUrl: 'https://mmbiz.qpic.cn/shared-baked.png',
+    cdnUrl: 'https://mmbiz.qpic.cn/shared-baked.png?wx_fmt=png&from=appmsg',
     placement: 'after'
   }], { index: 0 });
   assert.equal(pairResult.target, promotedOriginal);

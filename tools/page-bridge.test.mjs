@@ -621,7 +621,7 @@ test('image bake removes a late native-paste duplicate without losing the origin
 
   assert.equal(response.ok, true, JSON.stringify(response.error));
   assert.equal(selectionPayload.container, original);
-  assert.equal(selectionPayload.selectAfter, true);
+  assert.equal(Object.hasOwn(selectionPayload, 'selectAfter'), false);
   assert.equal(pasteEvent.type, 'paste');
   assert.equal(pasteEvent.clipboardData.files.length, 1);
   assert.equal(pasteEvent.clipboardData.files[0].name, 'article-effect.png');
@@ -645,7 +645,7 @@ test('image bake removes a late native-paste duplicate without losing the origin
     selectionMode: 'mp-editor-jsapi',
     articleKey: 'path=/cgi-bin/appmsg',
     placement: 'after',
-    cleanupPending: false
+    cleanupPending: true
   });
 
   canonicalContent = [
@@ -1428,6 +1428,109 @@ test('discard removes a marked candidate even when the original target is alread
   assert.match(setContent, /neighbor\.png/);
 });
 
+test('discard removes a marker-stripped adjacent duplicate after the target source changes', async () => {
+  let canonicalContent = [
+    '<p><img data-mpse-glow-on="1" style="width:70%"',
+    ' data-src="https://mmbiz.qpic.cn/baked-shared.png?wx_fmt=png&amp;from=appmsg"></p>',
+    '<p><img src="https://mmbiz.qpic.cn/baked-shared.png?wx_fmt=png&amp;tp=webp&amp;wxfrom=5"></p>'
+  ].join('');
+  let setContent = '';
+  const editor = { innerHTML: canonicalContent, textContent: '', isConnected: true };
+  const harness = createPageHarness((payload) => {
+    if (payload.apiName === 'mp_editor_get_content') {
+      payload.sucCb({ content: canonicalContent });
+      return;
+    }
+    if (payload.apiName === 'mp_editor_set_content') {
+      setContent = payload.apiParam.content;
+      canonicalContent = setContent;
+      payload.sucCb({});
+      return;
+    }
+    throw new Error(`unexpected API ${payload.apiName}`);
+  }, { editor });
+
+  const response = await harness.request('DISCARD_PASTED_IMAGE', {
+    pasteId: 'stripped-after-candidate',
+    cdnUrl: 'https://mmbiz.qpic.cn/baked-shared.png?wx_fmt=png&from=appmsg',
+    placement: 'after',
+    expectedArticleKey: 'path=/cgi-bin/appmsg',
+    locator: {
+      editId: 'sanitized-image-id',
+      sourceUrl: 'https://mmbiz.qpic.cn/source-before-bake.png',
+      index: 0
+    }
+  });
+
+  assert.equal(response.ok, true, JSON.stringify(response.error));
+  assert.equal(response.data.changed, true);
+  assert.equal((setContent.match(/<img\b/g) || []).length, 1);
+  assert.match(setContent, /data-mpse-glow-on="1"/);
+  assert.match(setContent, /style="width:70%"/);
+  assert.doesNotMatch(setContent, /tp=webp|wxfrom=5/);
+});
+
+test('discard removes a late duplicate from live DOM even before the canonical model receives it', async () => {
+  const bakedUrl = 'https://mmbiz.qpic.cn/live-only.png?wx_fmt=png&from=appmsg';
+  const target = fakeImage({
+    'data-src': bakedUrl,
+    'data-mpse-shadow-on': '1',
+    style: 'width:66%'
+  });
+  const duplicate = fakeImage({
+    src: 'https://mmbiz.qpic.cn/live-only.png?wx_fmt=png&tp=webp&wxfrom=5'
+  });
+  const liveImages = [target, duplicate];
+  const canonicalContent = [
+    '<p><img data-mpse-shadow-on="1" style="width:66%"',
+    ` data-src="${bakedUrl.replaceAll('&', '&amp;')}"></p>`
+  ].join('');
+  let setCalls = 0;
+  const editor = {
+    innerHTML: canonicalContent,
+    textContent: '',
+    isConnected: true,
+    querySelectorAll(selector) {
+      return selector === 'img' ? liveImages.filter((image) => image.isConnected !== false) : [];
+    },
+    dispatchEvent() {
+      return true;
+    }
+  };
+  const harness = createPageHarness((payload) => {
+    if (payload.apiName === 'mp_editor_get_content') {
+      payload.sucCb({ content: canonicalContent });
+      return;
+    }
+    if (payload.apiName === 'mp_editor_set_content') {
+      setCalls += 1;
+      payload.sucCb({});
+      return;
+    }
+    throw new Error(`unexpected API ${payload.apiName}`);
+  }, { editor });
+
+  const response = await harness.request('DISCARD_PASTED_IMAGE', {
+    pasteId: 'live-only-duplicate',
+    cdnUrl: bakedUrl,
+    placement: 'after',
+    expectedArticleKey: 'path=/cgi-bin/appmsg',
+    locator: {
+      editId: 'sanitized-live-id',
+      sourceUrl: 'https://mmbiz.qpic.cn/live-source.png',
+      index: 0
+    }
+  });
+
+  assert.equal(response.ok, true, JSON.stringify(response.error));
+  assert.equal(response.data.changed, true);
+  assert.equal(duplicate.isConnected, false);
+  assert.equal(target.isConnected, true);
+  assert.equal(target.getAttribute('data-mpse-shadow-on'), '1');
+  assert.equal(target.getAttribute('style'), 'width:66%');
+  assert.equal(setCalls, 0);
+});
+
 test('discard restores a marked replacement instead of deleting the only image', async () => {
   let canonicalContent = [
     '<p><img data-mpse-native-paste-id="replace-cleanup-1"',
@@ -1457,8 +1560,8 @@ test('discard restores a marked replacement instead of deleting the only image',
     cdnUrl: 'https://mmbiz.qpic.cn/replacement.png',
     placement: 'replace',
     originalAttributes: {
-      src: 'https://mmbiz.qpic.cn/source.png',
-      'data-src': 'https://mmbiz.qpic.cn/source.png',
+      src: 'https://assets.example.com/source.png',
+      'data-src': 'https://assets.example.com/source.png',
       'data-fileid': 'source-file',
       'data-w': '640',
       'data-ratio': '0.75',
@@ -1467,7 +1570,7 @@ test('discard restores a marked replacement instead of deleting the only image',
     expectedArticleKey: 'path=/cgi-bin/appmsg',
     locator: {
       editId: 'image-1',
-      sourceUrl: 'https://mmbiz.qpic.cn/source.png',
+      sourceUrl: 'https://assets.example.com/source.png',
       index: 0
     }
   });
@@ -1478,8 +1581,8 @@ test('discard restores a marked replacement instead of deleting the only image',
     confirmedAbsent: true
   });
   assert.equal((setContent.match(/<img\b/g) || []).length, 1);
-  assert.match(setContent, /src="https:\/\/mmbiz\.qpic\.cn\/source\.png"/);
-  assert.match(setContent, /data-src="https:\/\/mmbiz\.qpic\.cn\/source\.png"/);
+  assert.match(setContent, /src="https:\/\/assets\.example\.com\/source\.png"/);
+  assert.match(setContent, /data-src="https:\/\/assets\.example\.com\/source\.png"/);
   assert.match(setContent, /data-fileid="source-file"/);
   assert.match(setContent, /data-w="640"/);
   assert.doesNotMatch(setContent, /replacement\.png|replacement-file|data-mpse-native-paste-id|data-mpse-paste-for/);
@@ -1560,7 +1663,7 @@ test('replacement cleanup fails closed when original native attributes are inval
     cdnUrl: 'https://mmbiz.qpic.cn/replacement-invalid.png',
     placement: 'replace',
     originalAttributes: {
-      src: 'https://example.com/not-wechat.png'
+      src: 'javascript:alert(1)'
     },
     expectedArticleKey: 'path=/cgi-bin/appmsg',
     locator: {
@@ -1606,8 +1709,15 @@ test('ambiguous cleanup is retained by the page bridge retry owner', async () =>
 test('the page bridge no longer calls the private image upload endpoint', () => {
   assert.doesNotMatch(source, /\/cgi-bin\/filetransfer|ticket_id|writetype|scene:\s*['"]8['"]/);
   assert.match(source, /mp_editor_set_selection/);
+  assert.doesNotMatch(source, /selectAfter:\s*true|setStartAfter\(image\)/);
+  assert.match(source, /range\.selectNode\(image\)/);
   assert.match(source, /new view\.ClipboardEvent\('paste'/);
   assert.match(source, /channel:\s*'editor-paste'/);
+  assert.match(
+    source,
+    /discardPastedImage\(entry\.payload\),\s*\{ invalidateRevision: false \}/,
+    'maintenance cleanup must not invalidate a newer paste revision'
+  );
   assert.match(source, /let editorWriteRevision = 0/);
   assert.match(source, /\+\+editorWriteRevision/);
   assert.match(source, /editorInputEpoch !== epoch[\s\S]*?context\.revision !== editorWriteRevision/);

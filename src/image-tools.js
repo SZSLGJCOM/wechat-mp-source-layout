@@ -1461,6 +1461,19 @@
     const imageSource = (image) => stableUrl(
       image?.getAttribute('data-src') || image?.getAttribute('src') || ''
     );
+    const assetKey = (value) => {
+      try {
+        const url = new URL(stableUrl(value), 'https://mp.weixin.qq.com/');
+        return /^(?:mmbiz\.qpic\.cn|mmbiz\.qlogo\.cn|m\.qpic\.cn|mmsns\.qpic\.cn)$/i.test(url.hostname)
+          ? `${url.hostname}${url.pathname}`
+          : url.href;
+      } catch (_) {
+        return stableUrl(value);
+      }
+    };
+    const imageMatchesSource = (image, source) => (
+      imageSource(image) === source || assetKey(imageSource(image)) === assetKey(source)
+    );
     const clearPasteMarker = (image) => {
       if (!image) return;
       image.removeAttribute('data-mpse-native-paste-id');
@@ -1469,12 +1482,13 @@
     const matchRun = (images, start, sources) => {
       if (start < 0 || !sources.length) return [];
       const counts = sources.reduce((result, source) => {
-        result.set(source, (result.get(source) || 0) + 1);
+        const key = assetKey(source);
+        result.set(key, (result.get(key) || 0) + 1);
         return result;
       }, new Map());
       const matched = [];
       for (const image of images.slice(start)) {
-        const source = imageSource(image);
+        const source = assetKey(imageSource(image));
         const count = counts.get(source) || 0;
         if (!count) break;
         matched.push(image);
@@ -1485,7 +1499,22 @@
       return [];
     };
 
-    for (const candidate of candidates || []) {
+    const candidateList = candidates || [];
+    let images = Array.from(root.querySelectorAll('img'));
+    const fallbackIndex = Number.isInteger(identity.index) && identity.index >= 0
+      ? Math.min(identity.index, images.length)
+      : -1;
+    const afterSources = candidateList
+      .filter((candidate) => candidate?.placement !== 'replace' && candidate?.cdnUrl)
+      .map((candidate) => stableUrl(candidate.cdnUrl));
+    if (!target && fallbackIndex >= 0 && images[fallbackIndex] && afterSources.length) {
+      const window = images.slice(fallbackIndex, fallbackIndex + afterSources.length + 1);
+      if (window.some((image) => afterSources.some((source) => imageMatchesSource(image, source)))) {
+        target = images[fallbackIndex];
+      }
+    }
+
+    for (const candidate of candidateList) {
       const pasteId = String(candidate?.pasteId || '');
       const cdnUrl = stableUrl(candidate?.cdnUrl || '');
       const placement = candidate?.placement === 'replace' ? 'replace' : 'after';
@@ -1512,9 +1541,13 @@
         }
         changed = true;
       } else if (cdnUrl) {
-        const sourceStillPresent = Array.from(root.querySelectorAll('img')).some((image) => (
-          imageSource(image) === cdnUrl
-        ));
+        const currentImages = Array.from(root.querySelectorAll('img'));
+        const targetIndex = currentImages.indexOf(target);
+        const sourceStillPresent = placement === 'after' && targetIndex >= 0
+          ? currentImages
+            .slice(targetIndex + 1, targetIndex + 1 + Math.max(1, afterSources.length))
+            .some((image) => imageMatchesSource(image, cdnUrl))
+          : currentImages.some((image) => imageMatchesSource(image, cdnUrl));
         if (sourceStillPresent) pending.push({ cdnUrl, placement });
       } else if (pasteId) {
         pending.push({ cdnUrl: '', placement });
@@ -1525,17 +1558,14 @@
       return { changed, unresolved: pending, target };
     }
 
-    let images = Array.from(root.querySelectorAll('img'));
-    const fallbackIndex = Number.isInteger(identity.index) && identity.index >= 0
-      ? Math.min(identity.index, images.length)
-      : -1;
+    images = Array.from(root.querySelectorAll('img'));
 
     const replaceIndex = pending.findIndex((candidate) => candidate.placement === 'replace');
     if (replaceIndex >= 0) {
       const replacement = pending[replaceIndex];
-      const replacementNode = target && imageSource(target) === replacement.cdnUrl
+      const replacementNode = target && imageMatchesSource(target, replacement.cdnUrl)
         ? target
-        : (!target && fallbackIndex >= 0 && imageSource(images[fallbackIndex]) === replacement.cdnUrl
+        : (!target && fallbackIndex >= 0 && imageMatchesSource(images[fallbackIndex], replacement.cdnUrl)
           ? images[fallbackIndex]
           : null);
       if (!replacementNode) return { changed, unresolved: pending, target };
@@ -1558,8 +1588,6 @@
       if (matched.length) {
         target = images[fallbackIndex];
         targetIndex = fallbackIndex;
-      } else {
-        matched = matchRun(images, fallbackIndex, sources);
       }
     }
     if (!matched.length) return { changed, unresolved: pending, target };

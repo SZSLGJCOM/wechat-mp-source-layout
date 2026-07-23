@@ -10,7 +10,7 @@
 - `mp_editor_get_content`：读取当前正文 HTML。
 - `mp_editor_set_content`：写回全文 HTML。
 - `mp_editor_get_isready`：探测编辑器是否 ready。
-- `mp_editor_set_selection`：把图片粘贴位置放在待替换原图之后。
+- `mp_editor_set_selection`：默认选中待替换原图本身，使图片粘贴优先走原位替换。
 
 这些接口需要在微信公众号编辑页自身 JS 上下文中调用，公众号源码排版助手的 Chrome content script 需要注入 page-bridge 进入页面上下文。
 
@@ -27,7 +27,7 @@
 - 只有粘贴图片获得微信 CDN 地址且 `mp_editor_get_content` 能读到同一地址，才复制微信生成的原生图片属性。随后先恢复粘贴前正文；恢复确认成功后，才把该 CDN 资产交给统一图片快照提交。
 - 最终正文提交从干净基线开始，一次性写入烘焙来源和全部样式，不把上传占位留给后续提交清理。
 - 粘贴未被接收、上传超时、正文模型未确认或文章已切换时，保留原图并停止提交，禁止回退到私有上传接口。
-- 所有正文写事务共享修订号；新的 HTML 保存、图片提交或清理任务会使尚未归属的旧粘贴立即失效。
+- 用户发起的 HTML 保存和图片提交共享修订号并使旧粘贴失效；维护型清理只进入同一串行队列，不得递增修订号或中断下一次上传。
 - 撤回失败时，已归属候选的身份、文章身份、原图属性和位置语义移交给页面桥接清理队列；未归属的迟到图片不得按位置或 URL 猜测删除。
 - 图片写回由一个串行事务协调；烘焙期间的普通样式修改合并到同一次正文提交，不存在并行的“样式提交”和“上传提交”。
 - 正文只写入微信 CDN 地址；`blob:` 和 `data:` 地址不能作为可保存的最终图片来源。
@@ -36,7 +36,7 @@
 
 ## 失败策略
 
-- 新编辑器优先使用 `mp_editor_set_selection({ container, selectAfter: true })` 定位；旧 UEditor 只降级为 DOM Range 定位。
+- 新编辑器优先使用 `mp_editor_set_selection({ container })` 选中原图；旧 UEditor 降级为 `Range.selectNode(image)`，不主动把粘贴位置放到原图之后。
 - 不使用 `navigator.clipboard.write`，避免权限、用户激活要求和覆盖系统剪贴板。
 - 不使用 `document.execCommand('paste')`，避免引入 `clipboardRead` 权限。
 - 不通过 `mp_editor_insert_html` 写入 data/blob 图片；公开文档没有承诺它会把这类地址转成微信素材。
