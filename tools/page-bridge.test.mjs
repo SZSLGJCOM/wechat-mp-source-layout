@@ -183,6 +183,34 @@ test('composition keeps a queued SET deferred until composition ends and becomes
   assert.deepEqual(calls, ['mp_editor_get_content', 'mp_editor_set_content']);
 });
 
+test('an abandoned composition cannot leave the SET queue pending forever', async () => {
+  const editor = { innerHTML: 'before', textContent: 'before', isConnected: true };
+  let nativeCalls = 0;
+  const harness = createPageHarness((payload) => {
+    nativeCalls += 1;
+    payload.sucCb({});
+  }, { editor });
+
+  harness.fireDocumentEvent('compositionstart');
+  const pending = harness.request('SET_CONTENT', {
+    content: 'after',
+    expectedContent: 'before',
+    expectedMode: 'mp-editor-jsapi'
+  });
+  await nextTurn();
+  harness.runTimer(2500);
+
+  const response = await pending;
+  assert.equal(response.ok, false);
+  assert.equal(response.error.code, 'MPSE_EDITOR_BUSY');
+  assert.equal(nativeCalls, 0, 'a timed-out input session must fail before any native write');
+
+  harness.runTimer(160);
+  const retry = await harness.request('SET_CONTENT', { content: 'retry' });
+  assert.equal(retry.ok, true);
+  assert.equal(nativeCalls, 1, 'the queue must recover after abandoning stale composition state');
+});
+
 test('input during final expected-content validation becomes a retryable conflict', async () => {
   const editor = { innerHTML: 'before', textContent: 'before', isConnected: true };
   let finishGet = null;

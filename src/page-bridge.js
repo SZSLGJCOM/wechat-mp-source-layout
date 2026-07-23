@@ -6,8 +6,10 @@
   const CONTENT_CONFLICT_CODE = 'MPSE_CONTENT_CONFLICT';
   const JSAPI_TIMEOUT_CODE = 'MPSE_JSAPI_TIMEOUT';
   const WRITE_UNCERTAIN_CODE = 'MPSE_WRITE_UNCERTAIN';
+  const EDITOR_BUSY_CODE = 'MPSE_EDITOR_BUSY';
   const SET_CONFIRM_TIMEOUT_MS = 5000;
   const EDITOR_INPUT_IDLE_MS = 160;
+  const EDITOR_INPUT_WAIT_TIMEOUT_MS = 2500;
 
   if (window.__MP_SOURCE_EDITOR_BRIDGE_INSTALLED__) {
     return;
@@ -302,17 +304,52 @@
     }
   }
 
+  function editorBusy() {
+    const error = new Error('微信编辑器仍处于输入或文章切换状态，请稍后重试');
+    error.code = EDITOR_BUSY_CODE;
+    return error;
+  }
+
+  function waitUntilSettled(promise, timeoutMs) {
+    return new Promise((resolve, reject) => {
+      const timer = window.setTimeout(() => reject(editorBusy()), timeoutMs);
+      Promise.resolve(promise).then(
+        (value) => {
+          window.clearTimeout(timer);
+          resolve(value);
+        },
+        (error) => {
+          window.clearTimeout(timer);
+          reject(error);
+        }
+      );
+    });
+  }
+
   async function waitForEditorInputIdle() {
     ensureEditorInputTracking();
-    for (;;) {
-      if (compositionActive) {
-        await compositionEnd;
-        continue;
+    const deadline = Date.now() + EDITOR_INPUT_WAIT_TIMEOUT_MS;
+    try {
+      for (;;) {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) throw editorBusy();
+        if (compositionActive) {
+          await waitUntilSettled(compositionEnd, remaining);
+          continue;
+        }
+        const epoch = editorInputEpoch;
+        const idle = editorInputIdle;
+        await waitUntilSettled(idle, remaining);
+        if (!compositionActive && !editorInputTimer && epoch === editorInputEpoch) return epoch;
       }
-      const epoch = editorInputEpoch;
-      const idle = editorInputIdle;
-      await idle;
-      if (!compositionActive && !editorInputTimer && epoch === editorInputEpoch) return epoch;
+    } catch (error) {
+      if (error?.code === EDITOR_BUSY_CODE && compositionActive) {
+        compositionActive = false;
+        const resolve = resolveCompositionEnd;
+        resolveCompositionEnd = null;
+        if (resolve) resolve();
+      }
+      throw error;
     }
   }
 

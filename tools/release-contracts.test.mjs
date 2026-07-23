@@ -22,7 +22,7 @@ test('repository exposes one-command extension verification', () => {
   assert.equal(pkg.scripts?.check, 'node tools/verify-extension.mjs');
   assert.equal(
     pkg.scripts?.test,
-    'node --test tools/release-contracts.test.mjs tools/image-interaction-contracts.test.mjs tools/image-effects.test.mjs tools/image-geometry.test.mjs tools/image-state-contracts.test.mjs tools/bridge-client.test.mjs tools/page-bridge.test.mjs'
+    'node --test tools/release-contracts.test.mjs tools/source-mode-contracts.test.mjs tools/image-interaction-contracts.test.mjs tools/image-effects.test.mjs tools/image-geometry.test.mjs tools/image-state-contracts.test.mjs tools/bridge-client.test.mjs tools/page-bridge.test.mjs'
   );
   assert.equal(pkg.scripts?.package, 'node tools/package-extension.mjs');
 
@@ -396,7 +396,8 @@ test('all editor tools share one atomic content mutation queue', () => {
   }
 
   const content = readText('src/content.js');
-  assert.match(content, /bridgeClient\.writeContent/);
+  assert.match(content, /bridgeClient\.mutateContent/);
+  assert.match(content, /mutateEditorContent\(\(current\) => \{/);
   assert.doesNotMatch(content, /requestBridge\('(?:GET|SET)_CONTENT'/);
 });
 
