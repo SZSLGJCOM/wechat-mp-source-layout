@@ -47,12 +47,6 @@
     } = dependencies;
 
     const APPEARANCE_EFFECTS = {
-      feather: {
-        activeKey: 'mpseFeatherOn',
-        baseKey: 'mpseFeatherBase',
-        valueKeys: ['mpseFeatherAmount'],
-        props: ['mask-image', '-webkit-mask-image', 'mask-size', '-webkit-mask-size', 'mask-repeat', '-webkit-mask-repeat', 'mask-position', '-webkit-mask-position']
-      },
       opacity: {
         activeKey: 'mpseOpacityOn',
         baseKey: 'mpseOpacityBase',
@@ -65,7 +59,10 @@
     const SPACING_STYLE_PROPS = ['display', 'margin-top', 'margin-bottom'];
     const CIRCLE_STYLE_PROPS = ['width', 'height', 'max-width', 'object-fit', 'display', 'margin-left', 'margin-right'];
     const FILTER_STYLE_PROPS = ['filter'];
+    const FEATHER_MASK_PROPS = ['mask-image', '-webkit-mask-image', 'mask-size', '-webkit-mask-size', 'mask-repeat', '-webkit-mask-repeat', 'mask-position', '-webkit-mask-position'];
     const STROKE_CLEANUP_PROPS = ['outline', 'outline-offset'];
+    const LEGACY_FEATHER_CONFIG = { baseKey: 'mpseFeatherBase', props: FEATHER_MASK_PROPS };
+    const FILTER_EFFECT_MARKERS = ['mpseColorOn', 'mpseShadowOn', 'mpseGlowOn', 'mpseFeatherOn', 'mpseStrokeOn'];
     const IMAGE_BASE_STYLE_PROPS = [
       'border-radius', 'overflow', 'width', 'max-width', 'height', 'display',
       'margin-left', 'margin-right', 'margin-top', 'margin-bottom', 'box-shadow',
@@ -247,11 +244,6 @@
       return { r: (int >> 16) & 255, g: (int >> 8) & 255, b: int & 255 };
     }
 
-    function hexToRgba(hex, opacity, fallback = '#0f2337') {
-      const color = hexToRgb(hex || fallback);
-      return `rgba(${color.r}, ${color.g}, ${color.b}, ${clamp(opacity, 0, 1)})`;
-    }
-
     function readStyleBaseValue(image, key, prop) {
       try {
         const entry = JSON.parse(image.dataset[key] || '{}')[prop];
@@ -261,18 +253,94 @@
       }
     }
 
-    function alphaStrokeFilter(image) {
-      const width = clamp(getDataNumber(image, 'mpseStrokeWidth', 0), 0, 20);
-      if (width <= 0) return '';
-      const color = getDataString(image, 'mpseStrokeColor', '#07c160');
-      const opacity = clamp(getDataNumber(image, 'mpseStrokeOpacity', 100), 0, 100) / 100;
-      const rgba = hexToRgba(color, opacity, '#07c160');
-      return [
-        `drop-shadow(${width}px 0 0 ${rgba})`,
-        `drop-shadow(${-width}px 0 0 ${rgba})`,
-        `drop-shadow(0 ${width}px 0 ${rgba})`,
-        `drop-shadow(0 ${-width}px 0 ${rgba})`
-      ].join(' ');
+    function filterNumber(value) {
+      return Number(value.toFixed(3));
+    }
+
+    function appendColoredAlphaLayer(primitives, mergeLayers, prefix, options) {
+      const opacity = clamp(options.opacity, 0, 1);
+      if (opacity <= 0) return;
+      let input = 'SourceAlpha';
+      const spread = clamp(options.spread, -40, 40);
+      if (Math.abs(spread) >= 0.01) {
+        const spreadResult = `${prefix}-spread`;
+        primitives.push(`<feMorphology in="${input}" operator="${spread > 0 ? 'dilate' : 'erode'}" radius="${filterNumber(Math.abs(spread))}" result="${spreadResult}"/>`);
+        input = spreadResult;
+      }
+      const blur = clamp(options.blur, 0, 120);
+      if (blur >= 0.01) {
+        const blurResult = `${prefix}-blur`;
+        primitives.push(`<feGaussianBlur in="${input}" stdDeviation="${filterNumber(blur / 2)}" result="${blurResult}"/>`);
+        input = blurResult;
+      }
+      if (Math.abs(options.x) >= 0.01 || Math.abs(options.y) >= 0.01) {
+        const offsetResult = `${prefix}-offset`;
+        primitives.push(`<feOffset in="${input}" dx="${filterNumber(options.x)}" dy="${filterNumber(options.y)}" result="${offsetResult}"/>`);
+        input = offsetResult;
+      }
+      const color = hexToRgb(options.color);
+      const floodResult = `${prefix}-color`;
+      const layerResult = `${prefix}-layer`;
+      primitives.push(`<feFlood flood-color="rgb(${color.r},${color.g},${color.b})" flood-opacity="${filterNumber(opacity)}" result="${floodResult}"/>`);
+      primitives.push(`<feComposite in="${floodResult}" in2="${input}" operator="in" result="${layerResult}"/>`);
+      mergeLayers.push(layerResult);
+    }
+
+    function alphaEffectsFilter(image) {
+      const primitives = [];
+      const mergeLayers = [];
+
+      if (image.dataset.mpseShadowOn === '1') {
+        appendColoredAlphaLayer(primitives, mergeLayers, 'shadow', {
+          x: clamp(getDataNumber(image, 'mpseShadowX', 0), -80, 80),
+          y: clamp(getDataNumber(image, 'mpseShadowY', 8), -80, 80),
+          blur: clamp(getDataNumber(image, 'mpseShadowBlur', 24), 0, 120),
+          spread: clamp(getDataNumber(image, 'mpseShadowSpread', 0), -40, 40),
+          opacity: clamp(getDataNumber(image, 'mpseShadowOpacity', 16), 0, 100) / 100,
+          color: getDataString(image, 'mpseShadowColor', '#0f2337')
+        });
+      }
+
+      if (image.dataset.mpseGlowOn === '1') {
+        const blur = clamp(getDataNumber(image, 'mpseGlowBlur', 22), 0, 120);
+        const spread = clamp(getDataNumber(image, 'mpseGlowSpread', 0), 0, 40);
+        const opacity = clamp(getDataNumber(image, 'mpseGlowOpacity', 55), 0, 100) / 100;
+        const color = getDataString(image, 'mpseGlowColor', '#ffd447');
+        appendColoredAlphaLayer(primitives, mergeLayers, 'glow-near', {
+          x: 0, y: 0, blur, spread, opacity, color
+        });
+        appendColoredAlphaLayer(primitives, mergeLayers, 'glow-far', {
+          x: 0, y: 0, blur: blur * 1.65, spread: spread / 2, opacity: opacity * 0.42, color
+        });
+      }
+
+      if (image.dataset.mpseStrokeOn === '1') {
+        const width = clamp(getDataNumber(image, 'mpseStrokeWidth', 0), 0, 20);
+        if (width > 0) {
+          const color = hexToRgb(getDataString(image, 'mpseStrokeColor', '#07c160'));
+          const opacity = clamp(getDataNumber(image, 'mpseStrokeOpacity', 100), 0, 100) / 100;
+          primitives.push(`<feMorphology in="SourceAlpha" operator="dilate" radius="${filterNumber(width)}" result="stroke-dilate"/>`);
+          primitives.push('<feComposite in="stroke-dilate" in2="SourceAlpha" operator="out" result="stroke-ring"/>');
+          primitives.push(`<feFlood flood-color="rgb(${color.r},${color.g},${color.b})" flood-opacity="${filterNumber(opacity)}" result="stroke-color"/>`);
+          primitives.push('<feComposite in="stroke-color" in2="stroke-ring" operator="in" result="stroke-layer"/>');
+          mergeLayers.push('stroke-layer');
+        }
+      }
+
+      let contentLayer = 'SourceGraphic';
+      if (image.dataset.mpseFeatherOn === '1') {
+        const amount = clamp(getDataNumber(image, 'mpseFeatherAmount', 0), 0, 45);
+        if (amount > 0) {
+          primitives.push(`<feGaussianBlur in="SourceAlpha" stdDeviation="${filterNumber(amount / 2)}" result="feather-alpha"/>`);
+          primitives.push('<feComposite in="SourceGraphic" in2="feather-alpha" operator="in" result="feather-content"/>');
+          contentLayer = 'feather-content';
+        }
+      }
+
+      if (!primitives.length) return '';
+      const merge = [...mergeLayers, contentLayer].map((layer) => `<feMergeNode in="${layer}"/>`).join('');
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg"><filter id="mpse-alpha" x="-200%" y="-200%" width="500%" height="500%" color-interpolation-filters="sRGB">${primitives.join('')}<feMerge>${merge}</feMerge></filter></svg>`;
+      return `url("data:image/svg+xml,${encodeURIComponent(svg)}#mpse-alpha")`;
     }
 
     function rebuildManagedFilter(image) {
@@ -289,7 +357,8 @@
         if (gray > 0) parts.push(`grayscale(${gray}%)`);
       }
 
-      if (image.dataset.mpseStrokeOn === '1') parts.push(alphaStrokeFilter(image));
+      const alphaFilter = alphaEffectsFilter(image);
+      if (alphaFilter) parts.push(alphaFilter);
       setStyle(image, 'filter', parts.filter(Boolean).join(' '));
     }
 
@@ -305,12 +374,38 @@
       captureStyleBase(image, 'mpseFilterBase', FILTER_STYLE_PROPS);
     }
 
+    function hasManagedFilterEffect(image) {
+      return FILTER_EFFECT_MARKERS.some((key) => image.dataset[key] === '1');
+    }
+
     function releaseManagedFilter(image) {
-      if (image.dataset.mpseColorOn === '1' || image.dataset.mpseStrokeOn === '1') {
+      if (hasManagedFilterEffect(image)) {
         rebuildManagedFilter(image);
         return;
       }
       if (image.dataset.mpseFilterBase !== undefined) restoreStyleBase(image, 'mpseFilterBase', FILTER_STYLE_PROPS);
+    }
+
+    function migrateLegacyBoxShadow(image) {
+      if (!image || image.dataset.mpseBaseBoxShadow === undefined) return false;
+      const target = getAppearanceHost(image);
+      if (target !== image) setStyle(image, 'box-shadow', '');
+      setStyle(target, 'box-shadow', image.dataset.mpseBaseBoxShadow || '');
+      delete image.dataset.mpseBaseBoxShadow;
+      return true;
+    }
+
+    function migrateLegacyFeather(image) {
+      if (!image || image.dataset.mpseFeatherBase === undefined) return false;
+      restoreAppearanceBase(image, LEGACY_FEATHER_CONFIG, getAppearanceHost(image));
+      delete image.dataset.mpseFeatherBase;
+      return true;
+    }
+
+    function prepareAlphaEffect(image) {
+      migrateLegacyBoxShadow(image);
+      migrateLegacyFeather(image);
+      captureManagedFilterBase(image);
     }
 
     function captureStrokeOutlineBase(image) {
@@ -365,7 +460,7 @@
       }
       captureStrokeOutlineBase(image);
       clearStrokeOutline(image);
-      captureManagedFilterBase(image);
+      prepareAlphaEffect(image);
       image.dataset.mpseStrokeOn = '1';
       image.dataset.mpseStrokeWidth = String(width);
       image.dataset.mpseStrokeColor = values.strokeColor || '#07c160';
@@ -379,64 +474,33 @@
       releaseManagedFilter(image);
     }
 
-    function applyGlowBoxShadow(image, values) {
+    function applyGlowEffect(image, values) {
+      prepareAlphaEffect(image);
       image.dataset.mpseGlowOn = '1';
       image.dataset.mpseGlowBlur = String(clamp(values.blur, 0, 120));
       image.dataset.mpseGlowSpread = String(clamp(values.spread, 0, 40));
       image.dataset.mpseGlowOpacity = String(clamp(values.opacity, 0, 100));
       image.dataset.mpseGlowColor = values.glowColor || '#ffd447';
-      rebuildManagedBoxShadow(image);
+      rebuildManagedFilter(image);
     }
 
-    function captureBaseBoxShadow(image) {
-      if (!image || image.dataset.mpseBaseBoxShadow !== undefined) return;
-      const target = getAppearanceHost(image);
-      image.dataset.mpseBaseBoxShadow = target.style.getPropertyValue('box-shadow') || '';
-    }
-
-    function rebuildManagedBoxShadow(image) {
-      if (!image) return;
-      const shadows = [];
-      const base = image.dataset.mpseBaseBoxShadow;
-      if (base) shadows.push(base);
-
-      if (image.dataset.mpseShadowOn === '1') {
-        const x = getDataNumber(image, 'mpseShadowX', 0);
-        const y = getDataNumber(image, 'mpseShadowY', 8);
-        const blur = getDataNumber(image, 'mpseShadowBlur', 24);
-        const spread = getDataNumber(image, 'mpseShadowSpread', 0);
-        const opacity = getDataNumber(image, 'mpseShadowOpacity', 16) / 100;
-        const color = getDataString(image, 'mpseShadowColor', '#0f2337');
-        shadows.push(`${x}px ${y}px ${blur}px ${spread}px ${hexToRgba(color, opacity, '#0f2337')}`);
+    function applyFeatherEffect(image, values) {
+      const amount = clamp(values.amount, 0, 45);
+      if (amount <= 0) {
+        clearFeatherEffect(image);
+        return;
       }
-
-      if (image.dataset.mpseGlowOn === '1') {
-        const blur = getDataNumber(image, 'mpseGlowBlur', 22);
-        const spread = getDataNumber(image, 'mpseGlowSpread', 0);
-        const opacity = getDataNumber(image, 'mpseGlowOpacity', 55) / 100;
-        const color = hexToRgb(getDataString(image, 'mpseGlowColor', '#ffd447'));
-        const rgba1 = `rgba(${color.r}, ${color.g}, ${color.b}, ${opacity})`;
-        const rgba2 = `rgba(${color.r}, ${color.g}, ${color.b}, ${Math.max(0, opacity * 0.42)})`;
-        const secondBlur = Math.round(blur * 1.65);
-        shadows.push(`0 0 ${blur}px ${spread}px ${rgba1}`);
-        shadows.push(`0 0 ${secondBlur}px ${Math.max(0, Math.round(spread / 2))}px ${rgba2}`);
-      }
-
-      const target = getAppearanceHost(image);
-      if (target !== image) setStyle(image, 'box-shadow', '');
-      setStyle(target, 'box-shadow', shadows.join(', '));
+      prepareAlphaEffect(image);
+      image.dataset.mpseFeatherOn = '1';
+      image.dataset.mpseFeatherAmount = String(amount);
+      rebuildManagedFilter(image);
     }
 
-    function restoreBaseBoxShadow(image) {
-      if (!image) return;
-      const target = getAppearanceHost(image);
-      if (target !== image) setStyle(image, 'box-shadow', '');
-      setStyle(target, 'box-shadow', image.dataset.mpseBaseBoxShadow || '');
-      // A crop host owns the visible shadow while it exists. Keep the source
-      // value on the image until unwrap can move it back without rendering it
-      // twice on the host and the nested media.
-      if (target !== image) return;
-      delete image.dataset.mpseBaseBoxShadow;
+    function clearFeatherEffect(image) {
+      migrateLegacyFeather(image);
+      delete image.dataset.mpseFeatherOn;
+      delete image.dataset.mpseFeatherAmount;
+      releaseManagedFilter(image);
     }
 
     function captureCircleBase(image) {
@@ -695,21 +759,6 @@
     }
 
     function getAppearanceStyles(image, effect) {
-      if (effect === 'feather') {
-        const amount = clamp(getDataNumber(image, 'mpseFeatherAmount', 0), 0, 45);
-        const opaqueStop = clamp(100 - amount * 2, 0, 100);
-        const mask = `radial-gradient(ellipse at center, #000 0%, #000 ${opaqueStop}%, transparent 100%)`;
-        return {
-          'mask-image': mask,
-          '-webkit-mask-image': mask,
-          'mask-size': '100% 100%',
-          '-webkit-mask-size': '100% 100%',
-          'mask-repeat': 'no-repeat',
-          '-webkit-mask-repeat': 'no-repeat',
-          'mask-position': 'center',
-          '-webkit-mask-position': 'center'
-        };
-      }
       if (effect === 'opacity') {
         return { opacity: String(clamp(getDataNumber(image, 'mpseOpacityValue', 100), 0, 100) / 100) };
       }
@@ -719,7 +768,7 @@
     function renderAppearance(image) {
       if (!image || !image.style) return;
       const host = getAppearanceHost(image);
-      for (const effect of ['feather', 'opacity']) {
+      for (const effect of ['opacity']) {
         const config = appearanceConfig(effect);
         const enabled = isAppearanceEnabled(image, effect);
         const hasBase = image.dataset[config.baseKey] !== undefined;
@@ -730,12 +779,17 @@
           restoreAppearanceBase(image, config, host);
         }
       }
-      if (image.dataset.mpseBaseBoxShadow !== undefined
-        || image.dataset.mpseShadowOn === '1'
-        || image.dataset.mpseGlowOn === '1') rebuildManagedBoxShadow(image);
-      if (image.dataset.mpseFilterBase !== undefined
-        || image.dataset.mpseColorOn === '1'
-        || image.dataset.mpseStrokeOn === '1') {
+      const hasAlphaEffect = image.dataset.mpseShadowOn === '1'
+        || image.dataset.mpseGlowOn === '1'
+        || image.dataset.mpseFeatherOn === '1'
+        || image.dataset.mpseStrokeOn === '1';
+      if (hasAlphaEffect) {
+        prepareAlphaEffect(image);
+      } else {
+        migrateLegacyBoxShadow(image);
+        migrateLegacyFeather(image);
+      }
+      if (image.dataset.mpseFilterBase !== undefined || hasManagedFilterEffect(image)) {
         migrateColorFilterBase(image);
         rebuildManagedFilter(image);
       }
@@ -762,16 +816,6 @@
       const config = appearanceConfig(effect);
       if (!config || !image) return;
       captureAppearanceBase(image, config);
-
-      if (effect === 'feather') {
-        const amount = clamp(values.amount, 0, 45);
-        if (amount <= 0) {
-          clearAppearanceEffect(image, effect);
-          return;
-        }
-        image.dataset.mpseFeatherOn = '1';
-        image.dataset.mpseFeatherAmount = String(amount);
-      }
 
       if (effect === 'opacity') {
         const value = clamp(values.value, 0, 100);
@@ -863,7 +907,7 @@
       if (effect === 'spacing') return `${range('上间距', 'top', 0, 120, 1, top, 'px')}${range('下间距', 'bottom', 0, 120, 1, bottom, 'px')}`;
       if (effect === 'shadow') return `${range('水平', 'x', -80, 80, 1, getDataNumber(image, 'mpseShadowX', clampInt(shadowDefaults.x, -80, 80, 0)), 'px')}${range('下移', 'y', -80, 80, 1, getDataNumber(image, 'mpseShadowY', clampInt(shadowDefaults.y, -80, 80, 8)), 'px')}${range('模糊', 'blur', 0, 120, 1, getDataNumber(image, 'mpseShadowBlur', clampInt(shadowDefaults.blur, 0, 120, 24)), 'px')}${range('扩散', 'spread', -40, 40, 1, getDataNumber(image, 'mpseShadowSpread', clampInt(shadowDefaults.spread, -40, 40, 0)), 'px')}${range('透明度', 'opacity', 0, 100, 1, getDataNumber(image, 'mpseShadowOpacity', clampInt(shadowDefaults.opacity * 100, 0, 100, 16)), '%')}${color('阴影颜色', 'shadowColor', getDataString(image, 'mpseShadowColor', shadowDefaults.color || '#0f2337'))}`;
       if (effect === 'glow') return `${range('发光半径', 'blur', 0, 120, 1, getDataNumber(image, 'mpseGlowBlur', clampInt(shadowDefaults.blur, 0, 120, 22)), 'px')}${range('扩散', 'spread', 0, 40, 1, getDataNumber(image, 'mpseGlowSpread', clampInt(shadowDefaults.spread, 0, 40, 0)), 'px')}${range('发光强度', 'opacity', 0, 100, 1, getDataNumber(image, 'mpseGlowOpacity', clampInt(shadowDefaults.opacity * 100, 0, 100, 55)), '%')}${color('发光颜色', 'glowColor', getDataString(image, 'mpseGlowColor', shadowDefaults.color || '#ffd447'))}`;
-      if (effect === 'feather') return range('羽化范围', 'amount', 0, 45, 1, getDataNumber(image, 'mpseFeatherAmount', 0), '%');
+      if (effect === 'feather') return range('羽化宽度', 'amount', 0, 45, 1, getDataNumber(image, 'mpseFeatherAmount', 0), 'px');
       if (effect === 'stroke') return `${range('描边宽度', 'width', 0, 20, 1, getDataNumber(image, 'mpseStrokeWidth', 0), 'px')}${range('描边透明度', 'opacity', 0, 100, 1, getDataNumber(image, 'mpseStrokeOpacity', 100), '%')}${color('描边颜色', 'strokeColor', getDataString(image, 'mpseStrokeColor', '#07c160'))}`;
       if (effect === 'color') return `${range('亮度', 'brightness', 40, 180, 1, colorDefaults.brightness, '%')}${range('对比度', 'contrast', 40, 180, 1, colorDefaults.contrast, '%')}${range('饱和度', 'saturate', 0, 240, 1, colorDefaults.saturate, '%')}${range('灰度', 'gray', 0, 100, 1, colorDefaults.gray, '%')}`;
       if (effect === 'opacity') return range('图片透明度', 'value', 0, 100, 1, getDataNumber(image, 'mpseOpacityValue', readOpacityPercent(image, 100)), '%');
@@ -926,8 +970,9 @@
 
     function panelTipForEffect(effect) {
       if (effect === 'size') return '选中框、拖动和缩放使用微信编辑器原生能力；这里仅设置精确宽度与对齐。';
-      if (effect === 'shadow' || effect === 'glow') return '阴影/发光的边角跟随图片圆角；需要圆角请单独调“圆角”。';
-      if (effect === 'feather') return '羽化作用于图片或裁切容器的边缘，拖到 0 可恢复原状。';
+      if (effect === 'shadow') return '阴影跟随图片 Alpha 轮廓，不会把透明区域当作容器边框。';
+      if (effect === 'glow') return '发光沿图片 Alpha 轮廓生成，由两层柔光组成。';
+      if (effect === 'feather') return '羽化沿图片 Alpha 轮廓向内柔化，不按容器边框计算；拖到 0 可恢复原状。';
       if (effect === 'stroke') return '描边跟随图片 alpha 透明轮廓，不再沿图片容器画矩形框。';
       if (effect === 'opacity') return '滑块 100% 为完全不透明；“恢复”会还原应用效果前的透明度。';
       return '只有实际调整后才会同步到正文 HTML';
@@ -942,6 +987,7 @@
       if (effect === 'shadow') return image.dataset.mpseShadowOn === '1';
       if (effect === 'glow') return image.dataset.mpseGlowOn === '1';
       if (effect === 'stroke') return image.dataset.mpseStrokeOn === '1';
+      if (effect === 'feather') return image.dataset.mpseFeatherOn === '1';
       if (appearanceConfig(effect)) return isAppearanceEnabled(image, effect);
       return getAppliedEffects(image).has(effect);
     }
@@ -1110,7 +1156,7 @@
         const blur = clamp(values.blur, 0, 120);
         const spread = clamp(values.spread, -40, 40);
         const shadowColor = values.shadowColor || '#0f2337';
-        captureBaseBoxShadow(image);
+        prepareAlphaEffect(image);
         image.dataset.mpseShadowOn = '1';
         image.dataset.mpseShadowX = String(x);
         image.dataset.mpseShadowY = String(y);
@@ -1118,15 +1164,15 @@
         image.dataset.mpseShadowSpread = String(spread);
         image.dataset.mpseShadowOpacity = String(clamp(values.opacity, 0, 100));
         image.dataset.mpseShadowColor = shadowColor;
-        rebuildManagedBoxShadow(image);
+        rebuildManagedFilter(image);
       }
 
       if (effect === 'glow') {
-        captureBaseBoxShadow(image);
-        applyGlowBoxShadow(image, values);
+        applyGlowEffect(image, values);
       }
 
       if (effect === 'stroke') applyStrokeEffect(image, values);
+      if (effect === 'feather') applyFeatherEffect(image, values);
       if (appearanceConfig(effect)) applyAppearanceEffect(image, effect, values);
 
       if (effect === 'color') {
@@ -1213,6 +1259,8 @@
       if (effect === 'glow') return image.dataset.mpseGlowOn === '1';
       if (effect === 'stroke') return image.dataset.mpseStrokeOn === '1'
         || image.dataset.mpseStrokeBase !== undefined;
+      if (effect === 'feather') return image.dataset.mpseFeatherOn === '1'
+        || image.dataset.mpseFeatherBase !== undefined;
       if (appearanceConfig(effect)) {
         const config = appearanceConfig(effect);
         return image.dataset[config.activeKey] === '1' || image.dataset[config.baseKey] !== undefined;
@@ -1262,22 +1310,17 @@
         delete image.dataset.mpseSpacingOn;
       }
       if (effect === 'shadow') {
+        migrateLegacyBoxShadow(image);
         for (const key of ['mpseShadowOn', 'mpseShadowX', 'mpseShadowY', 'mpseShadowBlur', 'mpseShadowSpread', 'mpseShadowOpacity', 'mpseShadowColor']) delete image.dataset[key];
-        if (image.dataset.mpseGlowOn === '1') {
-          rebuildManagedBoxShadow(image);
-        } else {
-          restoreBaseBoxShadow(image);
-        }
+        releaseManagedFilter(image);
       }
       if (effect === 'glow') {
+        migrateLegacyBoxShadow(image);
         for (const key of ['mpseGlowOn', 'mpseGlowBlur', 'mpseGlowSpread', 'mpseGlowOpacity', 'mpseGlowColor']) delete image.dataset[key];
-        if (image.dataset.mpseShadowOn === '1') {
-          rebuildManagedBoxShadow(image);
-        } else {
-          restoreBaseBoxShadow(image);
-        }
+        releaseManagedFilter(image);
       }
       if (effect === 'stroke') clearStrokeEffect(image);
+      if (effect === 'feather') clearFeatherEffect(image);
       if (appearanceConfig(effect)) clearAppearanceEffect(image, effect);
       if (effect === 'color') {
         migrateColorFilterBase(image);

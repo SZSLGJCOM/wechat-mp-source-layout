@@ -146,42 +146,45 @@ test('only visible dialogs that overlap the editor area block image tools', () =
   assert.doesNotMatch(globalSelectors[1], /\[role="dialog"\]/);
 });
 
-test('image appearance effects are reversible and alpha stroke stays on the media', () => {
+test('image appearance effects are reversible and alpha effects stay on the media', () => {
   const imageTools = readText('src/image-tools.js');
   const imageControls = readText('src/image-controls.js');
 
   assert.match(imageControls, /const APPEARANCE_EFFECTS = \{/);
   assert.match(imageTools, /function getAppearanceHost\(image\)/);
   assert.match(imageControls, /function renderAppearance\(image\)/);
-  assert.match(imageControls, /mpseFeatherOn/);
-  assert.match(imageControls, /mpseStrokeOn/);
-  assert.match(imageControls, /mpseOpacityOn/);
-  assert.match(imageControls, /mask-image/);
-  assert.match(imageControls, /function alphaStrokeFilter\(image\)/);
-  assert.match(imageControls, /drop-shadow\(\$\{width\}px 0 0/);
+  assert.match(imageControls, /const FILTER_EFFECT_MARKERS = \['mpseColorOn', 'mpseShadowOn', 'mpseGlowOn', 'mpseFeatherOn', 'mpseStrokeOn'\]/);
+  assert.match(imageControls, /function alphaEffectsFilter\(image\)/);
+  assert.match(imageControls, /<feMorphology in="SourceAlpha"/);
+  assert.match(imageControls, /<feGaussianBlur in="SourceAlpha"[\s\S]*?result="feather-alpha"/);
+  assert.match(imageControls, /<feComposite in="SourceGraphic" in2="feather-alpha" operator="in"/);
+  assert.match(imageControls, /setStyle\(image, 'filter', parts\.filter\(Boolean\)\.join\(' '\)\)/);
+  assert.doesNotMatch(imageControls, /radial-gradient\(ellipse at center/);
+  assert.doesNotMatch(imageControls, /function rebuildManagedBoxShadow/);
+  assert.doesNotMatch(imageControls, /drop-shadow\(/);
   assert.doesNotMatch(imageControls, /return \{ outline: `\$\{width\}px solid/);
 });
 
-test('native box shadow survives clearing managed shadow or glow inside crop', () => {
+test('legacy container effects migrate once while alpha effects preserve native box shadow', () => {
   const imageControls = readText('src/image-controls.js');
   const imageTools = readText('src/image-tools.js');
-  const rebuild = imageControls.match(/function rebuildManagedBoxShadow\(image\) \{[\s\S]*?\n    \}\n\n    function restoreBaseBoxShadow/);
-  const restore = imageControls.match(/function restoreBaseBoxShadow\(image\) \{[\s\S]*?\n    \}\n\n    function captureCircleBase/);
+  const migrate = imageControls.match(/function migrateLegacyBoxShadow\(image\) \{[\s\S]*?\n    \}\n\n    function migrateLegacyFeather/);
+  const prepare = imageControls.match(/function prepareAlphaEffect\(image\) \{[\s\S]*?\n    \}/);
   const clear = imageControls.match(/function clearEffect\(effect, commit = true\) \{[\s\S]*?\n    \}\n\n    function updateCaption/);
   const unwrap = imageTools.match(/function unwrapCropContainer\(image\) \{[\s\S]*?\n  \}\n\n  function resetCrop/);
 
-  assert.ok(rebuild && restore && clear && unwrap, 'shadow and crop restoration lifecycles must exist');
-  assert.equal((rebuild[0].match(/shadows\.push\(base\)/g) || []).length, 1, 'native shadow must be composed once');
-  assert.match(rebuild[0], /setStyle\(target, 'box-shadow', shadows\.join\(', '\)\)/);
-  assert.match(restore[0], /const target = getAppearanceHost\(image\)/);
-  assert.match(restore[0], /setStyle\(target, 'box-shadow', image\.dataset\.mpseBaseBoxShadow \|\| ''\)/);
-  const retainIndex = restore[0].indexOf('if (target !== image) return;');
-  const deleteIndex = restore[0].indexOf('delete image.dataset.mpseBaseBoxShadow;');
-  assert.ok(retainIndex >= 0 && deleteIndex > retainIndex, 'crop must retain the native source shadow until unwrap');
-  assert.match(clear[0], /if \(image\.dataset\.mpseGlowOn === '1'\) \{[\s\S]*?rebuildManagedBoxShadow\(image\)[\s\S]*?\} else \{[\s\S]*?restoreBaseBoxShadow\(image\)/);
-  assert.match(clear[0], /if \(image\.dataset\.mpseShadowOn === '1'\) \{[\s\S]*?rebuildManagedBoxShadow\(image\)[\s\S]*?\} else \{[\s\S]*?restoreBaseBoxShadow\(image\)/);
+  assert.ok(migrate && prepare && clear && unwrap, 'alpha migration and crop restoration lifecycles must exist');
+  assert.match(migrate[0], /const target = getAppearanceHost\(image\)/);
+  assert.match(migrate[0], /setStyle\(target, 'box-shadow', image\.dataset\.mpseBaseBoxShadow \|\| ''\)/);
+  assert.match(migrate[0], /delete image\.dataset\.mpseBaseBoxShadow/);
+  assert.ok(
+    prepare[0].indexOf('migrateLegacyBoxShadow(image)') < prepare[0].indexOf('captureManagedFilterBase(image)'),
+    'legacy container shadow must be restored before the native filter baseline is captured'
+  );
+  assert.match(clear[0], /if \(effect === 'shadow'\) \{[\s\S]*?migrateLegacyBoxShadow\(image\)[\s\S]*?releaseManagedFilter\(image\)/);
+  assert.match(clear[0], /if \(effect === 'glow'\) \{[\s\S]*?migrateLegacyBoxShadow\(image\)[\s\S]*?releaseManagedFilter\(image\)/);
   assert.match(unwrap[0], /renderAppearance\(image\)/);
-  assert.match(unwrap[0], /image\.dataset\.mpseShadowOn !== '1'[\s\S]*?image\.dataset\.mpseGlowOn !== '1'[\s\S]*?delete image\.dataset\.mpseBaseBoxShadow/);
+  assert.doesNotMatch(unwrap[0], /delete image\.dataset\.mpseBaseBoxShadow/);
 });
 
 test('transparent images remain selectable and opacity starts at 100%', () => {

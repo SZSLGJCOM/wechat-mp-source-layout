@@ -93,9 +93,12 @@ test('image snapshot patches preserve the latest native styles and attributes', 
   const hostTarget = {};
   assert.equal(snapshotMerge.effectFromReason('clear-shadow'), 'shadow');
   assert.equal(snapshotMerge.effectFromReason('size-align'), 'size');
-  assert.equal(snapshotMerge.targetForEffect(imageTarget, hostTarget, 'shadow'), hostTarget);
+  assert.equal(snapshotMerge.targetForEffect(imageTarget, hostTarget, 'shadow'), imageTarget);
+  assert.equal(snapshotMerge.targetForEffect(imageTarget, hostTarget, 'glow'), imageTarget);
+  assert.equal(snapshotMerge.targetForEffect(imageTarget, hostTarget, 'feather'), imageTarget);
   assert.equal(snapshotMerge.targetForEffect(imageTarget, hostTarget, 'color'), imageTarget);
   assert.equal(snapshotMerge.targetForEffect(imageTarget, hostTarget, 'stroke'), imageTarget);
+  assert.equal(snapshotMerge.targetForEffect(imageTarget, hostTarget, 'opacity'), hostTarget);
 
   const localImage = new FakeElement('img', {}, { width: '52%', opacity: '0.7' });
   const patch = snapshotMerge.captureStylePatch(localImage, ['width']);
@@ -174,6 +177,20 @@ test('real image snapshots own only the properties changed by the current operat
   const stroke = snapshotMerge.createSnapshot({ identity, image, cropHost: host, reason: 'stroke' });
   assert.equal(stroke.imgStylePatch.filter.value, 'drop-shadow(0 0 4px red)');
   assert.equal(stroke.hostStylePatch.outline.value, '4px solid red');
+
+  image.style.setProperty('filter', 'url("data:image/svg+xml,shadow#mpse-alpha")');
+  host.style.setProperty('box-shadow', '1px 2px 3px blue');
+  const shadow = snapshotMerge.createSnapshot({ identity, image, cropHost: host, reason: 'shadow' });
+  assert.equal(shadow.imgStylePatch.filter.value, 'url("data:image/svg+xml,shadow#mpse-alpha")');
+  assert.ok(shadow.imgStylePatch['box-shadow'], 'image-side legacy shadow cleanup must be persisted');
+  assert.equal(shadow.hostStylePatch['box-shadow'].value, '1px 2px 3px blue');
+
+  image.style.setProperty('mask-image', '');
+  host.style.setProperty('mask-image', '');
+  const feather = snapshotMerge.createSnapshot({ identity, image, cropHost: host, reason: 'feather' });
+  assert.ok(feather.imgStylePatch.filter, 'alpha feather must persist the media filter');
+  assert.ok(feather.imgStylePatch['mask-image'], 'image-side legacy feather cleanup must be persisted');
+  assert.ok(feather.hostStylePatch['mask-image'], 'host-side legacy feather cleanup must be persisted');
 
   const crop = snapshotMerge.createSnapshot({ identity, image, cropHost: host, reason: 'crop' });
   assert.equal(crop.hostStylePatch.translate.value, '40px 10px');

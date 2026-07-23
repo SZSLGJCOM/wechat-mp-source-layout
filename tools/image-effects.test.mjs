@@ -92,6 +92,12 @@ function createHarness(styles = {}, hostStyles = null) {
   return { image, host, controls, reasons };
 }
 
+function decodeAlphaFilter(filter) {
+  const match = String(filter || '').match(/url\("data:image\/svg\+xml,([^"]+)#mpse-alpha"\)/);
+  assert.ok(match, 'managed alpha effects must be encoded as one SVG filter');
+  return decodeURIComponent(match[1]);
+}
+
 test('opacity reaches 100 percent and restore returns the exact pre-effect value', () => {
   const { image, controls } = createHarness({ opacity: '0.65' });
 
@@ -126,21 +132,105 @@ test('alpha stroke composes with color filters and restores the original filter'
   image.dataset.mpseStrokeBase = JSON.stringify({ outline: { value: '', priority: '' } });
 
   controls.applyEffect('stroke', { width: 4, opacity: 70, strokeColor: '#07c160' });
-  assert.match(image.style.getPropertyValue('filter'), /^contrast\(110%\).*drop-shadow\(4px 0 0 rgba\(7, 193, 96, 0\.7\)\).*drop-shadow\(-4px 0 0/);
+  const strokeSvg = decodeAlphaFilter(image.style.getPropertyValue('filter'));
+  assert.match(image.style.getPropertyValue('filter'), /^contrast\(110%\).*data:image\/svg\+xml/);
+  assert.match(strokeSvg, /<feMorphology in="SourceAlpha" operator="dilate" radius="4" result="stroke-dilate"\/>/);
+  assert.match(strokeSvg, /<feComposite in="stroke-dilate" in2="SourceAlpha" operator="out" result="stroke-ring"\/>/);
+  assert.match(strokeSvg, /flood-color="rgb\(7,193,96\)" flood-opacity="0.7"/);
   assert.equal(image.style.getPropertyValue('outline'), '');
 
   controls.applyEffect('color', { brightness: 115, contrast: 105, saturate: 90, gray: 20 });
   const composed = image.style.getPropertyValue('filter');
   assert.match(composed, /^contrast\(110%\)/);
-  assert.match(composed, /brightness\(115%\).*grayscale\(20%\).*drop-shadow/);
+  assert.match(composed, /brightness\(115%\).*grayscale\(20%\).*data:image\/svg\+xml/);
 
   controls.clearEffect('stroke');
-  assert.doesNotMatch(image.style.getPropertyValue('filter'), /drop-shadow/);
+  assert.doesNotMatch(image.style.getPropertyValue('filter'), /data:image\/svg\+xml/);
   assert.match(image.style.getPropertyValue('filter'), /brightness\(115%\)/);
 
   controls.clearEffect('color');
   assert.equal(image.style.getPropertyValue('filter'), 'contrast(110%)');
   assert.equal(image.dataset.mpseFilterBase, undefined);
+});
+
+test('shadow, glow, and feather share one SourceAlpha pipeline and restore independently', () => {
+  const { image, host, controls } = createHarness(
+    { filter: 'contrast(110%)' },
+    { 'box-shadow': '1px 2px 3px rgba(1, 2, 3, 0.4)' }
+  );
+
+  controls.applyEffect('shadow', {
+    x: 6, y: 9, blur: 20, spread: 3, opacity: 35, shadowColor: '#123456'
+  });
+  controls.applyEffect('glow', {
+    blur: 16, spread: 2, opacity: 60, glowColor: '#ffd447'
+  });
+  controls.applyEffect('feather', { amount: 8 });
+
+  const combinedSvg = decodeAlphaFilter(image.style.getPropertyValue('filter'));
+  assert.match(combinedSvg, /in="SourceAlpha" operator="dilate" radius="3" result="shadow-spread"/);
+  assert.match(combinedSvg, /<feOffset in="shadow-blur" dx="6" dy="9" result="shadow-offset"\/>/);
+  assert.match(combinedSvg, /result="glow-near-layer"/);
+  assert.match(combinedSvg, /result="glow-far-layer"/);
+  assert.match(combinedSvg, /<feGaussianBlur in="SourceAlpha" stdDeviation="4" result="feather-alpha"\/>/);
+  assert.match(combinedSvg, /<feComposite in="SourceGraphic" in2="feather-alpha" operator="in" result="feather-content"\/>/);
+  assert.equal(host.style.getPropertyValue('box-shadow'), '1px 2px 3px rgba(1, 2, 3, 0.4)');
+
+  controls.clearEffect('shadow');
+  const withoutShadow = decodeAlphaFilter(image.style.getPropertyValue('filter'));
+  assert.doesNotMatch(withoutShadow, /shadow-/);
+  assert.match(withoutShadow, /glow-near-layer/);
+  assert.match(withoutShadow, /feather-content/);
+
+  controls.clearEffect('feather');
+  const glowOnly = decodeAlphaFilter(image.style.getPropertyValue('filter'));
+  assert.doesNotMatch(glowOnly, /feather-/);
+  assert.match(glowOnly, /glow-near-layer/);
+
+  controls.clearEffect('glow');
+  assert.equal(image.style.getPropertyValue('filter'), 'contrast(110%)');
+  assert.equal(image.dataset.mpseFilterBase, undefined);
+  assert.equal(host.style.getPropertyValue('box-shadow'), '1px 2px 3px rgba(1, 2, 3, 0.4)');
+});
+
+test('legacy container shadow and feather migrate to alpha effects without losing native styles', () => {
+  const { image, host, controls } = createHarness(
+    { filter: 'saturate(90%)', 'mask-image': 'url(native-image-mask)' },
+    {
+      'box-shadow': '0 0 20px red, 2px 3px 4px blue',
+      'mask-image': 'radial-gradient(ellipse at center, #000 0%, transparent 100%)'
+    }
+  );
+  image.dataset.mpseBaseBoxShadow = '2px 3px 4px blue';
+  image.dataset.mpseShadowOn = '1';
+  image.dataset.mpseShadowX = '4';
+  image.dataset.mpseShadowY = '5';
+  image.dataset.mpseShadowBlur = '12';
+  image.dataset.mpseShadowSpread = '1';
+  image.dataset.mpseShadowOpacity = '40';
+  image.dataset.mpseShadowColor = '#000000';
+  image.dataset.mpseFeatherBase = JSON.stringify({
+    image: { 'mask-image': { value: 'url(native-image-mask)', priority: '' } },
+    host: { 'mask-image': { value: 'url(native-host-mask)', priority: '' } }
+  });
+  image.dataset.mpseFeatherOn = '1';
+  image.dataset.mpseFeatherAmount = '10';
+
+  controls.renderAppearance(image);
+  const migratedSvg = decodeAlphaFilter(image.style.getPropertyValue('filter'));
+  assert.match(migratedSvg, /shadow-layer/);
+  assert.match(migratedSvg, /feather-content/);
+  assert.equal(host.style.getPropertyValue('box-shadow'), '2px 3px 4px blue');
+  assert.equal(image.style.getPropertyValue('mask-image'), 'url(native-image-mask)');
+  assert.equal(host.style.getPropertyValue('mask-image'), 'url(native-host-mask)');
+  assert.equal(image.dataset.mpseBaseBoxShadow, undefined);
+  assert.equal(image.dataset.mpseFeatherBase, undefined);
+
+  controls.clearEffect('feather');
+  controls.clearEffect('shadow');
+  assert.equal(image.style.getPropertyValue('filter'), 'saturate(90%)');
+  assert.equal(host.style.getPropertyValue('box-shadow'), '2px 3px 4px blue');
+  assert.equal(host.style.getPropertyValue('mask-image'), 'url(native-host-mask)');
 });
 
 test('alpha stroke temporarily hides and then restores a native outline', () => {

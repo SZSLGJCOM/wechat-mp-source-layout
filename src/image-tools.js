@@ -1015,9 +1015,6 @@
     host.remove();
     rebuildFrameAppearance(image);
     renderAppearance(image);
-    if (image.dataset.mpseShadowOn !== '1' && image.dataset.mpseGlowOn !== '1') {
-      delete image.dataset.mpseBaseBoxShadow;
-    }
     return image;
   }
 
