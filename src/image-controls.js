@@ -352,29 +352,6 @@
       }
     }
 
-    function suspendImageCirclePresentation(image) {
-      if (!image || getCropContainer(image) || image.dataset.mpseCircleOn !== '1') return null;
-      const presentation = captureInlineStyles(image, CIRCLE_STYLE_PROPS);
-      return restoreImageCirclePresentationBase(image) ? presentation : null;
-    }
-
-    function resumeImageCirclePresentation(image, presentation) {
-      if (!image || getCropContainer(image)) return false;
-      if (presentation) {
-        restoreInlineStyles(image, presentation);
-      } else if (image.dataset.mpseCircleOn === '1') {
-        const diameter = clamp(getDataNumber(image, 'mpseCircleDiameter', 160), 40, 520);
-        setStyles(image, {
-          width: `${diameter}px`, height: `${diameter}px`, 'max-width': '100%',
-          'object-fit': 'cover', display: 'block', 'margin-left': 'auto', 'margin-right': 'auto'
-        });
-      } else {
-        return false;
-      }
-      rebuildFrameAppearance(image);
-      return true;
-    }
-
     function restoreCircleBase(image) {
       if (!image) return;
       try {
@@ -822,7 +799,7 @@
     }
 
     function panelTipForEffect(effect) {
-      if (effect === 'size') return '角点等比缩放，边中点裁切；双击图片进入裁切模式，拖动图片并用 Ctrl + 滚轮缩放。';
+      if (effect === 'size') return '选中框、拖动和缩放使用微信编辑器原生能力；这里仅设置精确宽度与对齐。';
       if (effect === 'shadow' || effect === 'glow') return '阴影/发光的边角跟随图片圆角；需要圆角请单独调“圆角”。';
       if (effect === 'feather') return '羽化作用于图片或裁切容器的边缘，拖到 0 可恢复原状。';
       if (effect === 'stroke') return '描边不改变图片尺寸，也不会影响阴影、发光或相框。';
@@ -1233,20 +1210,11 @@
     }
 
     return Object.freeze({
-      captureImageBase,
       restoreImageBase,
       renderAppearance,
-      renderCropAppearance,
       rebuildFrameAppearance,
-      clearFrameAppearance,
-      captureBaseBoxShadow,
       captureFrameSourceStyles,
       readCircleDiameter,
-      applyCircleCropGeometry,
-      restoreImageCirclePresentationBase,
-      suspendImageCirclePresentation,
-      resumeImageCirclePresentation,
-      restoreCircleBase,
       collectValues,
       showPanel,
       closePanel,

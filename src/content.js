@@ -2,7 +2,7 @@
   'use strict';
 
   const INLINE_ID = 'mpse-inline-panel';
-  const VERSION = 'v0.10.1';
+  const VERSION = 'v1.0.0';
   const TOOLBAR_BUTTON_ID = 'mpse-toolbar-button';
   const FLOATING_BUTTON_ID = 'mpse-floating-button';
   const bridgeClient = window.__MPSE_BRIDGE_CLIENT__;

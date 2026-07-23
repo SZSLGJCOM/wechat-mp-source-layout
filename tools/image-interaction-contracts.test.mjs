@@ -18,7 +18,7 @@ test('media tools only activate from direct media hits', () => {
   assert.doesNotMatch(svgBlockTools, /doc\.elementsFromPoint\(event\.clientX, event\.clientY\)/);
 });
 
-test('image controls separate panel state from persisted edits', () => {
+test('image controls keep panel state without creating a competing selection layer', () => {
   const imageTools = readText('src/image-tools.js');
   const css = readText('src/overlay.css');
 
@@ -26,12 +26,13 @@ test('image controls separate panel state from persisted edits', () => {
   assert.doesNotMatch(imageTools, /effectMemory/);
   assert.doesNotMatch(imageTools, /showPanel\(effect, true\)/);
   assert.doesNotMatch(imageTools, /doc\.addEventListener\('click', onDocumentPointer/);
-  assert.match(imageTools, /function beginGeometryGesture\(/);
-  assert.match(imageTools, /function enterCropMode\(/);
+  assert.doesNotMatch(imageTools, /function beginGeometryGesture\(/);
+  assert.doesNotMatch(imageTools, /function enterCropMode\(/);
   assert.match(imageTools, /function applyCropSnapshot\(/);
   assert.match(imageTools, /data-mpse-image-crop/);
-  assert.match(css, /\.mpse-img2-handle-nw/);
-  assert.match(css, /#mpse-img2-box\.mpse-crop-mode/);
+  assert.doesNotMatch(css, /\.mpse-img2-handle/);
+  assert.doesNotMatch(css, /#mpse-img2-box/);
+  assert.doesNotMatch(css, /#mpse-img2-drag-shield/);
   assert.doesNotMatch(css, /mpse-active::after/);
 });
 
@@ -39,7 +40,7 @@ test('image effect menus only open panels and never apply default values', () =>
   const imageTools = readText('src/image-tools.js');
   const imageControls = readText('src/image-controls.js');
   const menu = imageTools.match(/function createMenu\(\) \{[\s\S]*?\n  \}\n\n  function createPanel/);
-  const panel = imageTools.match(/function createPanel\(\) \{[\s\S]*?\n  \}\n\n  function createBox/);
+  const panel = imageTools.match(/function createPanel\(\) \{[\s\S]*?\n  \}\n\n  function createBadge/);
   const showPanel = imageControls.match(/function showPanel\(effect\) \{[\s\S]*?\n    \}\n\n    function setButtonStates/);
   const panelInput = imageControls.match(/function onPanelInput\(event\) \{[\s\S]*?\n    \}\n\n    function applyEffect/);
 
@@ -156,7 +157,7 @@ test('active image panel is restored after editor DOM replacement but not after 
   const imageTools = readText('src/image-tools.js');
   const imageControls = readText('src/image-controls.js');
   const refreshPanel = imageControls.match(/function refreshVisiblePanel\(\) \{[\s\S]*?\n    \}\n\n    function onPanelInput/);
-  const reacquire = imageTools.match(/function reacquireSelectedImage\(identity = state\.identity\) \{[\s\S]*?\n  \}\n\n  function rebaseInteractionAfterEditorWrite/);
+  const reacquire = imageTools.match(/function reacquireSelectedImage\(identity = state\.identity\) \{[\s\S]*?\n  \}\n\n  function revealToolElements/);
   const hideElements = imageTools.match(/function hideToolElements\(preserveFocusedPanel = false\) \{[\s\S]*?\n  \}\n\n  function hideTools/);
   const closePanel = imageControls.match(/function closePanel\(\) \{[\s\S]*?\n    \}\n\n    function showPanel/);
 
@@ -257,70 +258,56 @@ test('radius and frame applied states use explicit managed data markers', () => 
   assert.match(clearEffect[0], /\['mpseFrameOn',[\s\S]*?delete image\.dataset\[key\]/);
 });
 
-test('image geometry previews defer editor writes until the gesture ends', () => {
+test('native WeChat image selection owns resize, drag, double-click, and wheel events', () => {
   const imageTools = readText('src/image-tools.js');
+  const imageControls = readText('src/image-controls.js');
   const css = readText('src/overlay.css');
-  const geometry = imageTools.match(/function updateGeometryGesture\(event\) \{[\s\S]*?\n  \}\n\n  function rollbackCropZoomSetup/);
-  const flush = imageTools.match(/function flushGeometryPreview\(interaction = state\.interaction\) \{[\s\S]*?\n  \}\n\n  function hasGeometryChanged/);
+  const pointerHandler = imageTools.match(/function onDocumentPointer\(event\) \{[\s\S]*?\n  \}\n\n  function bindDocuments/);
+  const binding = imageTools.match(/function bindDocuments\(\) \{[\s\S]*?\n  \}\n\n  function onGlobalPointerUp/);
 
-  assert.ok(geometry, 'geometry update function must exist');
-  assert.ok(flush, 'geometry preview flush must exist');
-  assert.match(imageTools, /function getTopClientPoint\(event, mapping = null\)/);
-  assert.match(imageTools, /function queueGeometryPreview\(interaction\)/);
-  assert.doesNotMatch(geometry[0], /markChanged\(|scheduleContentCommit\(/);
-  assert.doesNotMatch(flush[0], /setLayoutWidthPercent\(|writeCropState\(|getTopRect\(/);
-  assert.match(imageTools, /scale\(\$\{preview\.scale\}\)/);
-  assert.match(imageTools, /setStyle\(target, 'clip-path'/);
-  assert.match(imageTools, /setStyle\(image, 'translate'/);
-  assert.doesNotMatch(imageTools, /requestAnimationFrame\(positionTools\)/);
-  assert.match(imageTools, /addEventListener\('pointercancel', onDocumentPointerUp, true\)/);
-  assert.match(imageTools, /capturePointer\(image, event\.pointerId\)/);
-  assert.match(imageTools, /function updateGeometryOverlay\(image = state\.image\)/);
-  assert.match(imageTools, /const rect = getTopRect\(getSelectionElement\(image\)\);/);
-  assert.doesNotMatch(imageTools, /function getResizePreviewRect\(/);
-  assert.match(css, /\.mpse-img2-handle\.mpse-visible/);
-  assert.match(css, /width: 38px !important/);
+  assert.ok(pointerHandler, 'image pointer observation must remain available for the parameter menu');
+  assert.ok(binding, 'document binding must exist');
+  assert.match(pointerHandler[0], /showToolsForImage\(image\)/);
+  assert.doesNotMatch(pointerHandler[0], /preventDefault\(|stopPropagation\(|stopUiEvent\(/);
+
+  assert.match(binding[0], /addEventListener\('pointerdown', onDocumentPointer, true\)/);
+  for (const nativeEvent of ['dragstart', 'dblclick', 'wheel', 'pointermove', 'pointerup', 'pointercancel', 'lostpointercapture', 'selectstart']) {
+    assert.doesNotMatch(binding[0], new RegExp(`addEventListener\\('${nativeEvent}'`));
+  }
+
+  for (const implementation of [
+    'createBox',
+    'createHandles',
+    'createDragShield',
+    'beginGeometryGesture',
+    'beginCropPan',
+    'toggleCropMode',
+    'onDocumentDragStart',
+    'onDocumentDoubleClick',
+    'onDocumentWheel'
+  ]) {
+    assert.doesNotMatch(imageTools, new RegExp(`function ${implementation}\\(`));
+  }
+
+  assert.doesNotMatch(css, /mpse-img2-(?:box|handle|drag-shield)/);
+  assert.match(imageControls, /选中框、拖动和缩放使用微信编辑器原生能力/);
 });
 
-test('image geometry owns the drag session and blocks stale editor writes', () => {
+test('legacy custom selection nodes are removed once without recreating them', () => {
   const imageTools = readText('src/image-tools.js');
-  const css = readText('src/overlay.css');
-  const beginGesture = imageTools.match(/function beginGeometryGesture\(handle, event, captureTarget\) \{[\s\S]*?\n  \}\n\n  function beginCropPan/);
+  const cleanup = imageTools.match(/function cleanupLegacyDom\(\) \{[\s\S]*?\n  \}\n\n  function absorbUiEvent/);
+  const boot = imageTools.match(/function boot\(\) \{[\s\S]*?\n  \}\n\n  try/);
 
-  assert.ok(beginGesture, 'geometry start function must exist');
-  assert.match(beginGesture[0], /const cropResult = ensureCropContainer\(image\)/);
-  assert.match(beginGesture[0], /createdCrop: cropResult\.created/);
-  assert.match(imageTools, /GEOMETRY_DRAG_THRESHOLD = 4/);
-  assert.doesNotMatch(imageTools, /function initializeCropGesture\(/);
-  assert.doesNotMatch(imageTools, /function initializeResizeGesture\(/);
-  assert.match(imageTools, /function applyCropLayoutOffset\(/);
-  assert.match(imageTools, /function showDragShield\(/);
-  assert.match(imageTools, /addEventListener\('dragstart', onDocumentDragStart, true\)/);
-  assert.match(imageTools, /function commitBatchIsCurrent\(/);
-  assert.doesNotMatch(imageTools, /function dispatchEditorEvent\(/);
-  assert.match(css, /#mpse-img2-drag-shield\.mpse-visible/);
-  assert.match(css, /cursor: nwse-resize !important/);
-  assert.match(imageTools, /scheduleContentCommit\('gesture-cancel'\)/);
-});
-
-test('image selection follows the visible editor area and crop entry has native fallback', () => {
-  const imageTools = readText('src/image-tools.js');
-  const css = readText('src/overlay.css');
-
-  assert.match(imageTools, /function isSelectionVisible\(image, rect\)/);
-  assert.match(imageTools, /function getFrameContentRect\(frame\)/);
-  assert.match(imageTools, /function isRepeatedImagePress\(image, event\)/);
-  assert.match(imageTools, /function onDocumentDoubleClick\(event\)/);
-  assert.match(imageTools, /addEventListener\('dblclick', onDocumentDoubleClick, true\)/);
-  assert.match(imageTools, /doc\.defaultView\.addEventListener\('scroll'/);
-  assert.match(imageTools, /function toggleCropMode\(image\)/);
-  assert.match(imageTools, /setToolElementsOffscreen\(true\)/);
-  assert.match(css, /#mpse-img2-menu\.mpse-offscreen/);
+  assert.ok(cleanup && boot, 'startup cleanup and boot functions must exist');
+  assert.match(cleanup[0], /'mpse-img2-box', 'mpse-img2-drag-shield'/);
+  assert.match(cleanup[0], /querySelectorAll\('\.mpse-img2-handle'\)/);
+  assert.doesNotMatch(boot[0], /createBox\(|createHandles\(|createDragShield\(/);
+  assert.match(boot[0], /createMenu\(\);[\s\S]*?createPanel\(\);[\s\S]*?createBadge\(\)/);
 });
 
 test('partially visible and oversized images keep their tools until fully clipped', () => {
   const imageTools = readText('src/image-tools.js');
-  const visibleSource = imageTools.match(/function isSelectionVisible\(image, rect\) \{[\s\S]*?\n  \}\n\n  function getTopClientPoint/);
+  const visibleSource = imageTools.match(/function isSelectionVisible\(image, rect\) \{[\s\S]*?\n  \}\n\n  function schedulePositionTools/);
   assert.ok(visibleSource, 'selection visibility function must exist');
   assert.doesNotMatch(visibleSource[0], /rectContains\(/);
   assert.match(visibleSource[0], /!rectsIntersect\(getViewportRect\(\), rect\)/);
@@ -341,7 +328,7 @@ test('partially visible and oversized images keep their tools until fully clippe
     'isClippingAncestor',
     'getTopRect',
     'document',
-    `${visibleSource[0].replace(/\n\n  function getTopClientPoint$/, '')}\nreturn isSelectionVisible;`
+    `${visibleSource[0].replace(/\n\n  function schedulePositionTools$/, '')}\nreturn isSelectionVisible;`
   )(
     rectsIntersect,
     () => viewport,

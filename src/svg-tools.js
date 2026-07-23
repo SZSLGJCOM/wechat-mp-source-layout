@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const VERSION = 'v0.10.1';
+  const VERSION = 'v1.0.0';
   const MENU_ID = 'mpse-img2-menu';
   const PANEL_ID = 'mpse-svg2-panel';
   const PICK_BUTTON_ID = 'mpse-svg2-pick-button';
@@ -111,7 +111,7 @@
 
   function isExtensionElement(node) {
     if (!node || !node.closest) return false;
-    return Boolean(node.closest(`#${PANEL_ID}, #${PICK_BUTTON_ID}, #mpse-svgb-menu, #mpse-svgb-panel, #mpse-svgb-box, #mpse-svgb-badge, #mpse-img2-menu, #mpse-img2-panel, #mpse-img2-box, #mpse-img2-badge, #mpse-img2-drag-shield, .mpse-img2-handle, #mpse-inline-panel, #mpse-toolbar-button, #mpse-floating-button`));
+    return Boolean(node.closest(`#${PANEL_ID}, #${PICK_BUTTON_ID}, #mpse-svgb-menu, #mpse-svgb-panel, #mpse-svgb-box, #mpse-svgb-badge, #mpse-img2-menu, #mpse-img2-panel, #mpse-img2-badge, #mpse-inline-panel, #mpse-toolbar-button, #mpse-floating-button`));
   }
 
   function findEditableRoot(node) {

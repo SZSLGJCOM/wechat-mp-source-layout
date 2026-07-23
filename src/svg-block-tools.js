@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const VERSION = 'v0.10.1';
+  const VERSION = 'v1.0.0';
   const PANEL_ID = 'mpse-svgb-panel';
   const BOX_ID = 'mpse-svgb-box';
   const BADGE_ID = 'mpse-svgb-badge';
@@ -145,7 +145,7 @@
 
   function isExtensionElement(node) {
     if (!node || !node.closest) return false;
-    return Boolean(node.closest(`#${PANEL_ID}, #${BOX_ID}, #${BADGE_ID}, #mpse-svg2-panel, #mpse-svg2-pick-button, #mpse-img2-menu, #mpse-img2-panel, #mpse-img2-box, #mpse-img2-badge, #mpse-img2-drag-shield, .mpse-img2-handle, #mpse-inline-panel, #mpse-toolbar-button, #mpse-floating-button`));
+    return Boolean(node.closest(`#${PANEL_ID}, #${BOX_ID}, #${BADGE_ID}, #mpse-svg2-panel, #mpse-svg2-pick-button, #mpse-img2-menu, #mpse-img2-panel, #mpse-img2-badge, #mpse-inline-panel, #mpse-toolbar-button, #mpse-floating-button`));
   }
 
   function isVisibleElement(element) {

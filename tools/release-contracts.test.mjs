@@ -22,7 +22,7 @@ test('repository exposes one-command extension verification', () => {
   assert.equal(pkg.scripts?.check, 'node tools/verify-extension.mjs');
   assert.equal(
     pkg.scripts?.test,
-    'node --test tools/release-contracts.test.mjs tools/image-interaction-contracts.test.mjs tools/image-geometry.test.mjs tools/image-presentation.test.mjs tools/image-state-contracts.test.mjs tools/bridge-client.test.mjs tools/page-bridge.test.mjs'
+    'node --test tools/release-contracts.test.mjs tools/image-interaction-contracts.test.mjs tools/image-geometry.test.mjs tools/image-state-contracts.test.mjs tools/bridge-client.test.mjs tools/page-bridge.test.mjs'
   );
   assert.equal(pkg.scripts?.package, 'node tools/package-extension.mjs');
 
@@ -45,7 +45,7 @@ test('release version and ASCII package folder stay consistent', () => {
   const releaseVersion = manifest.version_name || manifest.version;
 
   assert.equal(pkg.version, manifest.version);
-  assert.equal(releaseVersion, '0.10.1');
+  assert.equal(releaseVersion, '1.0.0');
   assert.ok(readme.includes(`当前版本：\`v${releaseVersion}\``));
   assert.ok(changelog.includes(`## v${releaseVersion} ·`));
   assert.ok(bridgeClient.includes(`const VERSION = 'v${manifest.version}';`));
@@ -75,7 +75,6 @@ test('content scripts load the shared bridge client before dependent modules', (
     'src/bridge-client.js',
     'src/content.js',
     'src/image-geometry.js',
-    'src/image-presentation.js',
     'src/image-controls.js',
     'src/image-snapshot-merge.js',
     'src/image-tools.js',
@@ -273,27 +272,16 @@ test('crop reconciliation keeps the latest image node and non-managed host conte
   assert.match(imageTools, /snapshotMerge\.applyStylePatch\(target, snapshot\.imgStylePatch\)/);
 });
 
-test('crop mode entry stays local until a real geometry operation', () => {
+test('image selection stays native while persisted crop data remains supported', () => {
   const imageTools = readText('src/image-tools.js');
-  const enter = imageTools.match(/function enterCropMode\(image\) \{[\s\S]*?\n  \}\n\n  function exitCropMode/);
-  const reacquire = imageTools.match(/function reacquireSelectedImage\(identity = state\.identity\) \{[\s\S]*?\n  \}\n\n  function rebaseInteractionAfterEditorWrite/);
-  const exit = imageTools.match(/function exitCropMode\(\) \{[\s\S]*?\n  \}\n\n  const controlsFactory/);
-  const pointer = imageTools.match(/function onDocumentPointer\(event\) \{[\s\S]*?\n  \}\n\n  function onDocumentDoubleClick/);
-  const wheel = imageTools.match(/function onDocumentWheel\(event\) \{[\s\S]*?\n  \}\n\n  function onDocumentPointerMove/);
-  const queueZoom = imageTools.match(/function queueCropZoom\(image, event\) \{[\s\S]*?\n  \}\n\n  function restoreGeometryGesture/);
+  const pointer = imageTools.match(/function onDocumentPointer\(event\) \{[\s\S]*?\n  \}\n\n  function bindDocuments/);
 
-  assert.ok(enter && reacquire && exit && pointer && wheel && queueZoom, 'transient crop lifecycle must exist');
-  assert.doesNotMatch(enter[0], /ensureCropContainer|captureImageBase|markChanged|scheduleContentCommit/);
-  assert.match(pointer[0], /state\.cropMode && image === state\.image[\s\S]*?beginCropPan\(image, event\)/);
-  assert.doesNotMatch(pointer[0], /state\.cropMode && image === state\.image && getCropContainer/);
-  assert.match(wheel[0], /queueCropZoom\(image, event\)/);
-  assert.doesNotMatch(wheel[0], /!getCropContainer\(image\)/);
-  assert.match(queueZoom[0], /ensureCropContainer\(image\)[\s\S]*?deferContentCommitForGesture\(\)/);
-  assert.match(reacquire[0], /state\.cropMode && state\.cropTransientHost && !getCropContainer\(best\)/);
-  assert.match(reacquire[0], /ensureCropContainer\(best\)/);
-  assert.doesNotMatch(reacquire[0], /markChanged|scheduleContentCommit/);
-  assert.match(exit[0], /state\.pendingSnapshots\.get\(imageIdentityKey\(imageSignature\(image\)\)\)/);
-  assert.doesNotMatch(exit[0], /state\.lastSnapshot\?\.cropAction/);
+  assert.ok(pointer, 'image pointer observer must exist');
+  assert.match(pointer[0], /showToolsForImage\(image\)/);
+  assert.doesNotMatch(pointer[0], /preventDefault|stopPropagation|beginCropPan|toggleCropMode/);
+  assert.doesNotMatch(imageTools, /function ensureCropContainer\(|function enterCropMode\(|function beginGeometryGesture\(/);
+  assert.match(imageTools, /function applyCropSnapshot\(/);
+  assert.match(imageTools, /function unwrapCropContainer\(/);
 
   for (const property of ['box-shadow', 'opacity', 'outline', 'mask-image']) {
     assert.ok(snapshotMerge.properties.cropCreateImage.includes(property), `${property} must survive topology creation`);
@@ -375,7 +363,6 @@ test('public release files avoid internal release-log wording', () => {
     'docs/wechat-interface-notes.md',
     'src/content.js',
     'src/image-geometry.js',
-    'src/image-presentation.js',
     'src/image-controls.js',
     'src/image-snapshot-merge.js',
     'src/image-tools.js',
@@ -396,7 +383,6 @@ test('production comments are concise and professional', () => {
   for (const file of [
     'src/content.js',
     'src/image-geometry.js',
-    'src/image-presentation.js',
     'src/image-controls.js',
     'src/image-snapshot-merge.js',
     'src/image-tools.js',

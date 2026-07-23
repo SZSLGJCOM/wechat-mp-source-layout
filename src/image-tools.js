@@ -1,21 +1,16 @@
 (() => {
   'use strict';
 
-  const VERSION = 'v0.10.1';
+  const VERSION = 'v1.0.0';
   const MENU_ID = 'mpse-img2-menu';
   const PANEL_ID = 'mpse-img2-panel';
-  const BOX_ID = 'mpse-img2-box';
   const BADGE_ID = 'mpse-img2-badge';
-  const DRAG_SHIELD_ID = 'mpse-img2-drag-shield';
-  const HANDLE_CLASS = 'mpse-img2-handle';
   const CROP_ATTR = 'data-mpse-image-crop';
-  const GEOMETRY_DRAG_THRESHOLD = 4;
   const BOUND_FLAG = '__mpseImageToolsBound__';
   const GENERIC_BOUND_ATTR = 'data-mpse-image-tools-bound';
   const VERSION_ATTR = 'data-mpse-image-tools-version';
   const bridgeClient = window.__MPSE_BRIDGE_CLIENT__;
   const imageGeometry = window.__MPSE_IMAGE_GEOMETRY__;
-  const imagePresentation = window.__MPSE_IMAGE_PRESENTATION__;
   const snapshotMerge = window.__MPSE_IMAGE_SNAPSHOT_MERGE__;
   const injectBridge = bridgeClient && typeof bridgeClient.inject === 'function'
     ? bridgeClient.inject
@@ -28,7 +23,6 @@
     : () => Promise.reject(new Error('扩展桥接客户端未加载，请刷新页面后重试'));
 
   if (!imageGeometry) throw new Error('图片几何模块未加载，请刷新页面后重试');
-  if (!imagePresentation) throw new Error('图片展示模块未加载，请刷新页面后重试');
   if (!snapshotMerge) throw new Error('图片写回合并模块未加载，请刷新页面后重试');
 
   const MANAGED_DATA_KEYS = [
@@ -64,13 +58,6 @@
     queuedCommit: false,
     pendingCommitReason: '',
     isDragging: false,
-    interaction: null,
-    cropMode: false,
-    cropTransientHost: false,
-    cropTransientBase: false,
-    cropTransientCirclePresentation: null,
-    cropSessionRevision: 0,
-    cropSessionGeometryChanged: false,
     needsCommit: false,
     lastSnapshot: null,
     pendingSnapshots: new Map(),
@@ -78,15 +65,9 @@
     positionFrame: 0,
     pageObserver: null,
     blockedByLayer: false,
-    handleElements: [],
-    gestureEpoch: 0,
     editRevision: 0,
     selectionRevision: 0,
-    reacquireTimer: null,
-    lastImagePress: null,
-    lastCropToggleAt: 0,
-    zoomFrame: 0,
-    pendingZoom: null
+    reacquireTimer: null
   };
 
   function isMpHost() {
@@ -185,7 +166,7 @@
 
   function isExtensionElement(node) {
     if (!node || !node.closest) return false;
-    return Boolean(node.closest(`#${MENU_ID}, #${PANEL_ID}, #${BOX_ID}, #${BADGE_ID}, #${DRAG_SHIELD_ID}, .${HANDLE_CLASS}, #mpse-svg2-panel, #mpse-svg2-pick-button, #mpse-svgb-menu, #mpse-svgb-panel, #mpse-svgb-box, #mpse-svgb-badge, #mpse-inline-panel, #mpse-toolbar-button, #mpse-floating-button`));
+    return Boolean(node.closest(`#${MENU_ID}, #${PANEL_ID}, #${BADGE_ID}, #mpse-svg2-panel, #mpse-svg2-pick-button, #mpse-svgb-menu, #mpse-svgb-panel, #mpse-svgb-box, #mpse-svgb-badge, #mpse-inline-panel, #mpse-toolbar-button, #mpse-floating-button`));
   }
 
   function findEditableRoot(node) {
@@ -436,41 +417,6 @@
     return true;
   }
 
-  function createClientPointMapping(sourceDocument) {
-    if (!sourceDocument || sourceDocument === document) return null;
-    const frame = getFrameByDocument(sourceDocument);
-    if (!frame) return null;
-    const frameRect = frame.getBoundingClientRect();
-    const sourceWindow = sourceDocument.defaultView;
-    const frameWidth = Math.max(1, (sourceWindow && sourceWindow.innerWidth) || frame.clientWidth || frameRect.width);
-    const frameHeight = Math.max(1, (sourceWindow && sourceWindow.innerHeight) || frame.clientHeight || frameRect.height);
-    return {
-      sourceDocument,
-      offsetX: frameRect.left + frame.clientLeft * frameRect.width / frameWidth,
-      offsetY: frameRect.top + frame.clientTop * frameRect.height / frameHeight,
-      scaleX: frameRect.width / frameWidth,
-      scaleY: frameRect.height / frameHeight
-    };
-  }
-
-  function getTopClientPoint(event, mapping = null) {
-    const x = Number(event && event.clientX);
-    const y = Number(event && event.clientY);
-    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
-
-    if (event && event.mpseTopCoordinates) return { x, y };
-
-    const sourceDocument = (event.target && event.target.ownerDocument)
-      || (event.view && event.view.document)
-      || null;
-    if (mapping && (!sourceDocument || sourceDocument === mapping.sourceDocument)) {
-      return { x: mapping.offsetX + x * mapping.scaleX, y: mapping.offsetY + y * mapping.scaleY };
-    }
-    if (!sourceDocument || sourceDocument === document) return { x, y };
-    const pointMapping = createClientPointMapping(sourceDocument);
-    return pointMapping ? { x: pointMapping.offsetX + x * pointMapping.scaleX, y: pointMapping.offsetY + y * pointMapping.scaleY } : null;
-  }
-
   function schedulePositionTools() {
     if (state.positionFrame) return;
     state.positionFrame = window.requestAnimationFrame(() => {
@@ -569,104 +515,6 @@
     return panel;
   }
 
-  function createBox() {
-    let box = document.getElementById(BOX_ID);
-    if (box) return box;
-    box = document.createElement('div');
-    box.id = BOX_ID;
-    document.body.appendChild(box);
-    return box;
-  }
-
-  function createDragShield() {
-    let shield = document.getElementById(DRAG_SHIELD_ID);
-    if (shield) return shield;
-    shield = document.createElement('div');
-    shield.id = DRAG_SHIELD_ID;
-    shield.setAttribute('aria-hidden', 'true');
-    shield.addEventListener('wheel', (event) => {
-      if (state.interaction) stopUiEvent(event);
-    }, { capture: true, passive: false });
-    document.body.appendChild(shield);
-    return shield;
-  }
-
-  function cursorForHandle(handle) {
-    if (handle === 'n' || handle === 's') return 'ns-resize';
-    if (handle === 'e' || handle === 'w') return 'ew-resize';
-    if (handle === 'ne' || handle === 'sw') return 'nesw-resize';
-    return 'nwse-resize';
-  }
-
-  function showDragShield(cursor) {
-    const shield = createDragShield();
-    shield.style.setProperty('cursor', cursor || 'default', 'important');
-    shield.classList.add('mpse-visible');
-  }
-
-  function hideDragShield() {
-    const shield = document.getElementById(DRAG_SHIELD_ID);
-    if (!shield) return;
-    shield.classList.remove('mpse-visible');
-    shield.style.removeProperty('cursor');
-  }
-
-  function getImageHandles() {
-    if (state.handleElements.length && state.handleElements.every((handle) => handle.isConnected)) {
-      return state.handleElements;
-    }
-    state.handleElements = Array.from(document.querySelectorAll(`.${HANDLE_CLASS}`));
-    return state.handleElements;
-  }
-
-  function createHandles() {
-    const definitions = [
-      ['nw', '左上角缩放'], ['n', '顶部裁切'], ['ne', '右上角缩放'], ['e', '右侧裁切'],
-      ['se', '右下角缩放'], ['s', '底部裁切'], ['sw', '左下角缩放'], ['w', '左侧裁切']
-    ];
-    for (const [handle, label] of definitions) {
-      const id = `mpse-img2-handle-${handle}`;
-      let button = document.getElementById(id);
-      if (button) continue;
-      button = document.createElement('button');
-      button.id = id;
-      button.type = 'button';
-      button.className = `${HANDLE_CLASS} ${HANDLE_CLASS}-${handle}`;
-      button.dataset.mpseImageHandle = handle;
-      button.setAttribute('aria-label', label);
-      button.title = label;
-      button.style.setProperty('cursor', cursorForHandle(handle), 'important');
-      button.addEventListener('pointerdown', onHandlePointerDown, true);
-      button.addEventListener('pointercancel', onHandlePointerCancel, true);
-      button.addEventListener('lostpointercapture', onHandlePointerCancel, true);
-      document.body.appendChild(button);
-    }
-    state.handleElements = Array.from(document.querySelectorAll(`.${HANDLE_CLASS}`));
-  }
-
-  function positionHandles(rect) {
-    const positions = {
-      nw: [rect.left, rect.top], n: [(rect.left + rect.right) / 2, rect.top], ne: [rect.right, rect.top], e: [rect.right, (rect.top + rect.bottom) / 2],
-      se: [rect.right, rect.bottom], s: [(rect.left + rect.right) / 2, rect.bottom], sw: [rect.left, rect.bottom], w: [rect.left, (rect.top + rect.bottom) / 2]
-    };
-    for (const handle of getImageHandles()) {
-      const point = positions[handle.dataset.mpseImageHandle];
-      if (!point) continue;
-      handle.style.setProperty('transform', `translate3d(${point[0]}px, ${point[1]}px, 0) translate(-50%, -50%)`, 'important');
-      handle.classList.add('mpse-visible');
-    }
-  }
-
-  function positionSelectionBox(box, rect) {
-    setStyles(box, {
-      left: '0px',
-      top: '0px',
-      width: `${rect.width}px`,
-      height: `${rect.height}px`,
-      transform: `translate3d(${rect.left}px, ${rect.top}px, 0)`
-    });
-  }
-
   function createBadge() {
     let badge = document.getElementById(BADGE_ID);
     if (badge) return badge;
@@ -677,12 +525,11 @@
   }
 
   function cleanupLegacyDom() {
-    for (const id of [MENU_ID, PANEL_ID, BOX_ID, BADGE_ID, DRAG_SHIELD_ID]) {
+    for (const id of [MENU_ID, PANEL_ID, BADGE_ID, 'mpse-img2-box', 'mpse-img2-drag-shield']) {
       const element = document.getElementById(id);
       if (element) element.remove();
     }
-    for (const handle of getImageHandles()) handle.remove();
-    state.handleElements = [];
+    for (const handle of document.querySelectorAll('.mpse-img2-handle')) handle.remove();
   }
 
   function absorbUiEvent(event) {
@@ -1001,33 +848,6 @@
     return root && root.getBoundingClientRect ? Math.max(1, root.getBoundingClientRect().width) : 1;
   }
 
-  function getImageLayoutBounds(image) {
-    const host = getLayoutHost(image);
-    const view = host && host.ownerDocument && host.ownerDocument.defaultView;
-    let parent = host && host.parentElement;
-    while (parent && view) {
-      const style = view.getComputedStyle(parent);
-      if (style.display !== 'inline' && style.display !== 'contents') break;
-      parent = parent.parentElement;
-    }
-    if (!parent || !view) return null;
-    const localRect = parent.getBoundingClientRect();
-    const topRect = getTopRect(parent);
-    if (localRect.width < 1 || localRect.height < 1 || topRect.width < 1) return null;
-    const scaleX = topRect.width / localRect.width;
-    const scaleY = topRect.height / localRect.height;
-    const parentStyle = view.getComputedStyle(parent);
-    const paddingLeft = parseFloat(parentStyle.paddingLeft || '0');
-    const paddingRight = parseFloat(parentStyle.paddingRight || '0');
-    const paddingTop = parseFloat(parentStyle.paddingTop || '0');
-    const left = topRect.left + (parent.clientLeft + paddingLeft) * scaleX;
-    const right = topRect.left + (parent.clientLeft + parent.clientWidth - paddingRight) * scaleX;
-    let top = topRect.top + (parent.clientTop + paddingTop) * scaleY;
-    const previous = host.previousElementSibling;
-    if (previous) top = Math.max(top, getTopRect(previous).bottom);
-    return right > left ? { left, right, top, width: right - left } : null;
-  }
-
   function readCropState(image) {
     const host = getCropContainer(image);
     if (!host) return null;
@@ -1162,66 +982,6 @@
     return crop;
   }
 
-  function ensureCropContainer(image) {
-    const existing = getCropContainer(image);
-    if (existing) return { host: existing, created: false, circlePresentation: null };
-    if (!image || !image.parentNode) return { host: null, created: false, circlePresentation: null };
-
-    const circleDiameter = image.dataset.mpseCircleOn === '1'
-      ? clamp(getDataNumber(image, 'mpseCircleDiameter', 160), 40, 520)
-      : null;
-    const circlePresentation = suspendImageCirclePresentation(image);
-    const rect = image.getBoundingClientRect();
-    const presentationRect = getTopRect(image);
-    const sourceMetrics = readDecorationMetrics(image, 100);
-    const horizontalDecoration = sourceMetrics.paddingLeft + sourceMetrics.paddingRight
-      + sourceMetrics.borderLeftWidth + sourceMetrics.borderRightWidth;
-    const verticalDecoration = sourceMetrics.paddingTop + sourceMetrics.paddingBottom
-      + sourceMetrics.borderTopWidth + sourceMetrics.borderBottomWidth;
-    const presentationSize = imagePresentation.scaleContentSize((image.offsetWidth || rect.width) - horizontalDecoration,
-      (image.offsetHeight || rect.height) - verticalDecoration, image.style.getPropertyValue('scale'));
-    const layoutWidth = presentationSize.width;
-    const layoutHeight = presentationSize.height;
-    const availableWidth = getAvailableImageWidth(image);
-    const baseAspect = Math.max(0.05, layoutWidth / Math.max(1, layoutHeight));
-    const baseWidth = clamp(layoutWidth / Math.max(1, availableWidth) * 100, 4, 100);
-    const layout = captureCropLayout(image);
-    imagePresentation.normalizeCropLayout(layout);
-    layout.baseWidth = baseWidth;
-    layout.baseHeightPx = layoutHeight;
-    layout.decoration = { ...sourceMetrics, baseWidth };
-    if (image.style.getPropertyValue('box-shadow')) captureBaseBoxShadow(image);
-    const host = image.ownerDocument.createElement('span');
-    host.setAttribute(CROP_ATTR, '1');
-    host.dataset.mpseCropBaseWidth = baseWidth.toFixed(4);
-    host.dataset.mpseCropLayout = JSON.stringify(layout);
-    restoreInlineStyles(host, layout.hostStyles || layout.styles);
-    host.style.removeProperty('height');
-    image.parentNode.insertBefore(host, image);
-    host.appendChild(image);
-    transferInlineStyles(image, host, FRAME_STYLE_PROPS);
-    applyCropDecorationScale(host, layout, baseWidth);
-    writeCropLayout(image, layout);
-
-    for (const prop of ['width', 'max-width', 'display', 'margin-left', 'margin-right', 'margin-top', 'margin-bottom', 'vertical-align', 'float', 'position', 'left', 'top', 'right', 'bottom', 'height', 'translate', 'scale', 'transform', 'transform-origin']) {
-      image.style.removeProperty(prop);
-    }
-    writeCropState(image, {
-      frame: { x: 0, y: 0, width: 1, height: 1 },
-      media: { x: 0, y: 0, width: 1, height: 1 },
-      baseAspect
-    });
-    layout.hostStyles.translate = { value: imagePresentation.positionCropHost(host, presentationRect, getTopRect), priority: 'important' };
-    writeCropLayout(image, layout);
-    clearFrameAppearance(image);
-    renderCropAppearance(image);
-    if (circlePresentation && circleDiameter !== null && image.dataset.mpseCircleOn === '1') {
-      imageControls.applyCircleCropGeometry(image, circleDiameter, true);
-      renderCropAppearance(image);
-    }
-    return { host, created: true, circlePresentation };
-  }
-
   function unwrapCropContainer(image) {
     const host = getCropContainer(image);
     if (!host || !host.parentNode) return image;
@@ -1273,14 +1033,6 @@
     } else {
       state.image = unwrapCropContainer(image);
     }
-    state.cropMode = false;
-    state.cropTransientHost = false;
-    state.cropTransientBase = false;
-    state.cropTransientCirclePresentation = null;
-    state.cropSessionRevision = 0;
-    state.cropSessionGeometryChanged = false;
-    const box = document.getElementById(BOX_ID);
-    if (box) box.classList.remove('mpse-crop-mode');
     if (circleDiameter !== null) applyEffect('circle', { diameter: circleDiameter });
     else markChanged(state.image, 'crop-reset');
     schedulePositionTools();
@@ -1308,649 +1060,6 @@
     }
     setStyle(host, 'width', `${visualWidth.toFixed(3)}%`);
     return true;
-  }
-
-  function cropStatesMatch(first, second) {
-    return imageGeometry.modelsMatch(first, second);
-  }
-
-  function capturePointer(target, pointerId) {
-    if (!target || !Number.isFinite(pointerId) || !target.setPointerCapture) return;
-    try {
-      target.setPointerCapture(pointerId);
-    } catch (_) {
-      // Pointer capture can be unavailable across editor frames.
-    }
-  }
-
-  function releasePointer(target, pointerId) {
-    if (!target || !Number.isFinite(pointerId) || !target.releasePointerCapture) return;
-    try {
-      if (!target.hasPointerCapture || target.hasPointerCapture(pointerId)) target.releasePointerCapture(pointerId);
-    } catch (_) {
-      // Pointer capture may already have been released by the browser.
-    }
-  }
-
-  function matchesGeometryPointer(interaction, event) {
-    if (!interaction || !event || !Number.isFinite(interaction.pointerId) || !Number.isFinite(event.pointerId)) return true;
-    return interaction.pointerId === event.pointerId;
-  }
-
-  function interactionOwnsEvent(interaction, event) {
-    return Boolean(interaction && matchesGeometryPointer(interaction, event));
-  }
-
-  function deferGeometryFinish(event, forceCancel = false, closeSelection = false) {
-    const interaction = state.interaction;
-    if (!interaction || (state.image && state.image.isConnected)) return false;
-    if (rebaseInteractionAfterEditorWrite(interaction.identity || state.identity)) return false;
-    const point = getTopClientPoint(event, interaction.pointMapping) || interaction.lastPoint;
-    if (point) {
-      interaction.lastPoint = point;
-      interaction.lastEvent = {
-        type: 'pointermove',
-        pointerId: interaction.pointerId,
-        clientX: point.x,
-        clientY: point.y,
-        mpseTopCoordinates: true,
-        target: document
-      };
-    }
-    interaction.pendingFinish = {
-      forceCancel: Boolean(interaction.pendingFinish?.forceCancel || forceCancel
-        || (event && (event.type === 'pointercancel' || event.type === 'lostpointercapture'))),
-      closeSelection: Boolean(interaction.pendingFinish?.closeSelection || closeSelection)
-    };
-    if (!interaction.disconnectTimer) {
-      interaction.disconnectTimer = window.setTimeout(() => {
-        interaction.disconnectTimer = 0;
-        if (state.interaction !== interaction || !interaction.pendingFinish) return;
-        if (rebaseInteractionAfterEditorWrite(interaction.identity || state.identity)) return;
-        finishGeometryGesture(undefined, true);
-      }, 800);
-    }
-    return true;
-  }
-
-  function finishOrDeferGeometry(event, forceCancel = false) {
-    if (deferGeometryFinish(event, forceCancel)) return true;
-    return finishGeometryGesture(event, forceCancel);
-  }
-
-  function deferContentCommitForGesture() {
-    if (!state.commitTimer) return;
-    window.clearTimeout(state.commitTimer);
-    state.commitTimer = null;
-  }
-
-  function setInteractionCursor(interaction, cursor) {
-    if (!interaction) return;
-    showDragShield(cursor);
-    const target = interaction.pointerTarget;
-    if (!target || !target.style) return;
-    interaction.cursorBefore = {
-      value: target.style.getPropertyValue('cursor'),
-      priority: target.style.getPropertyPriority('cursor')
-    };
-    target.style.setProperty('cursor', cursor, 'important');
-  }
-
-  function restoreInteractionCursor(interaction) {
-    hideDragShield();
-    if (!interaction || !interaction.cursorBefore || !interaction.pointerTarget || !interaction.pointerTarget.style) return;
-    const { value, priority } = interaction.cursorBefore;
-    if (value) interaction.pointerTarget.style.setProperty('cursor', value, priority);
-    else interaction.pointerTarget.style.removeProperty('cursor');
-  }
-
-  function queueGeometryPreview(interaction) {
-    if (!interaction || interaction.frame) return;
-    interaction.frame = window.requestAnimationFrame(() => {
-      interaction.frame = 0;
-      if (state.interaction !== interaction) return;
-      flushGeometryPreview(interaction);
-    });
-  }
-
-  function captureGeometryPreviewStyles(interaction, image) {
-    if (!interaction || !image) return;
-    interaction.previewTarget = getSelectionElement(image);
-    interaction.targetPreviewStyles = captureInlineStyles(interaction.previewTarget, [
-      'transform', 'scale', 'transform-origin', 'clip-path', 'overflow'
-    ]);
-    interaction.imagePreviewStyles = captureInlineStyles(image, ['transform', 'translate']);
-  }
-
-  function clearGeometryPreview(interaction, image = state.image) {
-    if (!interaction) return;
-    restoreInlineStyles(interaction.previewTarget, interaction.targetPreviewStyles);
-    restoreInlineStyles(image, interaction.imagePreviewStyles);
-  }
-
-  function updateGeometryOverlayRect(rect) {
-    const box = document.getElementById(BOX_ID);
-    if (!box || !rect) return;
-    positionSelectionBox(box, rect);
-    positionHandles(rect);
-  }
-
-  function applyCropLayoutOffset(image, desiredRect) {
-    const crop = readCropState(image);
-    const host = getCropContainer(image);
-    if (!crop || !host || !desiredRect) return;
-    const actualRect = getTopRect(host);
-    if (actualRect.width < 1 || actualRect.height < 1) return;
-    const layout = readCropLayout(image);
-    layout.offsetX = clamp(
-      layout.offsetX + (desiredRect.left - actualRect.left) * crop.frame.width / actualRect.width,
-      -4,
-      4
-    );
-    layout.offsetY = clamp(
-      layout.offsetY + (desiredRect.top - actualRect.top) * crop.frame.height / actualRect.height,
-      -4,
-      4
-    );
-    writeCropLayout(image, layout);
-    writeCropState(image, crop);
-  }
-
-  function applyGeometryPreview(interaction, preview, image) {
-    const target = getSelectionElement(image);
-    if (preview.kind === 'resize') {
-      const origin = interaction.resizeOrigin;
-      const baseTransform = interaction.targetPreviewStyles?.transform?.value || '';
-      setStyle(target, 'transform-origin', `${(origin.x * 100).toFixed(6)}% ${(origin.y * 100).toFixed(6)}%`);
-      setStyle(target, 'scale', '');
-      setStyle(target, 'transform', `${baseTransform} scale(${preview.scale})`.trim());
-      updateGeometryOverlayRect(imageGeometry.resizePreviewRect(interaction.rect, preview.scale, origin));
-      return;
-    }
-
-    if (preview.kind === 'pan') {
-      const deltaX = preview.crop.media.x - interaction.startCrop.media.x;
-      const deltaY = preview.crop.media.y - interaction.startCrop.media.y;
-      const baseTransform = interaction.imagePreviewStyles?.transform?.value || '';
-      setStyle(image, 'translate', '');
-      setStyle(image, 'transform', `translate3d(${(-deltaX * 100).toFixed(6)}%, ${(-deltaY * 100).toFixed(6)}%, 0) ${baseTransform}`.trim());
-      updateGeometryOverlayRect(interaction.rect);
-      return;
-    }
-
-    const contentRect = imageGeometry.previewFrameRect(
-      interaction.contentRect || interaction.rect,
-      interaction.startCrop.frame,
-      preview.crop.frame
-    );
-    const startContent = interaction.contentRect || interaction.rect;
-    const rect = {
-      left: contentRect.left - (startContent.left - interaction.rect.left),
-      top: contentRect.top - (startContent.top - interaction.rect.top),
-      right: contentRect.right + (interaction.rect.right - startContent.right),
-      bottom: contentRect.bottom + (interaction.rect.bottom - startContent.bottom)
-    };
-    rect.width = rect.right - rect.left;
-    rect.height = rect.bottom - rect.top;
-    const top = (rect.top - interaction.rect.top) / interaction.rect.height * 100;
-    const right = (interaction.rect.right - rect.right) / interaction.rect.width * 100;
-    const bottom = (interaction.rect.bottom - rect.bottom) / interaction.rect.height * 100;
-    const left = (rect.left - interaction.rect.left) / interaction.rect.width * 100;
-    setStyle(target, 'overflow', 'visible');
-    setStyle(target, 'clip-path', `inset(${top.toFixed(6)}% ${right.toFixed(6)}% ${bottom.toFixed(6)}% ${left.toFixed(6)}%)`);
-    updateGeometryOverlayRect(rect);
-  }
-
-  function flushGeometryPreview(interaction = state.interaction) {
-    if (!interaction) return;
-    if (interaction.frame) {
-      window.cancelAnimationFrame(interaction.frame);
-      interaction.frame = 0;
-    }
-    const preview = interaction.preview;
-    if (!preview) return;
-    interaction.preview = null;
-
-    const image = state.image;
-    if (!image || !image.isConnected) return;
-    interaction.appliedPreview = preview;
-    applyGeometryPreview(interaction, preview, image);
-  }
-
-  function hasGeometryChanged(interaction, preview) {
-    if (!interaction || !preview) return false;
-    if (interaction.kind === 'resize') {
-      return Math.abs(preview.widthPercent - interaction.startWidthPercent) >= 0.01;
-    }
-    return !cropStatesMatch(preview.crop, interaction.startCrop);
-  }
-
-  function getCornerResizePreview(interaction, point) {
-    const horizontalDirection = interaction.handle.includes('w') ? -1 : 1;
-    const verticalDirection = interaction.handle.includes('n') ? -1 : 1;
-    const horizontalDelta = horizontalDirection * (point.x - interaction.startX);
-    const verticalDelta = verticalDirection * (point.y - interaction.startY);
-    const horizontalRatio = Math.abs(horizontalDelta / Math.max(1, interaction.rect.width));
-    const verticalRatio = Math.abs(verticalDelta / Math.max(1, interaction.rect.height));
-    const requestedScale = horizontalRatio >= verticalRatio
-      ? 1 + horizontalDelta / Math.max(1, interaction.rect.width)
-      : 1 + verticalDelta / Math.max(1, interaction.rect.height);
-    const minimumScale = 4 / Math.max(4, interaction.startWidthPercent);
-    let maximumScale = 100 / Math.max(4, interaction.startWidthPercent);
-    let boundedMinimumScale = minimumScale;
-    if (Number.isFinite(interaction.circleDiameterPx) && interaction.circleDiameterPx > 0) {
-      boundedMinimumScale = Math.max(boundedMinimumScale, 40 / interaction.circleDiameterPx);
-      maximumScale = Math.min(maximumScale, 520 / interaction.circleDiameterPx);
-    }
-    const bounds = interaction.bounds;
-    if (bounds) {
-      const available = interaction.resizeOrigin.x < 0.5
-        ? bounds.right - interaction.rect.left
-        : interaction.rect.right - bounds.left;
-      maximumScale = Math.min(maximumScale, Math.max(boundedMinimumScale, available / Math.max(1, interaction.rect.width)));
-      if (interaction.resizeOrigin.y > 0.5) {
-        const verticalAvailable = interaction.rect.bottom - bounds.top;
-        maximumScale = Math.min(maximumScale, Math.max(boundedMinimumScale, verticalAvailable / Math.max(1, interaction.rect.height)));
-      }
-    }
-    const scale = clamp(requestedScale, boundedMinimumScale, Math.max(boundedMinimumScale, maximumScale));
-    const widthPercent = clamp(interaction.startWidthPercent * scale, 4, 100);
-    return { widthPercent, scale: widthPercent / Math.max(0.01, interaction.startWidthPercent) };
-  }
-
-  function updateGeometryOverlay(image = state.image) {
-    const box = document.getElementById(BOX_ID);
-    if (!box || !image || !image.isConnected) return null;
-    const rect = getTopRect(getSelectionElement(image));
-    positionSelectionBox(box, rect);
-    positionHandles(rect);
-    return rect;
-  }
-
-  function discardCapturedImageBase(image, created) {
-    if (created && image && image.dataset) delete image.dataset.mpseImageBase;
-  }
-
-  function beginGeometryGesture(handle, event, captureTarget) {
-    const image = state.image;
-    if (!image || !image.isConnected) return;
-    const createdImageBase = captureImageBase(image);
-    state.identity = imageSignature(image);
-    const pointMapping = createClientPointMapping(event.target && event.target.ownerDocument);
-    const point = getTopClientPoint(event, pointMapping);
-    if (!point) {
-      discardCapturedImageBase(image, createdImageBase);
-      return;
-    }
-    const isCorner = ['nw', 'ne', 'se', 'sw'].includes(handle);
-    const cropResult = ensureCropContainer(image);
-    if (!cropResult.host) {
-      discardCapturedImageBase(image, createdImageBase);
-      return;
-    }
-    const target = cropResult.host;
-    const rect = getTopRect(target);
-    const startCrop = readCropState(image);
-    const contentRect = startCrop ? getCropContentRect(image) : rect;
-    deferContentCommitForGesture();
-    const interaction = {
-      kind: isCorner ? 'resize' : 'crop',
-      identity: state.identity,
-      handle,
-      pointerId: event.pointerId,
-      pointerTarget: captureTarget || event.target,
-      pointMapping,
-      startX: point.x,
-      startY: point.y,
-      rect,
-      startCrop,
-      contentRect,
-      startCropBaseWidth: startCrop ? readCropBaseWidth(image) : null,
-      baseCanvasHeight: startCrop ? contentRect.height / Math.max(imageGeometry.MIN_FRACTION, startCrop.frame.height) : null,
-      resizeOrigin: imageGeometry.cornerResizeOrigin(handle),
-      startWidthPercent: readLayoutWidthPercent(image),
-      availableWidth: getAvailableImageWidth(image),
-      bounds: getImageLayoutBounds(image),
-      createdCrop: cropResult.created,
-      createdImageBase,
-      sessionRevision: state.editRevision,
-      circlePresentation: cropResult.circlePresentation,
-      circleDiameterPx: image.dataset.mpseCircleOn === '1'
-        ? Math.min(contentRect.width, contentRect.height)
-        : null,
-      started: false,
-      gestureEpoch: ++state.gestureEpoch,
-      preview: null,
-      appliedPreview: null,
-      frame: 0
-    };
-    cancelScheduledReacquire();
-    captureGeometryPreviewStyles(interaction, image);
-    state.interaction = interaction;
-    state.isDragging = true;
-    capturePointer(captureTarget || event.target, event.pointerId);
-    setInteractionCursor(interaction, cursorForHandle(handle));
-  }
-
-  function beginCropPan(image, event) {
-    const createdImageBase = captureImageBase(image);
-    state.identity = imageSignature(image);
-    const pointMapping = createClientPointMapping(event.target && event.target.ownerDocument);
-    const point = getTopClientPoint(event, pointMapping);
-    if (!point) {
-      discardCapturedImageBase(image, createdImageBase);
-      return;
-    }
-    const result = ensureCropContainer(image);
-    if (!result.host) {
-      discardCapturedImageBase(image, createdImageBase);
-      return;
-    }
-    const rect = getTopRect(result.host);
-    deferContentCommitForGesture();
-    const interaction = {
-      kind: 'pan',
-      identity: state.identity,
-      pointerId: event.pointerId,
-      pointerTarget: image,
-      pointMapping,
-      startX: point.x,
-      startY: point.y,
-      rect,
-      startCrop: readCropState(image),
-      contentRect: getCropContentRect(image),
-      createdCrop: result.created,
-      createdImageBase,
-      sessionRevision: state.editRevision,
-      circlePresentation: result.circlePresentation,
-      started: false,
-      gestureEpoch: ++state.gestureEpoch,
-      preview: null,
-      appliedPreview: null,
-      frame: 0
-    };
-    cancelScheduledReacquire();
-    captureGeometryPreviewStyles(interaction, image);
-    state.interaction = interaction;
-    state.isDragging = true;
-    capturePointer(image, event.pointerId);
-    setInteractionCursor(interaction, 'grabbing');
-  }
-
-  function getEdgeResizeConstraints(interaction) {
-    const baseWidth = Math.max(0.01, interaction.startCropBaseWidth || 100);
-    const minimumVisibleWidth = Math.max(4, 2400 / Math.max(1, interaction.availableWidth));
-    const decoration = getCropDecorationSize(state.image);
-    const maximumContentWidth = Math.max(24, interaction.availableWidth - decoration.horizontal) * 100
-      / Math.max(1, interaction.availableWidth);
-    return {
-      minWidth: minimumVisibleWidth / baseWidth,
-      maxWidth: maximumContentWidth / baseWidth,
-      minHeight: 24 / Math.max(24, interaction.baseCanvasHeight || interaction.rect.height),
-      maxHeight: 1,
-      horizontalMediaRatioFactor: 1,
-      verticalMediaRatioFactor: 1
-    };
-  }
-
-  function updateGeometryGesture(event) {
-    const interaction = state.interaction;
-    const image = state.image;
-    if (!interaction || !interactionOwnsEvent(interaction, event)) return;
-    const point = event && event.mpseTopCoordinates
-      ? { x: Number(event.clientX), y: Number(event.clientY) }
-      : getTopClientPoint(event, interaction.pointMapping);
-    if (!point) return;
-    interaction.lastPoint = point;
-    interaction.lastEvent = event;
-    if (!image || !image.isConnected) return;
-    let rect = interaction.rect;
-    if (rect.width < 1 || rect.height < 1) return;
-    if (!interaction.started) {
-      const distance = Math.hypot(point.x - interaction.startX, point.y - interaction.startY);
-      if (distance < GEOMETRY_DRAG_THRESHOLD) return;
-      interaction.started = true;
-      rect = interaction.rect;
-    }
-    const geometryRect = interaction.kind === 'resize' ? rect : (interaction.contentRect || rect);
-    const dx = (point.x - interaction.startX) / geometryRect.width;
-    const dy = (point.y - interaction.startY) / geometryRect.height;
-
-    if (interaction.kind === 'resize') {
-      interaction.preview = { kind: 'resize', ...getCornerResizePreview(interaction, point) };
-      queueGeometryPreview(interaction);
-      return;
-    }
-
-    const start = interaction.startCrop;
-    if (!start) return;
-    if (interaction.kind === 'pan') {
-      interaction.preview = { kind: 'pan', crop: imageGeometry.panMedia(start, dx, dy) };
-    } else {
-      const ratio = interaction.handle === 'e' || interaction.handle === 'w' ? dx : dy;
-      const constraints = interaction.edgeConstraints || (interaction.edgeConstraints = getEdgeResizeConstraints(interaction));
-      let crop = imageGeometry.resizeFrameEdge(start, interaction.handle, ratio, constraints);
-      if (image.dataset.mpseCircleOn === '1') {
-        crop = imageGeometry.constrainFrameAspect(crop, interaction.handle, 1);
-      }
-      interaction.preview = { kind: 'crop', crop };
-    }
-    queueGeometryPreview(interaction);
-  }
-
-  function rollbackCropZoomSetup(pending) {
-    if (!pending) return;
-    let image = pending.image;
-    if (pending.createdCrop && image?.isConnected && getCropContainer(image)) {
-      const restored = unwrapCropContainer(image);
-      resumeImageCirclePresentation(restored, pending.circlePresentation);
-      if (state.image === image) state.image = restored;
-      image = restored;
-    }
-    discardCapturedImageBase(image, pending.createdImageBase);
-  }
-
-  function cancelPendingCropZoom(image = null) {
-    const pending = state.pendingZoom;
-    if (!pending || (image && pending.image !== image)) return false;
-    if (state.zoomFrame) window.cancelAnimationFrame(state.zoomFrame);
-    state.zoomFrame = 0;
-    state.pendingZoom = null;
-    rollbackCropZoomSetup(pending);
-    if (state.needsCommit) scheduleContentCommit('crop-zoom-cancel');
-    return true;
-  }
-
-  function flushCropZoom() {
-    state.zoomFrame = 0;
-    const pending = state.pendingZoom;
-    state.pendingZoom = null;
-    if (!pending || pending.image !== state.image || !pending.image.isConnected) return;
-    const image = pending.image;
-    const host = getCropContainer(image);
-    const crop = readCropState(image);
-    if (!host || !crop) {
-      rollbackCropZoomSetup(pending);
-      return;
-    }
-    const rect = getCropContentRect(image);
-    if (rect.width < 1 || rect.height < 1) {
-      rollbackCropZoomSetup(pending);
-      if (state.needsCommit) scheduleContentCommit('crop-zoom-invalid');
-      return;
-    }
-    const point = pending.point;
-    const pointX = clamp((point.x - rect.left) / rect.width, 0, 1);
-    const pointY = clamp((point.y - rect.top) / rect.height, 0, 1);
-    const scale = Math.exp(clamp(pending.deltaY, -240, 240) * 0.0015);
-    const next = imageGeometry.zoomMedia(crop, scale, pointX, pointY);
-    if (imageGeometry.modelsMatch(crop, next)) {
-      rollbackCropZoomSetup(pending);
-      if (state.needsCommit) scheduleContentCommit('crop-zoom-noop');
-      schedulePositionTools();
-      return;
-    }
-    writeCropState(image, next);
-    if (pending.createdCrop) {
-      state.cropTransientHost = true;
-      state.cropTransientBase = pending.createdImageBase;
-      state.cropTransientCirclePresentation = pending.circlePresentation;
-      state.cropSessionRevision = pending.sessionRevision;
-    }
-    state.cropSessionGeometryChanged = true;
-    markChanged(image, 'crop-zoom');
-    schedulePositionTools();
-  }
-
-  function queueCropZoom(image, event) {
-    const point = getTopClientPoint(event);
-    if (!point) return;
-    const createdImageBase = captureImageBase(image);
-    const result = ensureCropContainer(image);
-    if (!result.host) {
-      discardCapturedImageBase(image, createdImageBase);
-      return;
-    }
-    deferContentCommitForGesture();
-    if (!state.pendingZoom || state.pendingZoom.image !== image) {
-      state.pendingZoom = {
-        image,
-        point,
-        deltaY: 0,
-        createdCrop: result.created,
-        createdImageBase,
-        circlePresentation: result.circlePresentation,
-        sessionRevision: state.editRevision
-      };
-    }
-    state.pendingZoom.point = point;
-    state.pendingZoom.deltaY += Number(event.deltaY) || 0;
-    if (!state.zoomFrame) state.zoomFrame = window.requestAnimationFrame(flushCropZoom);
-  }
-
-  function restoreGeometryGesture(interaction, image) {
-    clearGeometryPreview(interaction, image);
-    if (!interaction || !image || !image.isConnected) return image;
-    let restored = image;
-    if (interaction.createdCrop && getCropContainer(image)) {
-      restored = unwrapCropContainer(image);
-      resumeImageCirclePresentation(restored, interaction.circlePresentation);
-    }
-    return restored;
-  }
-
-  function finishGeometryGesture(event, forceCancel = false) {
-    const interaction = state.interaction;
-    if (!interaction || !interactionOwnsEvent(interaction, event)) return false;
-    state.lastImagePress = null;
-    if (interaction.disconnectTimer) window.clearTimeout(interaction.disconnectTimer);
-    const canceled = forceCancel || Boolean(event && (event.type === 'pointercancel' || event.type === 'lostpointercapture'));
-    if (canceled) {
-      if (interaction.frame) window.cancelAnimationFrame(interaction.frame);
-      interaction.frame = 0;
-      interaction.preview = null;
-    } else {
-      flushGeometryPreview(interaction);
-    }
-    let image = state.image;
-    const preview = interaction.appliedPreview;
-    clearGeometryPreview(interaction, image);
-    state.interaction = null;
-    state.isDragging = false;
-    restoreInteractionCursor(interaction);
-    releasePointer(interaction.pointerTarget, interaction.pointerId);
-    if (canceled) {
-      state.image = restoreGeometryGesture(interaction, image);
-      if (interaction.createdImageBase && state.image) delete state.image.dataset.mpseImageBase;
-      if (state.needsCommit) scheduleContentCommit('gesture-cancel');
-      schedulePositionTools();
-      return true;
-    }
-    const changed = hasGeometryChanged(interaction, preview);
-    if (changed && image && image.isConnected) {
-      if (interaction.kind === 'resize') {
-        const desiredRect = imageGeometry.resizePreviewRect(interaction.rect, preview.scale, interaction.resizeOrigin);
-        setLayoutWidthPercent(image, preview.widthPercent, interaction.availableWidth);
-        applyCropLayoutOffset(image, desiredRect);
-      } else {
-        writeCropState(image, preview.crop);
-      }
-      updateGeometryOverlay(image);
-    }
-    if (changed && (state.cropMode || interaction.kind === 'crop')) {
-      state.cropSessionGeometryChanged = true;
-    }
-    if (changed && state.cropMode && interaction.createdCrop) {
-      state.cropTransientHost = true;
-      state.cropTransientBase = interaction.createdImageBase;
-      state.cropTransientCirclePresentation = interaction.circlePresentation;
-      state.cropSessionRevision = interaction.sessionRevision ?? state.editRevision;
-    }
-    if (interaction.kind === 'crop' && changed && state.image) {
-      if (!state.cropMode) {
-        state.cropTransientBase = interaction.createdImageBase;
-        state.cropTransientCirclePresentation = interaction.circlePresentation;
-        state.cropSessionRevision = state.editRevision;
-      }
-      state.cropMode = true;
-      state.cropTransientHost = interaction.createdCrop || state.cropTransientHost;
-      createBox().classList.add('mpse-crop-mode');
-      setBadgeText('裁切模式：拖动图片，Ctrl + 滚轮缩放');
-    }
-    if (!changed) {
-      state.image = restoreGeometryGesture(interaction, image);
-      image = state.image;
-      if (interaction.createdImageBase && image) delete image.dataset.mpseImageBase;
-    }
-    if (changed && state.image) {
-      markChanged(state.image, interaction.kind === 'pan' ? 'crop-pan' : interaction.kind, false);
-      scheduleContentCommit('drag-end');
-    } else if (state.needsCommit) {
-      scheduleContentCommit('drag-end');
-    }
-    schedulePositionTools();
-    return true;
-  }
-
-  function enterCropMode(image) {
-    state.cropMode = true;
-    state.cropTransientHost = false;
-    state.cropTransientBase = false;
-    state.cropTransientCirclePresentation = null;
-    state.cropSessionRevision = state.editRevision;
-    state.cropSessionGeometryChanged = false;
-    createBox().classList.add('mpse-crop-mode');
-    setBadgeText('裁切模式：拖动图片，Ctrl + 滚轮缩放');
-    schedulePositionTools();
-  }
-
-  function exitCropMode() {
-    const image = state.image;
-    cancelPendingCropZoom(image);
-    const untouchedSession = state.cropTransientBase && state.editRevision === state.cropSessionRevision;
-    const shouldUnwrap = state.cropTransientHost && image
-      && getCropContainer(image) && !state.cropSessionGeometryChanged && !hasCropLayoutOffset(image);
-    const pendingSnapshot = image && state.pendingSnapshots.get(imageIdentityKey(imageSignature(image)));
-    const refreshSnapshot = Boolean(shouldUnwrap && pendingSnapshot?.cropAction === 'ensure');
-    if (shouldUnwrap) {
-      state.image = unwrapCropContainer(image);
-      resumeImageCirclePresentation(state.image, null);
-      if (untouchedSession && state.image) delete state.image.dataset.mpseImageBase;
-      if (refreshSnapshot) markChanged(state.image, 'crop-exit');
-    } else if (untouchedSession && image) {
-      delete image.dataset.mpseImageBase;
-    }
-    state.cropMode = false;
-    state.cropTransientHost = false;
-    state.cropTransientBase = false;
-    state.cropTransientCirclePresentation = null;
-    state.cropSessionRevision = 0;
-    state.cropSessionGeometryChanged = false;
-    const box = document.getElementById(BOX_ID);
-    if (box) box.classList.remove('mpse-crop-mode');
-    const badge = document.getElementById(BADGE_ID);
-    if (badge && /裁切/.test(badge.textContent || '')) badge.textContent = '';
-    schedulePositionTools();
   }
 
   const controlsFactory = window.__MPSE_IMAGE_CONTROLS__;
@@ -2001,18 +1110,11 @@
     markChanged
   });
   const {
-    captureImageBase,
     restoreImageBase,
     renderAppearance,
-    renderCropAppearance,
     rebuildFrameAppearance,
-    clearFrameAppearance,
-    captureBaseBoxShadow,
     captureFrameSourceStyles,
     readCircleDiameter,
-    applyCircleCropGeometry,
-    suspendImageCirclePresentation,
-    resumeImageCirclePresentation,
     collectValues,
     showPanel,
     closePanel,
@@ -2040,7 +1142,6 @@
     image = unwrapCropContainer(image);
     if (!image || !image.isConnected) return;
     state.image = image;
-    exitCropMode();
     if (hasExactBase) restoreImageBase(image);
     for (const key of MANAGED_DATA_KEYS) delete image.dataset[key];
     markChanged(image, 'reset');
@@ -2077,7 +1178,6 @@
     const snapshot = snapshotCurrentImage(image, reason);
     if (!snapshot) return;
     snapshot.revision = ++state.editRevision;
-    snapshot.gestureEpoch = state.gestureEpoch;
     state.lastSnapshot = snapshot;
     state.pendingSnapshots.set(imageIdentityKey(snapshot.identity), snapshot);
     state.needsCommit = true;
@@ -2117,10 +1217,9 @@
     if (!identity) return;
     cancelScheduledReacquire();
     const selectionRevision = state.selectionRevision;
-    const gestureEpoch = state.gestureEpoch;
     state.reacquireTimer = window.setTimeout(() => {
       state.reacquireTimer = null;
-      if (state.selectionRevision !== selectionRevision || state.gestureEpoch !== gestureEpoch) return;
+      if (state.selectionRevision !== selectionRevision) return;
       if (state.isDragging) {
         scheduleSelectedImageReacquire(identity, { ...options, delay: 120 });
         return;
@@ -2217,13 +1316,6 @@
     return target && root ? applySnapshotToTarget(target, root, snapshot) : null;
   }
 
-  function recoverDisconnectedInteraction() {
-    if (!state.interaction || (state.image && state.image.isConnected)) return;
-    if (!rebaseInteractionAfterEditorWrite(state.identity || state.lastSnapshot?.identity)) {
-      finishGeometryGesture(undefined, true);
-    }
-  }
-
   function cropWasPersistedInRoot(root, identity) {
     const target = root && locateImageInHtml(root, identity);
     const host = target && getCropContainer(target);
@@ -2245,7 +1337,7 @@
   }
 
   function commitBatchIsCurrent(batch) {
-    return Boolean(batch.length && !state.isDragging && !state.interaction
+    return Boolean(batch.length && !state.isDragging
       && state.pendingSnapshots.size === batch.length
       && batch.every(({ key, snapshot }) => state.pendingSnapshots.get(key) === snapshot));
   }
@@ -2326,17 +1418,12 @@
       }
       const remainedCurrent = commitBatchIsCurrent(batch);
       const activeIdentity = state.identity;
-      const interactionIdentity = state.interaction?.identity || activeIdentity;
       clearCommittedSnapshots(batch);
       state.commitRetryCount = 0;
 
       if (!remainedCurrent) {
         restorePendingSnapshotsInEditor();
-        if (state.interaction && !rebaseInteractionAfterEditorWrite(interactionIdentity || batch[0].snapshot.identity)) {
-          finishGeometryGesture(undefined, true);
-        } else if (activeIdentity) {
-          scheduleSelectedImageReacquire(activeIdentity, { delay: 0 });
-        }
+        if (activeIdentity) scheduleSelectedImageReacquire(activeIdentity, { delay: 0 });
         return;
       }
 
@@ -2361,7 +1448,6 @@
     } catch (error) {
       failed = true;
       state.needsCommit = state.pendingSnapshots.size > 0;
-      recoverDisconnectedInteraction();
       console.warn('[公众号源码排版助手] image html sync failed:', error);
       setBadgeText('同步失败');
     } finally {
@@ -2407,19 +1493,6 @@
     if (best) {
       state.image = best;
       state.identity = imageSignature(best);
-      if (state.cropMode && state.cropTransientHost && !getCropContainer(best)) {
-        if (!state.cropSessionGeometryChanged) {
-          const result = ensureCropContainer(best);
-          if (!result.host) {
-            exitCropMode();
-          } else {
-            state.cropTransientHost = true;
-            if (result.circlePresentation) state.cropTransientCirclePresentation = result.circlePresentation;
-          }
-        } else {
-          exitCropMode();
-        }
-      }
       revealToolElements();
       setButtonStates();
       refreshVisiblePanel();
@@ -2428,95 +1501,8 @@
     return best;
   }
 
-  function rebaseInteractionAfterEditorWrite(identity) {
-    const interaction = state.interaction;
-    if (!interaction) return false;
-    const image = findImageByIdentity(identity);
-    if (!image) return false;
-
-    const previousPointerTarget = interaction.pointerTarget;
-    if (interaction.kind === 'pan') {
-      restoreInteractionCursor(interaction);
-      releasePointer(previousPointerTarget, interaction.pointerId);
-    }
-
-    if (interaction.frame) window.cancelAnimationFrame(interaction.frame);
-    clearGeometryPreview(interaction, state.image);
-    interaction.frame = 0;
-    interaction.preview = null;
-    interaction.appliedPreview = null;
-    interaction.edgeConstraints = null;
-    interaction.started = false;
-    interaction.createdCrop = false;
-    state.image = image;
-    state.identity = imageSignature(image);
-    interaction.identity = state.identity;
-    const createdImageBase = captureImageBase(image);
-    interaction.createdImageBase = interaction.createdImageBase || createdImageBase;
-
-    if (['pan', 'resize', 'crop'].includes(interaction.kind)) {
-      const result = ensureCropContainer(image);
-      if (!result.host) {
-        discardCapturedImageBase(image, createdImageBase);
-        return false;
-      }
-      interaction.createdCrop = interaction.createdCrop || result.created;
-      interaction.circlePresentation = interaction.circlePresentation || result.circlePresentation;
-    }
-    if (interaction.kind === 'pan') {
-      interaction.pointerTarget = image;
-      interaction.pointMapping = createClientPointMapping(image.ownerDocument);
-      capturePointer(image, interaction.pointerId);
-      setInteractionCursor(interaction, 'grabbing');
-    } else {
-      interaction.pointMapping = createClientPointMapping(interaction.pointerTarget?.ownerDocument);
-    }
-    const target = getSelectionElement(image);
-    interaction.rect = getTopRect(target);
-    interaction.startCrop = readCropState(image);
-    interaction.contentRect = interaction.startCrop ? getCropContentRect(image) : interaction.rect;
-    interaction.resizeOrigin = imageGeometry.cornerResizeOrigin(interaction.handle);
-    interaction.startWidthPercent = readLayoutWidthPercent(image);
-    interaction.availableWidth = getAvailableImageWidth(image);
-    interaction.bounds = getImageLayoutBounds(image);
-    interaction.startCropBaseWidth = interaction.startCrop ? readCropBaseWidth(image) : null;
-    interaction.baseCanvasHeight = interaction.startCrop
-      ? interaction.contentRect.height / Math.max(imageGeometry.MIN_FRACTION, interaction.startCrop.frame.height)
-      : null;
-    captureGeometryPreviewStyles(interaction, image);
-    if (interaction.lastPoint) {
-      updateGeometryGesture({
-        type: 'pointermove',
-        pointerId: interaction.pointerId,
-        clientX: interaction.lastPoint.x,
-        clientY: interaction.lastPoint.y,
-        mpseTopCoordinates: true,
-        target: document
-      });
-    } else if (interaction.lastEvent) {
-      updateGeometryGesture(interaction.lastEvent);
-    }
-    if (interaction.pendingFinish) {
-      const pending = interaction.pendingFinish;
-      interaction.pendingFinish = null;
-      finishGeometryGesture({
-        type: pending.forceCancel ? 'pointercancel' : 'pointerup',
-        pointerId: interaction.pointerId,
-        target: document
-      }, pending.forceCancel);
-      if (pending.closeSelection) {
-        hideTools();
-        return true;
-      }
-    }
-    revealToolElements();
-    return true;
-  }
-
   function revealToolElements() {
     createMenu().classList.add('mpse-visible');
-    createBox().classList.add('mpse-visible');
-    createHandles();
     createBadge().classList.add('mpse-visible');
     setToolElementsOffscreen(false);
   }
@@ -2524,7 +1510,6 @@
   function showToolsForImage(image) {
     cancelScheduledReacquire();
     state.selectionRevision += 1;
-    if (state.cropMode && state.image && state.image !== image) exitCropMode();
     state.image = image;
     state.identity = imageSignature(image);
     revealToolElements();
@@ -2534,38 +1519,27 @@
   }
 
   function setToolElementsOffscreen(offscreen) {
-    for (const id of [MENU_ID, PANEL_ID, BOX_ID, BADGE_ID]) {
+    for (const id of [MENU_ID, PANEL_ID, BADGE_ID]) {
       const element = document.getElementById(id);
       if (element) element.classList.toggle('mpse-offscreen', offscreen);
     }
-    for (const handle of getImageHandles()) handle.classList.toggle('mpse-offscreen', offscreen);
   }
 
   function hideToolElements(preserveFocusedPanel = false) {
-    for (const id of [MENU_ID, PANEL_ID, BOX_ID, BADGE_ID]) {
+    for (const id of [MENU_ID, PANEL_ID, BADGE_ID]) {
       const element = document.getElementById(id);
       if (element && !(preserveFocusedPanel && id === PANEL_ID && element.contains(document.activeElement))) {
         element.classList.remove('mpse-visible', 'mpse-offscreen');
       }
     }
-    for (const handle of getImageHandles()) handle.classList.remove('mpse-visible', 'mpse-offscreen');
-    hideDragShield();
   }
 
-  function hideTools(force = false) {
-    if (!force && state.interaction && deferGeometryFinish(undefined, true, true)) {
-      setToolElementsOffscreen(true);
-      return;
-    }
-    if (state.interaction) finishGeometryGesture(undefined, true);
-    cancelPendingCropZoom();
-    exitCropMode();
+  function hideTools() {
     state.image = null;
     state.identity = null;
     state.activePanel = null;
     state.isDragging = false;
     state.blockedByLayer = false;
-    state.lastImagePress = null;
     cancelScheduledReacquire();
     state.selectionRevision += 1;
     hideToolElements();
@@ -2574,38 +1548,30 @@
 
   function positionTools() {
     if (!isEditorLikePage()) {
-      if (state.image || state.interaction || state.isDragging) hideTools(true);
+      if (state.image || state.isDragging) hideTools();
       else hideToolElements();
       return;
     }
     const image = state.image;
     const menu = document.getElementById(MENU_ID);
     const panel = document.getElementById(PANEL_ID);
-    const box = document.getElementById(BOX_ID);
     const badge = document.getElementById(BADGE_ID);
-    if (!image || !menu || !box || !badge) {
+    if (!image || !menu || !badge) {
       hideToolElements();
       return;
     }
     if (!image.isConnected) {
-      if (state.interaction) {
-        if (rebaseInteractionAfterEditorWrite(state.interaction.identity || state.identity)) return;
-        setToolElementsOffscreen(true);
-        return;
-      }
       hideToolElements(true);
       if (state.identity) scheduleSelectedImageReacquire(state.identity, { delay: 0 });
       return;
     }
     if (state.blockedByLayer) {
       state.blockedByLayer = true;
-      if (state.interaction) finishOrDeferGeometry(undefined, true);
-      else if (state.isDragging) endActiveDrag();
+      if (state.isDragging) endActiveDrag();
       setToolElementsOffscreen(true);
       return;
     }
     state.blockedByLayer = false;
-    if (state.interaction) return;
     const rect = getTopRect(getSelectionElement(image));
     if (rect.width < 1 || rect.height < 1) {
       setToolElementsOffscreen(true);
@@ -2617,10 +1583,6 @@
     }
     setToolElementsOffscreen(false);
     const menuHeight = Math.min(menu.offsetHeight || 330, Math.max(1, window.innerHeight - 16));
-
-    positionSelectionBox(box, rect);
-    box.classList.toggle('mpse-crop-mode', state.cropMode);
-    positionHandles(rect);
 
     const menuWidth = 54;
     const panelWidth = 238;
@@ -2700,14 +1662,13 @@
   function monitorBlockingEditorLayer() {
     if (!state.image) return;
     if (!isEditorLikePage()) {
-      hideTools(true);
+      hideTools();
       return;
     }
     const blocked = hasBlockingEditorLayer();
     if (blocked) {
       state.blockedByLayer = true;
-      if (state.interaction) finishOrDeferGeometry(undefined, true);
-      else if (state.isDragging) endActiveDrag();
+      if (state.isDragging) endActiveDrag();
       setToolElementsOffscreen(true);
       return;
     }
@@ -2724,47 +1685,10 @@
     return image && isLikelyArticleImage(image) ? image : null;
   }
 
-  function isRepeatedImagePress(image, event) {
-    const point = getTopClientPoint(event);
-    const now = Date.now();
-    const previous = state.lastImagePress;
-    state.lastImagePress = { image, identity: imageSignature(image), time: now, x: point ? point.x : NaN, y: point ? point.y : NaN };
-    const sameImage = previous && (previous.image === image || scoreImageByIdentity(image, previous.identity) >= 600);
-    if (!sameImage || now - previous.time > 500 || !point) return false;
-    return Math.hypot(point.x - previous.x, point.y - previous.y) <= 28;
-  }
-
-  function toggleCropMode(image) {
-    const now = Date.now();
-    if (now - state.lastCropToggleAt < 420) return;
-    state.lastCropToggleAt = now;
-    if (state.interaction) finishGeometryGesture();
-    const wasCropMode = state.cropMode && state.identity
-      && (image === state.image || scoreImageByIdentity(image, state.identity) >= 600);
-    showToolsForImage(image);
-    if (wasCropMode) exitCropMode();
-    else enterCropMode(image);
-  }
-
-  function onHandlePointerDown(event) {
-    if (!event || event.button !== 0) return;
-    const handle = event.currentTarget;
-    if (!handle) return;
-    stopUiEvent(event);
-    state.lastImagePress = null;
-    if (state.interaction) finishGeometryGesture();
-    beginGeometryGesture(handle.dataset.mpseImageHandle, event, handle);
-  }
-
-  function onHandlePointerCancel(event) {
-    finishOrDeferGeometry(event, true);
-  }
-
   function onDocumentPointer(event) {
-    if (!event || !event.target) return;
-    if (event.type !== 'pointerdown' || event.button !== 0) return;
+    if (!event || !event.target || event.type !== 'pointerdown' || event.button !== 0) return;
     if (!isEditorLikePage()) {
-      hideTools(true);
+      hideTools();
       return;
     }
     if (isExtensionElement(event.target)) return;
@@ -2775,89 +1699,10 @@
 
     const image = findImageFromEvent(event);
     if (image) {
-      if (state.cropMode && image === state.image) {
-        state.lastImagePress = null;
-        event.preventDefault();
-        event.stopPropagation();
-        beginCropPan(image, event);
-        return;
-      }
-      const repeatedPress = isRepeatedImagePress(image, event);
-      if (repeatedPress) {
-        state.lastImagePress = null;
-        event.preventDefault();
-        event.stopPropagation();
-        toggleCropMode(image);
-        return;
-      }
       showToolsForImage(image);
       return;
     }
-
-    state.lastImagePress = null;
     hideTools();
-  }
-
-  function onDocumentDoubleClick(event) {
-    if (!event || !event.target || isExtensionElement(event.target)) return;
-    if (!isEditorLikePage()) return;
-    if (document.getElementById('mpse-inline-panel') || hasBlockingEditorLayer()) return;
-    const image = findImageFromEvent(event);
-    if (!image) return;
-    event.preventDefault();
-    event.stopPropagation();
-    state.lastImagePress = null;
-    toggleCropMode(image);
-  }
-
-  function onDocumentWheel(event) {
-    if (!isEditorLikePage()) return;
-    if (!state.cropMode || !event.ctrlKey || !event.target) return;
-    const image = findImageFromEvent(event);
-    if (!image || image !== state.image) return;
-    event.preventDefault();
-    event.stopPropagation();
-    queueCropZoom(image, event);
-  }
-
-  function onDocumentPointerMove(event) {
-    if (state.interaction) stopUiEvent(event);
-    updateGeometryGesture(event);
-  }
-
-  function onDocumentPointerUp(event) {
-    const disconnectedLoss = Boolean(event && event.type === 'lostpointercapture' && state.interaction
-      && ((!state.image || !state.image.isConnected)
-        || (event.target && event.target.isConnected === false)
-        || (state.interaction.pointerTarget && state.interaction.pointerTarget.isConnected === false)));
-    if (state.interaction) stopUiEvent(event);
-    if (disconnectedLoss) {
-      if (deferGeometryFinish(undefined, false)) return;
-      finishGeometryGesture({ type: 'pointerup', pointerId: state.interaction?.pointerId, target: document });
-      return;
-    }
-    if (state.interaction) finishOrDeferGeometry(event);
-    else if (state.isDragging) endActiveDrag();
-  }
-
-  function onDocumentDragStart(event) {
-    if (!event || !event.target || !state.image) return;
-    const selection = getSelectionElement(state.image);
-    if (state.interaction || event.target === state.image || (selection && selection.contains(event.target))) {
-      stopUiEvent(event);
-    }
-  }
-
-  function onDocumentSelectStart(event) {
-    if (state.interaction) stopUiEvent(event);
-  }
-
-  function onDocumentKeyDown(event) {
-    if (event.key === 'Escape' && (state.cropMode || state.interaction)) {
-      if (state.interaction) finishOrDeferGeometry(undefined, true);
-      if (state.cropMode) exitCropMode();
-      setBadgeText('已退出裁切');
-    }
   }
 
   function bindDocuments() {
@@ -2875,15 +1720,6 @@
       }
       if (root) root.setAttribute(GENERIC_BOUND_ATTR, VERSION);
       doc.addEventListener('pointerdown', onDocumentPointer, true);
-      doc.addEventListener('dblclick', onDocumentDoubleClick, true);
-      doc.addEventListener('pointermove', onDocumentPointerMove, true);
-      doc.addEventListener('pointerup', onDocumentPointerUp, true);
-      doc.addEventListener('pointercancel', onDocumentPointerUp, true);
-      doc.addEventListener('lostpointercapture', onDocumentPointerUp, true);
-      doc.addEventListener('dragstart', onDocumentDragStart, true);
-      doc.addEventListener('selectstart', onDocumentSelectStart, true);
-      doc.addEventListener('wheel', onDocumentWheel, { capture: true, passive: false });
-      doc.addEventListener('keydown', onDocumentKeyDown, true);
       doc.addEventListener('scroll', onEditorViewportChange, true);
       if (doc.defaultView && doc.defaultView !== window) {
         doc.defaultView.addEventListener('scroll', onEditorViewportChange, true);
@@ -2892,17 +1728,12 @@
     }
   }
 
-  function onGlobalPointerUp(event) {
-    if (state.interaction) {
-      stopUiEvent(event);
-      finishOrDeferGeometry(event);
-      return;
-    }
+  function onGlobalPointerUp() {
     endActiveDrag();
   }
 
   function endActiveDrag() {
-    if (!state.isDragging || state.interaction) return;
+    if (!state.isDragging) return;
     state.isDragging = false;
     if (state.needsCommit) scheduleContentCommit('drag-end');
     if (state.identity && (!state.image || !state.image.isConnected)) {
@@ -2913,13 +1744,7 @@
   }
 
   function onEditorViewportChange() {
-    if (state.interaction) finishOrDeferGeometry(undefined, true);
-    else if (state.image) schedulePositionTools();
-  }
-
-  function onGlobalPointerMove(event) {
-    if (state.interaction) stopUiEvent(event);
-    updateGeometryGesture(event);
+    if (state.image) schedulePositionTools();
   }
 
   let bindTimer = 0;
@@ -2943,16 +1768,11 @@
     injectBridge();
     createMenu();
     createPanel();
-    createBox();
-    createHandles();
-    createDragShield();
     createBadge();
     bindDocuments();
 
     const observer = new MutationObserver((records) => {
-      const interactionTarget = state.interaction && state.image ? getSelectionElement(state.image) : null;
-      const relevant = records.some((record) => !isExtensionElement(record.target)
-        && (!state.interaction || (record.target !== state.image && record.target !== interactionTarget)));
+      const relevant = records.some((record) => !isExtensionElement(record.target));
       if (!relevant) return;
       scheduleBindDocuments();
       if (state.image) {
@@ -2970,14 +1790,10 @@
 
     window.setInterval(scheduleBindDocuments, 1500);
     window.setInterval(monitorBlockingEditorLayer, 500);
-    window.addEventListener('pointermove', onGlobalPointerMove, true);
     window.addEventListener('pointerup', onGlobalPointerUp, true);
     window.addEventListener('pointercancel', onGlobalPointerUp, true);
     window.addEventListener('mouseup', onGlobalPointerUp, true);
-    window.addEventListener('blur', () => {
-      if (state.interaction) finishOrDeferGeometry(undefined, true);
-      else endActiveDrag();
-    }, true);
+    window.addEventListener('blur', endActiveDrag, true);
     window.addEventListener('resize', onEditorViewportChange);
     window.addEventListener('scroll', onEditorViewportChange, true);
 
