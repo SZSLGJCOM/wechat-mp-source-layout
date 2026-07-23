@@ -292,7 +292,7 @@
 #mpse-inline-panel {
   width: 100%;
   max-width: 462px;
-  margin: 10px auto 0;
+  margin: 0 auto;
   border: 0;
   background: transparent;
   box-shadow: none;
@@ -303,23 +303,6 @@
 .mpse-inline-editor-shell {
   padding: 0;
   background: transparent;
-}
-
-.mpse-inline-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  min-height: 30px;
-  padding: 0 2px 6px;
-  color: #44505c;
-  font-size: 12px;
-}
-
-.mpse-inline-toolbar strong {
-  flex: 0 0 auto;
-  font-size: 12px;
-  font-weight: 600;
 }
 
 .mpse-inline-code-wrap {
@@ -448,69 +431,6 @@
   color: #94a0ad;
 }
 
-.mpse-mini-actions {
-  display: inline-flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 2px;
-  min-width: 0;
-  opacity: 0.42;
-  transition: opacity 0.16s ease;
-}
-
-#mpse-inline-panel:hover .mpse-mini-actions,
-#mpse-inline-panel:focus-within .mpse-mini-actions {
-  opacity: 1;
-}
-
-.mpse-mini-action,
-.mpse-mini-close {
-  appearance: none;
-  border: 0;
-  background: transparent;
-  font-family: inherit;
-  cursor: pointer;
-  user-select: none;
-}
-
-.mpse-mini-action {
-  height: 22px;
-  padding: 0 5px;
-  border-radius: 5px;
-  color: #66727f;
-  font-size: 11px;
-  line-height: 22px;
-}
-
-.mpse-mini-action:hover,
-.mpse-mini-close:hover {
-  background: #f2f6fa;
-  color: #1f2328;
-}
-
-.mpse-mini-action-save {
-  color: #07a75a;
-}
-
-#mpse-inline-panel.mpse-dirty .mpse-mini-action-save {
-  color: #07a75a;
-  font-weight: 600;
-}
-
-.mpse-mini-close {
-  width: 22px;
-  height: 22px;
-  border-radius: 5px;
-  color: #6b7480;
-  font-size: 15px;
-  line-height: 18px;
-}
-
-#mpse-inline-panel [data-mpse-action]:disabled {
-  cursor: default;
-  opacity: 0.45;
-}
-
 .mpse-inline-loading {
   position: absolute;
   inset: 0;
@@ -527,86 +447,9 @@
   display: flex;
 }
 
-.mpse-inline-footer {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-height: 24px;
-  padding: 5px 0 0;
-  border-top: 0;
-  background: transparent;
-  color: #8b949e;
-  font-size: 11px;
-  opacity: 0.68;
-  transition: opacity 0.16s ease;
-}
-
-#mpse-inline-panel:hover .mpse-inline-footer,
-#mpse-inline-panel:focus-within .mpse-inline-footer {
-  opacity: 1;
-}
-
-.mpse-inline-status {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.mpse-inline-status.mpse-ok {
-  color: #13a35d;
-}
-
-.mpse-inline-status.mpse-error {
-  color: #d93025;
-}
-
-.mpse-checkbox {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  color: #8b949e;
-  white-space: nowrap;
-  user-select: none;
-}
-
-.mpse-checkbox input {
-  width: 12px;
-  height: 12px;
-  margin: 0;
-  accent-color: #07c160;
-}
-
-.mpse-inline-counter {
-  color: #8b949e;
-  white-space: nowrap;
-}
-
-#mpse-inline-panel.mpse-dirty::before {
-  content: "未保存";
-  display: block;
-  height: 0;
-  transform: translateY(-17px);
-  color: #d93025;
-  font-size: 11px;
-  line-height: 0;
-}
-
 @media (max-width: 900px) {
   #mpse-inline-panel {
     max-width: calc(100vw - 32px);
-  }
-
-  .mpse-mini-actions {
-    width: 100%;
-    flex-wrap: wrap;
-    justify-content: flex-start;
-    opacity: 1;
-  }
-
-  .mpse-inline-footer {
-    flex-wrap: wrap;
   }
 }
 

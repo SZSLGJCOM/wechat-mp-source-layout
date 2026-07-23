@@ -1,12 +1,12 @@
 {
   "name": "wechat-mp-source-layout",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "private": true,
   "license": "PolyForm-Noncommercial-1.0.0",
   "type": "module",
   "scripts": {
     "check": "node tools/verify-extension.mjs",
-    "test": "node --test tools/release-contracts.test.mjs tools/source-mode-contracts.test.mjs tools/mobile-preview-contracts.test.mjs tools/image-interaction-contracts.test.mjs tools/image-effects.test.mjs tools/image-bake.test.mjs tools/image-geometry.test.mjs tools/image-state-contracts.test.mjs tools/bridge-client.test.mjs tools/page-bridge.test.mjs",
+    "test": "node --test tools/release-contracts.test.mjs tools/source-mode-contracts.test.mjs tools/mobile-preview-contracts.test.mjs tools/image-interaction-contracts.test.mjs tools/image-effects.test.mjs tools/image-bake.test.mjs tools/image-background.test.mjs tools/image-geometry.test.mjs tools/image-state-contracts.test.mjs tools/bridge-client.test.mjs tools/page-bridge.test.mjs",
     "package": "node tools/package-extension.mjs"
   }
 }

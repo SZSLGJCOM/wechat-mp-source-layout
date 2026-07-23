@@ -22,7 +22,7 @@ test('repository exposes one-command extension verification', () => {
   assert.equal(pkg.scripts?.check, 'node tools/verify-extension.mjs');
   assert.equal(
     pkg.scripts?.test,
-    'node --test tools/release-contracts.test.mjs tools/source-mode-contracts.test.mjs tools/mobile-preview-contracts.test.mjs tools/image-interaction-contracts.test.mjs tools/image-effects.test.mjs tools/image-bake.test.mjs tools/image-geometry.test.mjs tools/image-state-contracts.test.mjs tools/bridge-client.test.mjs tools/page-bridge.test.mjs'
+    'node --test tools/release-contracts.test.mjs tools/source-mode-contracts.test.mjs tools/mobile-preview-contracts.test.mjs tools/image-interaction-contracts.test.mjs tools/image-effects.test.mjs tools/image-bake.test.mjs tools/image-background.test.mjs tools/image-geometry.test.mjs tools/image-state-contracts.test.mjs tools/bridge-client.test.mjs tools/page-bridge.test.mjs'
   );
   assert.equal(pkg.scripts?.package, 'node tools/package-extension.mjs');
 
@@ -45,7 +45,7 @@ test('release version and ASCII package folder stay consistent', () => {
   const releaseVersion = manifest.version_name || manifest.version;
 
   assert.equal(pkg.version, manifest.version);
-  assert.equal(releaseVersion, '0.11');
+  assert.equal(releaseVersion, '0.12');
   assert.ok(readme.includes(`当前版本：\`v${releaseVersion}\``));
   assert.ok(changelog.includes(`## v${releaseVersion} ·`));
   assert.ok(bridgeClient.includes(`const VERSION = 'v${manifest.version}';`));

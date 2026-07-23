@@ -485,7 +485,8 @@ test('advanced controls preview locally and commit only after native paste succe
     'article mutation must happen only after the editor paste succeeds'
   );
   assert.match(pipeline, /catch \(error\)[\s\S]*?const target = resolveJobImage\(currentJob\)[\s\S]*?restoreCommittedState\(target, metadata\)/);
-  assert.match(pipeline, /url\.protocol === 'http:' && WECHAT_IMAGE_HOSTS\.has\(url\.hostname\)[\s\S]*?url\.protocol = 'https:'/);
+  assert.match(pipeline, /url\.protocol === 'http:'[\s\S]*?url\.protocol = 'https:'/);
+  assert.doesNotMatch(pipeline, /WECHAT_IMAGE_HOSTS/);
   assert.match(pipeline, /stage = '微信编辑器粘贴上传'/);
   assert.match(pipeline, /else if \(!URL_SOURCE_ATTRIBUTES\.has\(name\)\)[\s\S]*?image\.removeAttribute\(name\)/);
   assert.match(pipeline, /runtimeSource = stableUrl\(image\?\.currentSrc \|\| image\?\.src/);
@@ -496,18 +497,12 @@ test('advanced controls preview locally and commit only after native paste succe
   assert.match(snapshots, /imgAttributeAction/);
 });
 
-test('manifest restricts image reads to explicit WeChat CDN hosts', () => {
+test('manifest allows HTTPS image reads without a WeChat CDN allowlist', () => {
   const manifest = readJson('manifest.json');
   assert.equal(manifest.background?.service_worker, 'src/image-background.js');
-  assert.deepEqual(manifest.host_permissions, [
-    'https://mp.weixin.qq.com/*',
-    'https://mmbiz.qpic.cn/*',
-    'https://mmbiz.qlogo.cn/*',
-    'https://m.qpic.cn/*',
-    'https://mmsns.qpic.cn/*'
-  ]);
-  assert.doesNotMatch(JSON.stringify(manifest.host_permissions), /<all_urls>|\*:\/\//);
+  assert.deepEqual(manifest.host_permissions, ['https://*/*']);
   const background = readText('src/image-background.js');
   assert.match(background, /validateUrl\(response\.url\)/);
+  assert.doesNotMatch(background, /ALLOWED_IMAGE_HOSTS|MPSE_IMAGE_HOST_NOT_ALLOWED|只允许读取微信图片域名/);
   assert.doesNotMatch(background, /ALLOWED_IMAGE_TYPES[\s\S]*image\/svg\+xml/);
 });

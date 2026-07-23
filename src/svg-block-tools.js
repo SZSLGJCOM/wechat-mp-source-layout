@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const VERSION = 'v0.11.0';
+  const VERSION = 'v0.12.0';
   const PANEL_ID = 'mpse-svgb-panel';
   const BOX_ID = 'mpse-svgb-box';
   const BADGE_ID = 'mpse-svgb-badge';

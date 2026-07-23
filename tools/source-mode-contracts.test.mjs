@@ -1,10 +1,36 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import vm from 'node:vm';
 
 import { readText } from './test-helpers.mjs';
 
 const content = readText('src/content.js');
 const pageBridge = readText('src/page-bridge.js');
+
+test('source formatter expands compact article HTML into vertical lines', () => {
+  const start = content.indexOf('function tokenizeHtml(source)');
+  const end = content.indexOf('function escapeHtml(value)');
+  assert.ok(start >= 0 && end > start, 'source formatter must remain available');
+  const context = {
+    source: '<section><p>正文</p><img src="https://assets.example.com/a.png"></section>',
+    formatted: ''
+  };
+  vm.runInNewContext(
+    `${content.slice(start, end)}\nformatted = htmlFormat(source);`,
+    context
+  );
+  assert.equal(
+    context.formatted,
+    [
+      '<section>',
+      '  <p>',
+      '    正文',
+      '  </p>',
+      '  <img src="https://assets.example.com/a.png">',
+      '</section>'
+    ].join('\n')
+  );
+});
 
 test('source saves are conditional on the article that was loaded', () => {
   const save = content.match(/async function saveInline\(closeAfter\) \{[\s\S]*?\n  \}\n\n  function closeInline/);
@@ -28,7 +54,7 @@ test('stale source operations cannot mutate or close a newer article session', (
   assert.match(content, /function isCurrentSession\(panel, session\)/);
   assert.match(content, /state\.session \+= 1/);
   assert.match(content, /if \(!isCurrentSession\(panel, session\)\) return/);
-  assert.match(content, /function closeInline\(options = \{\}\) \{[\s\S]*?state\.active = false;[\s\S]*?state\.session \+= 1/);
+  assert.match(content, /function closeInline\(\) \{[\s\S]*?state\.active = false;[\s\S]*?state\.session \+= 1/);
 });
 
 test('source mode follows external article switches and restores matching drafts', () => {
@@ -44,35 +70,31 @@ test('source mode follows external article switches and restores matching drafts
   assert.doesNotMatch(content, /targetIds|targetIdentity/);
 });
 
-test('source mode preserves raw HTML and exposes explicit lifecycle controls', () => {
+test('source mode formats vertically and uses one toolbar toggle to save and exit', () => {
   const setter = content.match(/function setEditorValue\(textarea, html, options = \{\}\) \{[\s\S]*?\n  \}/)?.[0] || '';
   const panel = content.match(/function createInlinePanel\(target\) \{[\s\S]*?\n  \}\n\n  function rememberInlineDraft/)?.[0] || '';
-  const reload = content.match(/async function reloadInline\(\) \{[\s\S]*?\n  \}\n\n  async function saveInline/)?.[0] || '';
   const save = content.match(/async function saveInline\(closeAfter\) \{[\s\S]*?\n  \}\n\n  function closeInline/)?.[0] || '';
+  const open = content.match(/async function openInline\(options = \{\}\) \{[\s\S]*?\n  \}\n\n  async function saveInline/)?.[0] || '';
   assert.match(setter, /options\.format \? htmlFormat\(html\) : String\(html \|\| ''\)/);
   assert.match(content, /const tokens = tokenizeHtml\(raw\)/);
-  assert.match(panel, /data-mpse-action="save"/);
-  assert.match(panel, /data-mpse-action="save-close"/);
-  assert.match(panel, /data-mpse-action="close"/);
-  assert.match(panel, /class="mpse-inline-status" role="status" aria-live="polite"/);
-  assert.match(panel, /if \(event\.key === 'Escape'\)[\s\S]*?closeInline\(\)/);
-  assert.match(panel, /setEditorValue\(textarea, textarea\.value, \{ format: true/);
+  assert.match(content, /setEditorValue\(textarea, lastLoadedHtml, \{ format: true \}\)/);
+  assert.doesNotMatch(panel, /mpse-inline-toolbar|mpse-inline-footer|data-mpse-action|<button/);
+  assert.doesNotMatch(panel, /event\.key === 'Escape'/);
+  assert.match(open, /const existing = getPanel\(\)[\s\S]*?await saveInline\(true\)/);
   assert.match(content, /textarea\.readOnly = busy/);
-  assert.match(content, /button\.disabled = busy/);
   assert.match(panel, /if \(textarea\.readOnly\) return/);
-  assert.match(reload, /state\.saving[\s\S]*?state\.syncing[\s\S]*?mpse-busy/);
   assert.match(save, /state\.saving[\s\S]*?state\.syncing[\s\S]*?mpse-busy/);
-  assert.match(content, /state\.saving \|\| state\.syncing \|\| panel\?\.classList\.contains\('mpse-busy'\)/);
   assert.match(content, /beforeunload/);
 });
 
-test('successful saves and confirmed closes clear the current article draft', () => {
+test('successful saves and automatic exits clear the current article draft', () => {
   const save = content.match(/async function saveInline\(closeAfter\) \{[\s\S]*?\n  \}\n\n  function closeInline/)?.[0] || '';
-  const close = content.match(/function closeInline\(options = \{\}\) \{[\s\S]*?\n  \}\n\n  function createToolbarButton/)?.[0] || '';
+  const close = content.match(/function closeInline\(\) \{[\s\S]*?\n  \}\n\n  function createToolbarButton/)?.[0] || '';
   assert.match(save, /const sourceDraftKey = draftKey\(\)/);
   assert.match(save, /state\.drafts\.delete\(sourceDraftKey\)/);
-  assert.match(close, /window\.confirm\('源码有未保存修改，确定退出源码模式吗？'\)/);
+  assert.match(save, /if \(closeAfter\) closeInline\(\)/);
   assert.match(close, /state\.drafts\.delete\(draftKey\(\)\)/);
+  assert.doesNotMatch(close, /window\.confirm/);
 });
 
 test('source highlighting is deferred and deduplicated away from the input handler', () => {

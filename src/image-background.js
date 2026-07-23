@@ -2,12 +2,6 @@
   'use strict';
 
   const MAX_SOURCE_BYTES = 16 * 1024 * 1024;
-  const ALLOWED_IMAGE_HOSTS = new Set([
-    'mmbiz.qpic.cn',
-    'mmbiz.qlogo.cn',
-    'm.qpic.cn',
-    'mmsns.qpic.cn'
-  ]);
   const ALLOWED_IMAGE_TYPES = new Set([
     'image/png',
     'image/jpeg',
@@ -25,13 +19,28 @@
   }
 
   function validateUrl(value) {
-    const url = new URL(String(value || ''));
-    if (url.protocol !== 'https:' || !ALLOWED_IMAGE_HOSTS.has(url.hostname)) {
-      const error = new Error('只允许读取微信图片域名中的素材');
-      error.code = 'MPSE_IMAGE_HOST_NOT_ALLOWED';
+    let url;
+    try {
+      url = new URL(String(value || ''));
+    } catch (_) {
+      const error = new Error('图片地址无效');
+      error.code = 'MPSE_IMAGE_URL_INVALID';
+      throw error;
+    }
+    if (url.protocol !== 'https:' || url.username || url.password) {
+      const error = new Error('图片地址必须使用 HTTPS');
+      error.code = 'MPSE_IMAGE_URL_NOT_ALLOWED';
       throw error;
     }
     return url.href;
+  }
+
+  function isTrustedSender(sender) {
+    try {
+      return new URL(String(sender?.url || sender?.origin || '')).origin === 'https://mp.weixin.qq.com';
+    } catch (_) {
+      return false;
+    }
   }
 
   function bytesToBase64(buffer) {
@@ -83,8 +92,18 @@
     };
   }
 
-  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!message || message.type !== 'MPSE_FETCH_IMAGE') return false;
+    if (!isTrustedSender(sender)) {
+      sendResponse({
+        ok: false,
+        error: {
+          message: '图片读取请求来源无效',
+          code: 'MPSE_IMAGE_SENDER_NOT_ALLOWED'
+        }
+      });
+      return false;
+    }
     fetchImage(message.url).then(
       (result) => sendResponse({ ok: true, result }),
       (error) => sendResponse({ ok: false, error: asError(error) })

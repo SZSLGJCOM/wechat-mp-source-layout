@@ -29,12 +29,6 @@
     'image/avif',
     'image/bmp'
   ]);
-  const WECHAT_IMAGE_HOSTS = new Set([
-    'mmbiz.qpic.cn',
-    'mmbiz.qlogo.cn',
-    'm.qpic.cn',
-    'mmsns.qpic.cn'
-  ]);
   const ADVANCED_DATA_KEYS = Object.freeze([
     'mpseGlowOn', 'mpseGlowBlur', 'mpseGlowSpread', 'mpseGlowOpacity', 'mpseGlowColor',
     'mpseBrightness', 'mpseContrast', 'mpseSaturate', 'mpseGray', 'mpseColorOn',
@@ -113,9 +107,10 @@
       if (raw.startsWith('//')) return `https:${raw}`;
       if (/^(?:data:image\/|blob:)/i.test(raw)) return raw;
       try {
-        const hostPrefixed = [...WECHAT_IMAGE_HOSTS].some((host) => raw.toLowerCase().startsWith(`${host}/`));
+        const hostPrefixed = /^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}(?::\d+)?(?:[/?#]|$)/i.test(raw);
         const url = new URL(hostPrefixed ? `https://${raw}` : raw, location.href);
-        if (url.protocol === 'http:' && WECHAT_IMAGE_HOSTS.has(url.hostname)) url.protocol = 'https:';
+        if (url.protocol === 'http:') url.protocol = 'https:';
+        if (url.protocol !== 'https:') return '';
         return url.href;
       } catch (_) {
         return '';

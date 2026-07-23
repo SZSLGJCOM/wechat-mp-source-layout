@@ -2,7 +2,6 @@
   'use strict';
 
   const INLINE_ID = 'mpse-inline-panel';
-  const VERSION = 'v0.11.0';
   const TOOLBAR_BUTTON_ID = 'mpse-toolbar-button';
   const FLOATING_BUTTON_ID = 'mpse-floating-button';
   const bridgeClient = window.__MPSE_BRIDGE_CLIENT__;
@@ -300,32 +299,15 @@
     const toolbarButton = document.getElementById(TOOLBAR_BUTTON_ID);
     if (toolbarButton) {
       toolbarButton.classList.toggle('mpse-active', isActive);
-      toolbarButton.title = isActive ? '退出源码模式' : '源码模式';
+      toolbarButton.title = isActive ? '保存并退出源码模式' : '源码模式';
       toolbarButton.setAttribute('aria-pressed', isActive ? 'true' : 'false');
     }
 
     const floatingButton = document.getElementById(FLOATING_BUTTON_ID);
     if (floatingButton) {
       floatingButton.classList.toggle('mpse-active', isActive);
-      floatingButton.textContent = isActive ? '返回' : '源码';
-      floatingButton.title = isActive ? '退出源码模式' : '打开源码模式';
-    }
-  }
-  async function copyText(text) {
-    try {
-      await navigator.clipboard.writeText(text);
-      return true;
-    } catch (_) {
-      const temp = document.createElement('textarea');
-      temp.value = text;
-      temp.style.position = 'fixed';
-      temp.style.opacity = '0';
-      document.body.appendChild(temp);
-      temp.focus();
-      temp.select();
-      const ok = document.execCommand('copy');
-      temp.remove();
-      return ok;
+      floatingButton.textContent = isActive ? '保存退出' : '源码';
+      floatingButton.title = isActive ? '保存并退出源码模式' : '打开源码模式';
     }
   }
 
@@ -427,19 +409,6 @@
     return panel ? panel.querySelector('.mpse-inline-editor') : null;
   }
 
-  function showStatus(text, type = '') {
-    const panel = getPanel();
-    if (!panel) return;
-
-    const status = panel.querySelector('.mpse-inline-status');
-    if (!status) return;
-
-    status.textContent = text || '';
-    status.classList.remove('mpse-ok', 'mpse-error');
-    if (type === 'ok') status.classList.add('mpse-ok');
-    if (type === 'error') status.classList.add('mpse-error');
-  }
-
   function setBusy(isBusy, text) {
     const panel = getPanel();
     if (!panel) return;
@@ -448,24 +417,8 @@
     panel.classList.toggle('mpse-busy', busy);
     const textarea = panel.querySelector('.mpse-inline-editor');
     if (textarea) textarea.readOnly = busy;
-    for (const button of panel.querySelectorAll('[data-mpse-action]')) {
-      button.disabled = busy;
-    }
     const loading = panel.querySelector('.mpse-inline-loading');
     if (loading && text) loading.textContent = text;
-  }
-
-  function updateCounter() {
-    const panel = getPanel();
-    const textarea = getTextarea();
-    if (!panel || !textarea) return;
-
-    const counter = panel.querySelector('.mpse-inline-counter');
-    if (!counter) return;
-
-    const value = textarea.value || '';
-    const lines = lineCount(value);
-    counter.textContent = `${lines} 行 · ${value.length} 字符 · ${latestEditorMode}`;
   }
 
   function lineCount(value) {
@@ -512,7 +465,6 @@
       highlightLayer.scrollLeft = textarea.scrollLeft;
     }
 
-    updateCounter();
   }
 
   function renderHighlight() {
@@ -543,16 +495,12 @@
 
   function markDirty() {
     state.dirty = true;
-    const panel = getPanel();
-    if (panel) panel.classList.add('mpse-dirty');
     syncLineNumbers();
   }
 
   function markClean(html) {
     state.lastHtml = html;
     state.dirty = false;
-    const panel = getPanel();
-    if (panel) panel.classList.remove('mpse-dirty');
     syncLineNumbers({ immediate: true });
   }
 
@@ -612,17 +560,6 @@
     panel.id = INLINE_ID;
     panel.innerHTML = `
       <div class="mpse-inline-editor-shell">
-        <div class="mpse-inline-toolbar">
-          <strong>HTML 源码</strong>
-          <div class="mpse-mini-actions" aria-label="源码操作">
-            <button type="button" class="mpse-mini-action" data-mpse-action="reload">重新读取</button>
-            <button type="button" class="mpse-mini-action" data-mpse-action="format">格式化</button>
-            <button type="button" class="mpse-mini-action" data-mpse-action="copy">复制</button>
-            <button type="button" class="mpse-mini-action mpse-mini-action-save" data-mpse-action="save">保存</button>
-            <button type="button" class="mpse-mini-action mpse-mini-action-save" data-mpse-action="save-close">保存并退出</button>
-            <button type="button" class="mpse-mini-close" data-mpse-action="close" aria-label="取消并退出">×</button>
-          </div>
-        </div>
         <div class="mpse-inline-code-wrap">
           <pre class="mpse-inline-lines" aria-hidden="true">1</pre>
           <div class="mpse-code-stage">
@@ -630,10 +567,6 @@
             <textarea class="mpse-inline-editor" spellcheck="false" placeholder="正在读取微信公众号正文 HTML..." aria-label="微信公众号正文 HTML 源码"></textarea>
           </div>
           <div class="mpse-inline-loading">处理中...</div>
-        </div>
-        <div class="mpse-inline-footer">
-          <span class="mpse-inline-status" role="status" aria-live="polite"></span>
-          <span class="mpse-inline-counter"></span>
         </div>
       </div>
     `;
@@ -660,12 +593,6 @@
         return;
       }
 
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        closeInline();
-        return;
-      }
-
       if (event.key === 'Tab') {
         event.preventDefault();
         const start = textarea.selectionStart;
@@ -674,39 +601,6 @@
         textarea.value = `${value.slice(0, start)}  ${value.slice(end)}`;
         textarea.selectionStart = textarea.selectionEnd = start + 2;
         markDirty();
-      }
-    });
-
-    panel.addEventListener('click', async (event) => {
-      const button = event.target.closest('[data-mpse-action]');
-      if (!button) return;
-
-      const action = button.dataset.mpseAction;
-      if (action === 'reload') {
-        await reloadInline();
-        return;
-      }
-      if (action === 'format') {
-        setEditorValue(textarea, textarea.value, { format: true, toStart: false });
-        markDirty();
-        showStatus('已格式化。建议再检查 section / p / span 层级。', 'ok');
-        return;
-      }
-      if (action === 'copy') {
-        const ok = await copyText(textarea.value || '');
-        showStatus(ok ? '源码已复制。' : '复制失败，请手动复制。', ok ? 'ok' : 'error');
-        return;
-      }
-      if (action === 'save') {
-        await saveInline(false);
-        return;
-      }
-      if (action === 'save-close') {
-        await saveInline(true);
-        return;
-      }
-      if (action === 'close') {
-        closeInline();
       }
     });
 
@@ -726,7 +620,7 @@
     lastLoadedHtml = typeof result.content === 'string' ? result.content : '';
     state.bridgeArticleKey = typeof result.articleKey === 'string' ? result.articleKey : '';
     state.articleKey = articleKey(state.target, result);
-    const cleanHtml = setEditorValue(textarea, lastLoadedHtml);
+    const cleanHtml = setEditorValue(textarea, lastLoadedHtml, { format: true });
     const key = draftKey();
     const draft = options.restoreDraft === false ? null : state.drafts.get(key);
     if (options.restoreDraft === false) state.drafts.delete(key);
@@ -796,10 +690,9 @@
       applyLoadedSource(textarea, result);
       panel.scrollIntoView({ block: 'center' });
       textarea.focus();
-      showStatus('已切换到当前文章源码。', 'ok');
     } catch (error) {
       if (isCurrentSession(panel, session)) {
-        showStatus(`切换文章源码失败：${error.message}`, 'error');
+        console.warn('[公众号源码排版助手] source sync failed:', error);
       }
     } finally {
       if (restore) restore();
@@ -815,7 +708,7 @@
     if (existing) {
       if (options.recovering) return;
       if (existing.classList.contains('mpse-busy')) return;
-      closeInline();
+      await saveInline(true);
       return;
     }
 
@@ -835,7 +728,6 @@
     setToolbarActive(true);
 
     setBusy(true, '正在读取微信公众号正文 HTML...');
-    showStatus('正在读取...');
 
     try {
       const result = await readEditorContent();
@@ -844,12 +736,6 @@
       applyLoadedSource(textarea, result);
       panel.scrollIntoView({ block: 'center' });
       textarea.focus();
-
-      if (result.apiError) {
-        showStatus(`已用 DOM 兜底读取。原生 API 错误：${result.apiError.message}`, 'ok');
-      } else {
-        showStatus(`读取成功 · ${latestEditorMode} · ${VERSION}`, 'ok');
-      }
     } catch (error) {
       if (!isCurrentSession(panel, session)) return;
       panel.remove();
@@ -859,47 +745,6 @@
       window.alert(`读取失败：${error.message}`);
     } finally {
       if (isCurrentSession(panel, session)) setBusy(false);
-    }
-  }
-
-  async function reloadInline() {
-    const panel = getPanel();
-    const textarea = getTextarea();
-    if (
-      !panel
-      || !textarea
-      || state.saving
-      || state.syncing
-      || panel.classList.contains('mpse-busy')
-    ) return;
-    const session = state.session;
-
-    if (state.dirty && textarea.value !== state.lastHtml) {
-      const ok = window.confirm('当前源码有未保存修改，重新读取会覆盖这些修改。确定继续吗？');
-      if (!ok) return;
-    }
-
-    const restore = latestEditorMode === 'dom-fallback' ? showTargetTemporarily() : null;
-    setBusy(true, '正在重新读取微信公众号正文...');
-    showStatus('正在重新读取...');
-
-    try {
-      const result = await readEditorContent();
-      if (!isCurrentSession(panel, session)) return;
-      applyLoadedSource(textarea, result, { restoreDraft: false });
-      textarea.focus();
-
-      if (result.apiError) {
-        showStatus(`已用 DOM 兜底读取。原生 API 错误：${result.apiError.message}`, 'ok');
-      } else {
-        showStatus(`重新读取成功，模式：${latestEditorMode} · ${VERSION}`, 'ok');
-      }
-    } catch (error) {
-      if (isCurrentSession(panel, session)) showStatus(`读取失败：${error.message}`, 'error');
-    } finally {
-      if (restore) restore();
-      if (isCurrentSession(panel, session)) setBusy(false);
-      if (state.syncQueued && state.active) scheduleInlineSync();
     }
   }
 
@@ -920,10 +765,10 @@
     const baselineArticleKey = state.bridgeArticleKey;
     const sourceDraftKey = draftKey();
 
-    // 源码模式按编辑区内容原样写回。
+    // 写回用户当前看到并编辑的源码，事务基线仍使用进入模式时的原始正文。
     if (!state.dirty && html === state.lastHtml) {
       state.drafts.delete(sourceDraftKey);
-      if (closeAfter) closeInline({ force: true });
+      if (closeAfter) closeInline();
       return;
     }
 
@@ -931,7 +776,6 @@
     const restore = latestEditorMode === 'dom-fallback' ? showTargetTemporarily() : null;
     let closed = false;
     setBusy(true, closeAfter ? '正在保存并返回...' : '正在保存...');
-    showStatus('正在原样写回源码...');
 
     try {
       const transaction = await mutateEditorContent((current) => {
@@ -956,19 +800,13 @@
       state.drafts.delete(sourceDraftKey);
       markClean(html);
 
-      if (result.apiError) {
-        showStatus(`已用 DOM 兜底保存。原生 API 错误：${result.apiError.message}`, 'ok');
-      } else {
-        showStatus(`保存成功：已原样写回源码。模式：${latestEditorMode}`, 'ok');
-      }
-
       if (closeAfter) {
         closed = true;
-        closeInline({ force: true });
+        closeInline();
       }
     } catch (error) {
       if (isCurrentSession(panel, session)) {
-        showStatus(`保存失败：${error.message}`, 'error');
+        window.alert(`保存失败：${error.message}`);
         if (error.code === 'MPSE_SOURCE_SESSION_CHANGED') scheduleInlineSync(0);
       }
     } finally {
@@ -979,19 +817,8 @@
     }
   }
 
-  function closeInline(options = {}) {
+  function closeInline() {
     const panel = getPanel();
-    const textarea = getTextarea();
-
-    if (
-      !options.force
-      && (state.saving || state.syncing || panel?.classList.contains('mpse-busy'))
-    ) return;
-
-    if (!options.force && panel && textarea && state.dirty && textarea.value !== state.lastHtml) {
-      const ok = window.confirm('源码有未保存修改，确定退出源码模式吗？');
-      if (!ok) return;
-    }
 
     state.drafts.delete(draftKey());
     state.active = false;
