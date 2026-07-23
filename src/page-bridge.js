@@ -451,10 +451,14 @@
     return '';
   }
 
-  async function getUploadContext() {
+  function getPageToken() {
     const pageUrl = new URL(location.href);
     const token = pageUrl.searchParams.get('token') || '';
     if (!/^\d+$/.test(token)) throw new Error('当前编辑页面缺少有效登录令牌');
+    return token;
+  }
+
+  async function getUploadContext(token = getPageToken()) {
     if (uploadContextCache?.token === token && uploadContextCache.expiresAt > Date.now()) {
       return uploadContextCache;
     }
@@ -464,11 +468,11 @@
       credentials: 'same-origin',
       cache: 'no-store'
     });
-    if (!response.ok) throw new Error(`无法读取微信素材上传参数（HTTP ${response.status}）`);
+    if (!response.ok) throw new Error(`无法读取微信本地图片上传授权（HTTP ${response.status}）`);
     const source = await response.text();
     const ticket = matchPageValue(source, ['ticket', 'upload_ticket']);
     const ticketId = matchPageValue(source, ['user_name', 'ticket_id']);
-    if (!ticket || !ticketId) throw new Error('微信素材上传参数已失效，请刷新编辑页面后重试');
+    if (!ticket || !ticketId) throw new Error('微信本地图片上传授权已失效，请刷新编辑页面后重试');
     uploadContextCache = {
       token,
       ticket,
@@ -492,45 +496,90 @@
     return { blob: new Blob([bytes], { type: mimeType }), mimeType, filename };
   }
 
-  async function uploadImage(payload) {
-    const image = validatedImagePayload(payload);
-    const context = await getUploadContext();
+  function createLocalUploadForm(image) {
+    const form = new FormData();
+    const uploadId = String(Date.now());
+    form.append('type', image.mimeType);
+    form.append('id', uploadId);
+    form.append('name', image.filename);
+    form.append('lastModifiedDate', new Date().toString());
+    form.append('size', String(image.blob.size));
+    form.append('file', image.blob, image.filename);
+    return form;
+  }
+
+  async function uploadEditorLocalImage(image, context) {
+    const token = context?.token || getPageToken();
     const query = new URLSearchParams({
       action: 'upload_material',
       f: 'json',
-      scene: '1',
+      scene: '8',
       writetype: 'doublewrite',
       groupid: '1',
-      ticket_id: context.ticketId,
-      ticket: context.ticket,
-      svr_time: String(Math.floor(Date.now() / 1000)),
-      seq: '1',
-      token: context.token,
-      lang: 'zh_CN'
+      ticket_id: context?.ticketId || '',
+      ticket: context?.ticket || '',
+      svr_time: context?.ticket ? String(Math.floor(Date.now() / 1000)) : '',
+      seq: String(Date.now()),
+      token,
+      lang: 'zh_CN',
+      t: String(Math.random())
     });
-    const form = new FormData();
-    form.append('file', image.blob, image.filename);
     const response = await fetch(`/cgi-bin/filetransfer?${query}`, {
       method: 'POST',
       credentials: 'same-origin',
-      body: form
+      body: createLocalUploadForm(image)
     });
-    if (!response.ok) throw new Error(`微信图片上传失败（HTTP ${response.status}）`);
+    if (!response.ok) throw new Error(`微信本地图片上传失败（HTTP ${response.status}）`);
     const body = await response.json();
-    const ret = Number(body?.base_resp?.ret ?? body?.errcode ?? -1);
-    if (ret !== 0) {
-      const error = new Error(body?.base_resp?.err_msg || body?.errmsg || `微信图片上传失败（${ret}）`);
-      error.code = `MPSE_WECHAT_UPLOAD_${ret}`;
-      throw error;
+    return {
+      body,
+      ret: Number(body?.base_resp?.ret ?? body?.errcode ?? -1)
+    };
+  }
+
+  function normalizedWechatCdnUrl(value) {
+    try {
+      const url = new URL(String(value || '').trim());
+      const allowedHosts = new Set(['mmbiz.qpic.cn', 'mmbiz.qlogo.cn', 'm.qpic.cn', 'mmsns.qpic.cn']);
+      if (!['http:', 'https:'].includes(url.protocol) || !allowedHosts.has(url.hostname)) return '';
+      url.protocol = 'https:';
+      return url.href;
+    } catch (_) {
+      return '';
     }
-    const cdnUrl = String(body?.cdn_url || body?.url || '').trim();
-    if (!/^https?:\/\/(?:mmbiz\.qpic\.cn|mmbiz\.qlogo\.cn|m\.qpic\.cn)\//i.test(cdnUrl)) {
+  }
+
+  function uploadResultError(body, ret) {
+    const error = new Error(body?.base_resp?.err_msg || body?.errmsg || `微信本地图片上传失败（${ret}）`);
+    error.code = `MPSE_WECHAT_LOCAL_UPLOAD_${ret}`;
+    return error;
+  }
+
+  async function uploadImage(payload) {
+    const image = validatedImagePayload(payload);
+    const token = getPageToken();
+    let attempt = await uploadEditorLocalImage(image, { token });
+    if (attempt.ret !== 0) {
+      try {
+        attempt = await uploadEditorLocalImage(image, await getUploadContext(token));
+      } catch (_) {
+        throw uploadResultError(attempt.body, attempt.ret);
+      }
+    }
+    const { body, ret } = attempt;
+    if (ret !== 0) {
+      uploadContextCache = null;
+      throw uploadResultError(body, ret);
+    }
+    const cdnUrl = normalizedWechatCdnUrl(body?.cdn_url || body?.url);
+    if (!cdnUrl) {
       throw new Error('微信上传成功，但没有返回可用于正文的 CDN 地址');
     }
     return {
       cdnUrl,
       fileId: String(body?.content || body?.fileid || ''),
-      mimeType: image.mimeType
+      mimeType: image.mimeType,
+      channel: 'editor-local'
     };
   }
 

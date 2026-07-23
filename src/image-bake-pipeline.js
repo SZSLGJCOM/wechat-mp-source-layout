@@ -21,6 +21,12 @@
     'image/avif',
     'image/bmp'
   ]);
+  const WECHAT_IMAGE_HOSTS = new Set([
+    'mmbiz.qpic.cn',
+    'mmbiz.qlogo.cn',
+    'm.qpic.cn',
+    'mmsns.qpic.cn'
+  ]);
   const ADVANCED_DATA_KEYS = Object.freeze([
     'mpseGlowOn', 'mpseGlowBlur', 'mpseGlowSpread', 'mpseGlowOpacity', 'mpseGlowColor',
     'mpseBrightness', 'mpseContrast', 'mpseSaturate', 'mpseGray', 'mpseColorOn',
@@ -72,9 +78,11 @@
     function absoluteSourceUrl(value) {
       const raw = String(value || '').trim();
       if (raw.startsWith('//')) return `https:${raw}`;
-      if (/^(?:data:image\/|blob:|https:\/\/)/i.test(raw)) return raw;
+      if (/^(?:data:image\/|blob:)/i.test(raw)) return raw;
       try {
-        return new URL(raw, location.href).href;
+        const url = new URL(raw, location.href);
+        if (url.protocol === 'http:' && WECHAT_IMAGE_HOSTS.has(url.hostname)) url.protocol = 'https:';
+        return url.href;
       } catch (_) {
         return '';
       }
@@ -283,10 +291,13 @@
         return;
       }
 
-      setBadgeText('正在烘焙…');
+      let stage = '读取原图';
+      setBadgeText('正在读取原图…');
       try {
         const dataUrl = await loadSourceDataUrl(metadata.sourceUrl);
         if (jobs.get(key)?.generation !== generation || !image.isConnected) return;
+        stage = '像素烘焙';
+        setBadgeText('正在烘焙…');
         const rect = image.getBoundingClientRect();
         const rendered = await bakeEngine.bake({
           dataUrl,
@@ -295,7 +306,8 @@
           preserveBounds: Boolean(getCropContainer(image))
         });
         if (jobs.get(key)?.generation !== generation || !image.isConnected) return;
-        setBadgeText('正在上传…');
+        stage = '本地图片上传';
+        setBadgeText('正在作为本地图片上传…');
         const upload = await bridgeClient.uploadImage(rendered.blob, `mpse-${Date.now()}.png`);
         if (jobs.get(key)?.generation !== generation || !image.isConnected) return;
 
@@ -317,14 +329,14 @@
         rememberCurrent(image, asset);
         markChanged(image, 'bake', true, metadata.locatorIdentity);
         jobs.delete(key);
-        setBadgeText('已烘焙并上传');
+        setBadgeText('已烘焙并作为本地图片上传');
         schedulePositionTools();
       } catch (error) {
         if (jobs.get(key)?.generation !== generation) return;
         jobs.delete(key);
         if (image.isConnected) restoreCommittedState(image, metadata);
         console.warn('[公众号源码排版助手] image bake failed:', error);
-        setBadgeText(error?.message ? `烘焙失败：${error.message}` : '烘焙失败');
+        setBadgeText(error?.message ? `${stage}失败：${error.message}` : `${stage}失败`);
       }
     }
 

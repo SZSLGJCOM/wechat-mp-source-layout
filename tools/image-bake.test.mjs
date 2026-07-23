@@ -117,6 +117,8 @@ test('advanced controls preview locally and commit only after bake upload succee
     'article mutation must happen only after the CDN upload succeeds'
   );
   assert.match(pipeline, /catch \(error\)[\s\S]*?restoreCommittedState\(image, metadata\)/);
+  assert.match(pipeline, /url\.protocol === 'http:' && WECHAT_IMAGE_HOSTS\.has\(url\.hostname\)[\s\S]*?url\.protocol = 'https:'/);
+  assert.match(pipeline, /stage = '本地图片上传'/);
   const requestBake = pipeline.match(/function requestBake\(image\) \{[\s\S]*?\n    \}/)?.[0] || '';
   assert.doesNotMatch(requestBake, /records\.remember\(/, 'unuploaded recipes must not enter durable records');
   assert.match(snapshots, /bake: \['filter', 'box-shadow'/);

@@ -18,8 +18,10 @@
 
 - 正文可能位于 UEditor iframe；图片坐标必须换算到顶层窗口，滚动监听也要同时绑定编辑文档和 iframe window。
 - `mp_editor_set_content` 会重建正文节点。图片手势不能长期持有旧 DOM 引用，回写完成后要按图片身份重新定位，并重放尚未提交的本地状态。
-- 原生图片拖放会与尺寸手柄争夺指针；图片操作期间需要阻止 `dragstart`，并用统一指针会话处理 `pointerup`、`pointercancel` 和 `lostpointercapture`。
-- 拖动期间只做合成层预览，松手后再进行正文布局写入，避免连续读取布局后立即写样式造成强制重排。
+- 图片选择、拖动与缩放由微信编辑器原生能力负责，扩展不创建竞争性的选中框或尺寸手柄。
+- 高级图片效果在本地完成像素烘焙，随后使用编辑器本地文件场景 `scene=8` 上传；不得复用封面或素材库场景 `scene=1`。
+- 本地上传先使用当前编辑页 token，仅在微信拒绝时刷新 ticket 后重试，避免把素材库授权作为前置依赖。
+- 正文只写入微信 CDN 地址；`blob:` 和 `data:` 地址不能作为可保存的最终图片来源。
 
 相关规范：[Pointer Events](https://www.w3.org/TR/pointerevents/)、[HTML Drag and Drop](https://html.spec.whatwg.org/multipage/dnd.html)、[Chrome Content Scripts](https://developer.chrome.com/docs/extensions/develop/concepts/content-scripts)。
 
