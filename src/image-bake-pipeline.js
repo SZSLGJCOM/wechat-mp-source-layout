@@ -11,6 +11,12 @@
     'data-w',
     'data-ratio'
   ]);
+  const URL_SOURCE_ATTRIBUTES = new Set([
+    'src',
+    'data-src',
+    'data-backsrc',
+    'data-croporisrc'
+  ]);
   const MAX_SOURCE_BYTES = 16 * 1024 * 1024;
   const BAKE_DELAY_MS = 680;
   const ALLOWED_SOURCE_TYPES = new Set([
@@ -37,6 +43,16 @@
     'mpseStrokeOn', 'mpseStrokeWidth', 'mpseStrokeColor', 'mpseStrokeOpacity', 'mpseStrokeBase',
     'mpseBaked'
   ]);
+
+  function completeSourceAttributes(attributes, sourceUrl) {
+    const completed = { ...(attributes || {}) };
+    const source = String(sourceUrl || '').trim();
+    if (source) {
+      completed.src = source;
+      completed['data-src'] = source;
+    }
+    return completed;
+  }
 
   function create(dependencies) {
     const {
@@ -80,7 +96,8 @@
       if (raw.startsWith('//')) return `https:${raw}`;
       if (/^(?:data:image\/|blob:)/i.test(raw)) return raw;
       try {
-        const url = new URL(raw, location.href);
+        const hostPrefixed = [...WECHAT_IMAGE_HOSTS].some((host) => raw.toLowerCase().startsWith(`${host}/`));
+        const url = new URL(hostPrefixed ? `https://${raw}` : raw, location.href);
         if (url.protocol === 'http:' && WECHAT_IMAGE_HOSTS.has(url.hostname)) url.protocol = 'https:';
         return url.href;
       } catch (_) {
@@ -88,24 +105,23 @@
       }
     }
 
-    function applySourceAttributes(image, attributes) {
+    function applySourceAttributes(image, attributes, sourceUrl = '') {
+      const completed = completeSourceAttributes(attributes, sourceUrl || preferredSource(attributes));
+      if (!preferredSource(completed)) return false;
       for (const name of SOURCE_ATTRIBUTES) {
-        if (Object.prototype.hasOwnProperty.call(attributes || {}, name) && attributes[name]) {
-          image.setAttribute(name, attributes[name]);
-        } else {
+        if (Object.prototype.hasOwnProperty.call(completed, name) && completed[name]) {
+          image.setAttribute(name, completed[name]);
+        } else if (!URL_SOURCE_ATTRIBUTES.has(name)) {
           image.removeAttribute(name);
         }
       }
+      return true;
     }
 
     function applyPreviewSource(image, metadata) {
       if (!metadata?.sourceAttributes) return;
-      applySourceAttributes(image, metadata.sourceAttributes);
       const sourceUrl = absoluteSourceUrl(metadata.sourceUrl);
-      if (sourceUrl) {
-        image.setAttribute('src', sourceUrl);
-        image.setAttribute('data-src', sourceUrl);
-      }
+      if (!sourceUrl || !applySourceAttributes(image, metadata.sourceAttributes, sourceUrl)) return;
       image.dataset.mpseBaked = '0';
     }
 
@@ -127,27 +143,35 @@
       const identity = imageSignature(image);
       const record = records.find(identity);
       const currentAttributes = sourceAttributes(image);
-      const attributes = Object.keys(record?.asset?.sourceAttributes || {}).length
-        ? record.asset.sourceAttributes
-        : currentAttributes;
-      const sourceUrl = record?.asset?.sourceUrl || preferredSource(attributes);
+      const storedAttributes = record?.asset?.sourceAttributes || {};
+      const attributes = preferredSource(storedAttributes) ? storedAttributes : currentAttributes;
+      const runtimeSource = stableUrl(image?.currentSrc || image?.src || '');
+      const sourceUrl = record?.asset?.sourceUrl
+        || preferredSource(attributes)
+        || preferredSource(currentAttributes)
+        || runtimeSource;
+      const completedSourceAttributes = completeSourceAttributes(attributes, sourceUrl);
       const bakedUrl = record?.asset?.bakedUrl || '';
       const currentUrl = stableUrl(currentAttributes['data-src'] || currentAttributes.src);
       const metadata = {
         locatorIdentity: identity,
         sourceUrl,
-        sourceAttributes: attributes,
+        sourceAttributes: completedSourceAttributes,
         bakedUrl,
-        bakedAttributes: bakedUrl && currentUrl === stableUrl(bakedUrl) ? currentAttributes : null,
+        bakedAttributes: bakedUrl && currentUrl === stableUrl(bakedUrl)
+          ? completeSourceAttributes(currentAttributes, bakedUrl)
+          : null,
         committedData: record?.data || managedDataFromImage(image)
       };
       imageSources.set(image, metadata);
-      records.rememberAsset(identity, {
-        ...(record?.asset || {}),
-        sourceUrl,
-        bakedUrl: metadata.bakedUrl,
-        sourceAttributes: attributes
-      });
+      if (sourceUrl) {
+        records.rememberAsset(identity, {
+          ...(record?.asset || {}),
+          sourceUrl,
+          bakedUrl: metadata.bakedUrl,
+          sourceAttributes: completedSourceAttributes
+        });
+      }
       return metadata;
     }
 
@@ -252,18 +276,23 @@
     }
 
     function restoreCommittedState(image, metadata) {
-      const attributes = metadata.bakedUrl && metadata.bakedAttributes
-        ? metadata.bakedAttributes
+      const restoringBaked = Boolean(metadata.bakedUrl);
+      const attributes = restoringBaked
+        ? (metadata.bakedAttributes || completeSourceAttributes({}, metadata.bakedUrl))
         : metadata.sourceAttributes;
-      applySourceAttributes(image, attributes);
+      applySourceAttributes(
+        image,
+        attributes,
+        restoringBaked ? metadata.bakedUrl : metadata.sourceUrl
+      );
       restoreAdvancedData(image, metadata.committedData);
-      finishAdvancedBake(image, Boolean(metadata.bakedUrl));
+      finishAdvancedBake(image, restoringBaked);
       schedulePositionTools();
     }
 
     async function restoreWithoutEffects(image, metadata, generation, key) {
       if (jobs.get(key)?.generation !== generation || !image.isConnected) return;
-      applySourceAttributes(image, metadata.sourceAttributes);
+      applySourceAttributes(image, metadata.sourceAttributes, metadata.sourceUrl);
       finishAdvancedBake(image, false);
       delete image.dataset.mpseBaked;
       records.rememberAsset(imageSignature(image), {});
@@ -312,7 +341,7 @@
         if (jobs.get(key)?.generation !== generation || !image.isConnected) return;
 
         const attributes = bakedAttributes(image, rendered, upload);
-        applySourceAttributes(image, attributes);
+        applySourceAttributes(image, attributes, upload.cdnUrl);
         image.dataset.mpseBaked = '1';
         finishAdvancedBake(image, true);
         const asset = {
@@ -359,7 +388,7 @@
       cancel(image);
       const metadata = metadataFor(image);
       if (!metadata?.sourceUrl) return false;
-      applySourceAttributes(image, metadata.sourceAttributes);
+      applySourceAttributes(image, metadata.sourceAttributes, metadata.sourceUrl);
       finishAdvancedBake(image, false);
       delete image.dataset.mpseBaked;
       records.forget(imageSignature(image));
@@ -371,5 +400,9 @@
     return Object.freeze({ preparePreview, requestBake, restoreOriginal, cancel });
   }
 
-  globalThis.__MPSE_IMAGE_BAKE_PIPELINE__ = Object.freeze({ create, SOURCE_ATTRIBUTES });
+  globalThis.__MPSE_IMAGE_BAKE_PIPELINE__ = Object.freeze({
+    create,
+    SOURCE_ATTRIBUTES,
+    completeSourceAttributes
+  });
 })();

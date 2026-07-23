@@ -5,8 +5,10 @@ import { readJson, readText } from './test-helpers.mjs';
 
 await import(new URL('../src/image-bake.js', import.meta.url));
 await import(new URL('../src/image-effect-records.js', import.meta.url));
+await import(new URL('../src/image-bake-pipeline.js', import.meta.url));
 
 const bake = globalThis.__MPSE_IMAGE_BAKE__;
+const bakePipeline = globalThis.__MPSE_IMAGE_BAKE_PIPELINE__;
 
 function completeRecipe() {
   return {
@@ -102,6 +104,25 @@ test('baked assets persist original and derivative identities without plain-text
   assert.doesNotMatch(Array.from(values.values()).join(''), /source\.png|baked\.png/);
 });
 
+test('lazy-loaded source records always retain a visible src for failure rollback', () => {
+  const source = '//mmbiz.qpic.cn/mmbiz_png/source.png';
+  assert.deepEqual(
+    bakePipeline.completeSourceAttributes({ 'data-src': source, 'data-w': '1080' }, source),
+    {
+      src: source,
+      'data-src': source,
+      'data-w': '1080'
+    }
+  );
+  assert.deepEqual(
+    bakePipeline.completeSourceAttributes({ src: 'data:image/gif;base64,placeholder' }, source),
+    {
+      src: source,
+      'data-src': source
+    }
+  );
+});
+
 test('advanced controls preview locally and commit only after bake upload succeeds', () => {
   const controls = readText('src/image-controls.js');
   const pipeline = readText('src/image-bake-pipeline.js');
@@ -119,6 +140,8 @@ test('advanced controls preview locally and commit only after bake upload succee
   assert.match(pipeline, /catch \(error\)[\s\S]*?restoreCommittedState\(image, metadata\)/);
   assert.match(pipeline, /url\.protocol === 'http:' && WECHAT_IMAGE_HOSTS\.has\(url\.hostname\)[\s\S]*?url\.protocol = 'https:'/);
   assert.match(pipeline, /stage = '本地图片上传'/);
+  assert.match(pipeline, /else if \(!URL_SOURCE_ATTRIBUTES\.has\(name\)\)[\s\S]*?image\.removeAttribute\(name\)/);
+  assert.match(pipeline, /runtimeSource = stableUrl\(image\?\.currentSrc \|\| image\?\.src/);
   const requestBake = pipeline.match(/function requestBake\(image\) \{[\s\S]*?\n    \}/)?.[0] || '';
   assert.doesNotMatch(requestBake, /records\.remember\(/, 'unuploaded recipes must not enter durable records');
   assert.match(snapshots, /bake: \['filter', 'box-shadow'/);
