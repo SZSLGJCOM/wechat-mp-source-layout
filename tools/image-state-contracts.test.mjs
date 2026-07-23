@@ -4,7 +4,9 @@ import test from 'node:test';
 import { closeTo, readText } from './test-helpers.mjs';
 
 await import(new URL('../src/image-geometry.js', import.meta.url));
+await import(new URL('../src/image-snapshot-merge.js', import.meta.url));
 const imageGeometry = globalThis.__MPSE_IMAGE_GEOMETRY__;
+const snapshotMerge = globalThis.__MPSE_IMAGE_SNAPSHOT_MERGE__;
 
 test('image commits cannot steal a newer native selection', () => {
   const imageTools = readText('src/image-tools.js');
@@ -301,6 +303,162 @@ test('candidate cleanup still applies the snapshot to a promoted original image'
   assert.equal(candidate.removed, true);
 });
 
+test('one snapshot transaction removes the carrier and preserves the original presentation state', () => {
+  const imageTools = readText('src/image-tools.js');
+  const targetStart = imageTools.indexOf('  function copyManagedData(source, target) {');
+  const targetEnd = imageTools.indexOf('  function parseContentRoot(content) {', targetStart);
+  const cleanupStart = imageTools.indexOf('  function removeNativePasteCandidateNode(root, target, image) {');
+  const cleanupEnd = imageTools.indexOf('  function restoreLatestSnapshotInEditor(snapshot) {', cleanupStart);
+  assert.ok(targetStart >= 0 && targetEnd > targetStart && cleanupStart >= 0 && cleanupEnd > cleanupStart);
+
+  const { applySnapshotToRoot } = Function(
+    'MANAGED_DATA_KEYS',
+    'snapshotMerge',
+    'CROP_ATTR',
+    'IMAGE_SOURCE_ATTRIBUTES',
+    'getCropContainer',
+    'getVisualCarrier',
+    'stableUrl',
+    'locateImageInHtml',
+    `${imageTools.slice(targetStart, targetEnd)}
+${imageTools.slice(cleanupStart, cleanupEnd)}
+return { applySnapshotToRoot };`
+  )(
+    ['mpseGlowOn', 'mpseGlowBlur'],
+    snapshotMerge,
+    'data-mpse-image-crop',
+    ['src', 'data-src', 'data-fileid', 'data-w', 'data-ratio'],
+    (image) => image.cropHost || null,
+    () => null,
+    (value) => String(value || '').replaceAll('&amp;', '&').trim(),
+    (root, identity) => root.images.find((image) => (
+      !image.removed && image.getAttribute('data-mpse-image-id') === identity.editId
+    )) || null
+  );
+
+  function createStyle(initial = {}) {
+    const values = new Map(Object.entries(initial).map(([name, value]) => [
+      name,
+      { value: String(value), priority: '' }
+    ]));
+    return {
+      setProperty(name, value, priority = '') {
+        values.set(name, { value: String(value), priority: String(priority) });
+      },
+      removeProperty(name) {
+        values.delete(name);
+      },
+      getPropertyValue: (name) => values.get(name)?.value || '',
+      getPropertyPriority: (name) => values.get(name)?.priority || ''
+    };
+  }
+
+  const root = {
+    tagName: 'DIV',
+    textContent: '',
+    images: [],
+    querySelectorAll(selector) {
+      return selector === 'img' ? this.images.filter((image) => !image.removed) : [];
+    }
+  };
+  const block = { style: createStyle({ 'text-align': 'center' }) };
+  const cropHost = {
+    style: createStyle({ width: '70%', overflow: 'hidden' }),
+    getAttribute: (name) => (name === 'data-mpse-image-crop' ? '1' : ''),
+    parentNode: root
+  };
+  const createImage = (initialAttributes, parentElement = root) => {
+    const attributes = new Map(Object.entries(initialAttributes));
+    return {
+      removed: false,
+      parentElement,
+      cropHost: null,
+      style: createStyle({ width: '70%', 'border-radius': '18px' }),
+      get attributes() {
+        return [...attributes].map(([name, value]) => ({ name, value }));
+      },
+      getAttribute: (name) => attributes.get(name) || '',
+      setAttribute(name, value) {
+        attributes.set(name, String(value));
+      },
+      removeAttribute(name) {
+        attributes.delete(name);
+      },
+      closest() {
+        return block;
+      },
+      remove() {
+        this.removed = true;
+      }
+    };
+  };
+
+  const original = createImage({
+    src: 'https://assets.example.com/original.png',
+    'data-src': 'https://assets.example.com/original.png',
+    'data-fileid': 'original-file',
+    'data-mpse-image-id': 'stable-original',
+    'data-mpse-glow-on': '1',
+    'data-mpse-glow-blur': '24'
+  }, cropHost);
+  original.cropHost = cropHost;
+  const carrier = createImage({
+    src: 'https://mmbiz.qpic.cn/baked.png?wx_fmt=png&from=appmsg',
+    'data-src': 'https://mmbiz.qpic.cn/baked.png?wx_fmt=png&from=appmsg',
+    'data-fileid': 'baked-file',
+    'data-mpse-native-paste-id': 'atomic-carrier'
+  });
+  const neighbor = createImage({
+    src: 'https://mmbiz.qpic.cn/neighbor.png',
+    'data-src': 'https://mmbiz.qpic.cn/neighbor.png',
+    'data-mpse-image-id': 'neighbor'
+  });
+  root.images.push(original, carrier, neighbor);
+
+  const result = applySnapshotToRoot(root, {
+    identity: { editId: 'stable-original', index: 0 },
+    nativePasteCandidates: [{
+      pasteId: 'atomic-carrier',
+      cdnUrl: 'https://mmbiz.qpic.cn/baked.png?wx_fmt=png&from=appmsg',
+      placement: 'after'
+    }],
+    cropAction: 'preserve',
+    imgAttributeAction: 'sync',
+    imgAttributePatch: {
+      src: 'https://mmbiz.qpic.cn/baked.png?wx_fmt=png&from=appmsg',
+      'data-src': 'https://mmbiz.qpic.cn/baked.png?wx_fmt=png&from=appmsg',
+      'data-fileid': 'baked-file',
+      'data-w': '1200',
+      'data-ratio': '0.625'
+    },
+    imgStylePatch: {
+      width: { value: '70%', priority: '' },
+      'border-radius': { value: '18px', priority: '' }
+    },
+    imgData: {
+      mpseGlowOn: '1',
+      mpseGlowBlur: '24'
+    },
+    carrierStylePatch: {},
+    blockStylePatch: {},
+    captionAction: 'none'
+  });
+
+  assert.deepEqual(result, { changed: true, reason: 'ok' });
+  assert.deepEqual(root.querySelectorAll('img'), [original, neighbor]);
+  assert.equal(original.removed, false);
+  assert.equal(original.cropHost, cropHost);
+  assert.equal(original.style.getPropertyValue('width'), '70%');
+  assert.equal(original.style.getPropertyValue('border-radius'), '18px');
+  assert.equal(original.getAttribute('data-mpse-glow-on'), '1');
+  assert.equal(original.getAttribute('data-mpse-glow-blur'), '24');
+  assert.equal(original.getAttribute('data-src'), 'https://mmbiz.qpic.cn/baked.png?wx_fmt=png&from=appmsg');
+  assert.equal(original.getAttribute('data-fileid'), 'baked-file');
+  assert.equal(original.getAttribute('data-w'), '1200');
+  assert.equal(original.getAttribute('data-ratio'), '0.625');
+  assert.equal(neighbor.removed, false);
+});
+
 test('image baking and style snapshots share one serialized content commit gate', () => {
   const imageTools = readText('src/image-tools.js');
   const bakePipeline = readText('src/image-bake-pipeline.js');
@@ -308,6 +466,8 @@ test('image baking and style snapshots share one serialized content commit gate'
   assert.match(imageTools, /onBakePending\(\)[\s\S]*?window\.clearTimeout\(state\.commitTimer\)/);
   assert.match(imageTools, /if \(imageBakePipeline\?\.hasPending\(\)\)[\s\S]*?return;/);
   assert.match(imageTools, /onBakeSettled\(image, identity, outcome\)/);
+  assert.match(imageTools, /onBakeSettled\(image, identity, outcome\)[\s\S]*?bindSelectedImage\(image, settledIdentity\)/);
+  assert.match(imageTools, /if \(!imageBakePipeline\?\.hasPending\(\) && state\.needsCommit\)[\s\S]*?commitSnapshotToEditor\(/);
   assert.match(imageTools, /function resolveBakeImage\(identity\)[\s\S]*?applySnapshotToTarget\(target, root, snapshot\)/);
   assert.match(bakePipeline, /function resolveJobImage\(job\)/);
   assert.match(bakePipeline, /job\.recipe = bakeEngine\.recipeFromImage\(image\)/);
@@ -321,14 +481,128 @@ test('image baking and style snapshots share one serialized content commit gate'
 
 test('native selection reacquire remains scope-bound after editor DOM replacement', () => {
   const imageTools = readText('src/image-tools.js');
+  const imageControls = readText('src/image-controls.js');
 
   assert.match(imageTools, /function editorScopeKey\(image\)/);
   assert.match(imageTools, /scopeKey: editorScopeKey\(image\)/);
   assert.match(imageTools, /filter\(\(image\) => !identity\.scopeKey \|\| editorScopeKey\(image\) === identity\.scopeKey\)/);
   assert.match(imageTools, /function reacquireSelectedImage\(identity = state\.identity\)/);
-  assert.match(imageTools, /revealToolElements\(\);[\s\S]*?refreshVisiblePanel\(\)/);
+  assert.match(imageTools, /const REACQUIRE_RETRY_DELAYS_MS = Object\.freeze\(\[/);
+  assert.match(imageTools, /const nextAttempt = attempt \+ 1;[\s\S]*?REACQUIRE_RETRY_DELAYS_MS\[nextAttempt\]/);
+  assert.match(imageTools, /function bindSelectedImage\(image, expectedIdentity = state\.identity\)[\s\S]*?refreshVisiblePanel\(\)/);
+  assert.match(imageControls, /\(!state\.image \|\| !state\.image\.isConnected\)[\s\S]*?reacquireSelectedImage\(\(\) => onPanelInput/);
   assert.match(imageTools, /\/\^\\\/cgi-bin\\\/appmsg\(\?:\\\/\|\$\)\//);
   assert.doesNotMatch(imageTools, /#js_content|\.rich_media_content/);
+});
+
+test('selected-image reacquire retries boundedly and stops after a newer selection', () => {
+  const imageTools = readText('src/image-tools.js');
+  const start = imageTools.indexOf('  function cancelScheduledReacquire(clearCallback = false) {');
+  const end = imageTools.indexOf('  function copyManagedData(source, target) {', start);
+  assert.ok(start >= 0 && end > start, 'reacquire scheduler source must exist');
+  const schedulerSource = imageTools.slice(start, end);
+
+  function createScheduler(resolveImage) {
+    const timers = new Map();
+    const delays = [];
+    let timerId = 0;
+    const windowMock = {
+      setTimeout(callback, delay) {
+        const id = ++timerId;
+        timers.set(id, callback);
+        delays.push(delay);
+        return id;
+      },
+      clearTimeout(id) {
+        timers.delete(id);
+      }
+    };
+    const state = {
+      reacquireTimer: null,
+      selectionRevision: 1,
+      lastSnapshot: null,
+      commitSeq: 0,
+      pendingReacquireCallback: null
+    };
+    const schedule = Function(
+      'window',
+      'state',
+      'REACQUIRE_RETRY_DELAYS_MS',
+      'reacquireSelectedImage',
+      `${schedulerSource}\nreturn scheduleSelectedImageReacquire;`
+    )(windowMock, state, [0, 50, 100, 180], resolveImage);
+    const runNext = () => {
+      const next = timers.entries().next().value;
+      assert.ok(next, 'a retry timer must be pending');
+      timers.delete(next[0]);
+      next[1]();
+    };
+    return { schedule, state, timers, delays, runNext };
+  }
+
+  let attempts = 0;
+  let rebound = null;
+  const successful = createScheduler(() => {
+    attempts += 1;
+    return attempts === 3 ? { id: 'stable-image' } : null;
+  });
+  successful.schedule({ editId: 'stable-image' }, {
+    onReacquired: (image) => {
+      rebound = image;
+    }
+  });
+  successful.runNext();
+  successful.schedule({ editId: 'stable-image' }, { delay: 0 });
+  successful.runNext();
+  successful.runNext();
+  assert.deepEqual(successful.delays, [0, 50, 0, 50]);
+  assert.deepEqual(rebound, { id: 'stable-image' });
+  assert.equal(successful.timers.size, 0);
+
+  let staleAttempts = 0;
+  const stale = createScheduler(() => {
+    staleAttempts += 1;
+    return null;
+  });
+  stale.schedule({ editId: 'old-selection' });
+  stale.runNext();
+  stale.state.selectionRevision += 1;
+  stale.runNext();
+  assert.equal(staleAttempts, 1);
+  assert.equal(stale.timers.size, 0, 'an old selection must not keep retrying');
+});
+
+test('a synchronous control rebind cancels an older queued input replay', () => {
+  const imageTools = readText('src/image-tools.js');
+  const start = imageTools.indexOf('  function reacquireSelectedImageForControl(onReacquired = null) {');
+  const end = imageTools.indexOf('  function copyManagedData(source, target) {', start);
+  assert.ok(start >= 0 && end > start, 'control rebind helper must exist');
+
+  const state = { identity: { editId: 'same-image' } };
+  let pendingReplay = () => {
+    throw new Error('stale panel input replayed after a synchronous rebind');
+  };
+  let scheduled = 0;
+  const reacquireSelectedImageForControl = Function(
+    'state',
+    'reacquireSelectedImage',
+    'cancelScheduledReacquire',
+    'scheduleSelectedImageReacquire',
+    `${imageTools.slice(start, end)}\nreturn reacquireSelectedImageForControl;`
+  )(
+    state,
+    () => ({ id: 'same-image' }),
+    (clearCallback) => {
+      if (clearCallback) pendingReplay = null;
+    },
+    () => {
+      scheduled += 1;
+    }
+  );
+
+  assert.deepEqual(reacquireSelectedImageForControl(() => {}), { id: 'same-image' });
+  assert.equal(scheduled, 0);
+  assert.equal(pendingReplay, null);
 });
 
 test('image identities stay stable while article order and sources change', () => {
@@ -481,7 +755,6 @@ test('effect records are restored after the editor replaces a selected image nod
   assert.match(imageTools, /effectRecords\.remember\(imageSignature\(image\), snapshot\.imgData, snapshot\.cropCreateHostData\)/);
   assert.match(imageTools, /function restoreEffectRecord\(image\) \{[\s\S]*?effectRecords\.find\(identity\)[\s\S]*?copyManagedData\(\{ imgData: record\.data \}, image\)/);
   assert.match(imageTools, /snapshotMerge\.syncAttributes\([\s\S]*?record\.hostData/);
-  assert.match(imageTools, /state\.identity = restoreEffectRecord\(best\)/);
   assert.match(imageTools, /state\.identity = restoreEffectRecord\(image\)/);
 });
 

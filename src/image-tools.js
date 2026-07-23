@@ -56,6 +56,7 @@
     'background-color', 'border-radius', 'box-sizing', 'overflow'
   ];
   const DEBUG = false;
+  const REACQUIRE_RETRY_DELAYS_MS = Object.freeze([0, 50, 100, 180, 300, 500, 800]);
 
   const state = {
     image: null,
@@ -78,7 +79,8 @@
     blockedByLayer: false,
     editRevision: 0,
     selectionRevision: 0,
-    reacquireTimer: null
+    reacquireTimer: null,
+    pendingReacquireCallback: null
   };
 
   function isMpHost() {
@@ -1129,6 +1131,7 @@
     positionTools,
     schedulePositionTools,
     markChanged,
+    reacquireSelectedImage: reacquireSelectedImageForControl,
     prepareAdvancedPreview: (image) => imageBakePipeline?.preparePreview(image),
     requestAdvancedBake: (image) => imageBakePipeline?.requestBake(image)
   });
@@ -1173,12 +1176,16 @@
       state.commitTimer = null;
     },
     onBakeSettled(image, identity, outcome) {
+      const settledIdentity = identity || (image?.isConnected ? imageSignature(image) : null);
+      if (image?.isConnected && sameLogicalImageIdentity(state.identity, settledIdentity)) {
+        bindSelectedImage(image, settledIdentity);
+      }
       if (outcome === 'failed' && image?.isConnected) {
-        const key = imageIdentityKey(identity || imageSignature(image));
+        const key = imageIdentityKey(settledIdentity);
         if (state.pendingSnapshots.has(key)) markChanged(image, 'bake', false, identity);
       }
       if (!imageBakePipeline?.hasPending() && state.needsCommit) {
-        scheduleContentCommit(outcome === 'failed' ? 'bake-fallback' : 'bake');
+        commitSnapshotToEditor(outcome === 'failed' ? 'bake-fallback' : 'bake');
       }
     }
   });
@@ -1306,27 +1313,63 @@
     }, delay);
   }
 
-  function cancelScheduledReacquire() {
-    if (!state.reacquireTimer) return;
-    window.clearTimeout(state.reacquireTimer);
-    state.reacquireTimer = null;
+  function cancelScheduledReacquire(clearCallback = false) {
+    if (state.reacquireTimer) {
+      window.clearTimeout(state.reacquireTimer);
+      state.reacquireTimer = null;
+    }
+    if (clearCallback) state.pendingReacquireCallback = null;
   }
 
   function scheduleSelectedImageReacquire(identity, options = {}) {
     if (!identity) return;
     cancelScheduledReacquire();
+    if (typeof options.onReacquired === 'function') {
+      state.pendingReacquireCallback = options.onReacquired;
+    }
+    const attempt = Math.max(0, Math.floor(Number(options.attempt) || 0));
     const selectionRevision = state.selectionRevision;
     state.reacquireTimer = window.setTimeout(() => {
       state.reacquireTimer = null;
-      if (state.selectionRevision !== selectionRevision) return;
-      if (state.isDragging) {
-        scheduleSelectedImageReacquire(identity, { ...options, delay: 120 });
+      if (state.selectionRevision !== selectionRevision) {
+        state.pendingReacquireCallback = null;
         return;
       }
       if (options.snapshot && state.lastSnapshot !== options.snapshot) return;
       if (Number.isFinite(options.seq) && state.commitSeq !== options.seq) return;
-      reacquireSelectedImage(identity);
+      const rebound = reacquireSelectedImage(identity);
+      if (rebound) {
+        const callback = state.pendingReacquireCallback;
+        state.pendingReacquireCallback = null;
+        if (typeof callback === 'function') callback(rebound);
+        return;
+      }
+      const nextAttempt = attempt + 1;
+      if (!rebound && nextAttempt < REACQUIRE_RETRY_DELAYS_MS.length) {
+        scheduleSelectedImageReacquire(identity, {
+          ...options,
+          attempt: nextAttempt,
+          delay: REACQUIRE_RETRY_DELAYS_MS[nextAttempt]
+        });
+      } else {
+        state.pendingReacquireCallback = null;
+      }
     }, Math.max(0, Number(options.delay) || 0));
+  }
+
+  function reacquireSelectedImageForControl(onReacquired = null) {
+    const rebound = reacquireSelectedImage(state.identity);
+    if (rebound) {
+      cancelScheduledReacquire(true);
+      return rebound;
+    }
+    if (state.identity) {
+      scheduleSelectedImageReacquire(state.identity, {
+        delay: 0,
+        onReacquired
+      });
+    }
+    return null;
   }
 
   function copyManagedData(source, target) {
@@ -1837,17 +1880,29 @@
     return exactIndexFallback(list, identity);
   }
 
+  function sameLogicalImageIdentity(first, second) {
+    if (!first || !second) return false;
+    if (first.scopeKey && second.scopeKey && first.scopeKey !== second.scopeKey) return false;
+    if (first.editId || second.editId) {
+      return Boolean(first.editId && second.editId && first.editId === second.editId);
+    }
+    return imageIdentityKey(first) === imageIdentityKey(second);
+  }
+
+  function bindSelectedImage(image, expectedIdentity = state.identity) {
+    if (!image?.isConnected || !sameLogicalImageIdentity(state.identity, expectedIdentity)) return null;
+    state.image = image;
+    state.identity = restoreEffectRecord(image);
+    revealToolElements();
+    setButtonStates();
+    refreshVisiblePanel();
+    schedulePositionTools();
+    return image;
+  }
+
   function reacquireSelectedImage(identity = state.identity) {
     const best = findImageByIdentity(identity);
-    if (best) {
-      state.image = best;
-      state.identity = restoreEffectRecord(best);
-      revealToolElements();
-      setButtonStates();
-      refreshVisiblePanel();
-      schedulePositionTools();
-    }
-    return best;
+    return best ? bindSelectedImage(best, identity) : null;
   }
 
   function revealToolElements() {
@@ -1857,7 +1912,7 @@
   }
 
   function showToolsForImage(image) {
-    cancelScheduledReacquire();
+    cancelScheduledReacquire(true);
     state.selectionRevision += 1;
     state.image = image;
     state.identity = restoreEffectRecord(image);
@@ -1889,7 +1944,7 @@
     state.activePanel = null;
     state.isDragging = false;
     state.blockedByLayer = false;
-    cancelScheduledReacquire();
+    cancelScheduledReacquire(true);
     state.selectionRevision += 1;
     hideToolElements();
     if (state.needsCommit) scheduleContentCommit('selection-close');

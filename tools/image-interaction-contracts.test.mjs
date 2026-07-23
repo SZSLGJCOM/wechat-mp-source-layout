@@ -68,6 +68,7 @@ test('panel controls ignore duplicate input and change values while preserving r
   assert.ok(panelInput, 'panel input handler must exist');
   assert.match(showPanel[0], /rememberPanelControlValues\(panel\)/);
   assert.doesNotMatch(showPanel[0], /applyEffect\(/, 'opening a panel must only record its initial values');
+  assert.match(panelInput[0], /typeof reacquireSelectedImage === 'function'[\s\S]*?reacquireSelectedImage\(\(\) => onPanelInput/);
   assert.match(panelInput[0], /if \(!state\.image \|\| !state\.image\.isConnected\) return;[\s\S]*?hasNewPanelControlValue/);
   assert.match(panelInput[0], /if \(!hasNewPanelControlValue\(event\.target\)\) return;/);
 
@@ -95,10 +96,14 @@ test('panel controls ignore duplicate input and change values while preserving r
 
   const applied = [];
   const controlState = { image: { isConnected: true } };
+  let reacquireCalls = 0;
+  let deferReacquire = false;
+  let pendingReacquire = null;
   const onPanelInput = Function(
     'document',
     'PANEL_ID',
     'state',
+    'reacquireSelectedImage',
     'hasNewPanelControlValue',
     'updateValueLabels',
     'applyEffect',
@@ -108,6 +113,15 @@ test('panel controls ignore duplicate input and change values while preserving r
     { getElementById: () => panel },
     'panel',
     controlState,
+    (onReacquired) => {
+      reacquireCalls += 1;
+      if (deferReacquire) {
+        pendingReacquire = onReacquired;
+        return null;
+      }
+      controlState.image = { isConnected: true };
+      return controlState.image;
+    },
     hasNewPanelControlValue,
     () => {},
     (effect, values, field) => applied.push({ effect, values, field }),
@@ -123,8 +137,9 @@ test('panel controls ignore duplicate input and change values while preserving r
   range.value = '13';
   controlState.image.isConnected = false;
   onPanelInput({ type: 'input', target: range });
-  assert.equal(range.dataset.mpseLastAppliedValue, '12', 'a disconnected edit must not advance the applied token');
-  controlState.image.isConnected = true;
+  assert.equal(reacquireCalls, 1, 'the active logical image is rebound without another pointer selection');
+  assert.equal(range.dataset.mpseLastAppliedValue, '13');
+  assert.deepEqual(applied, [{ effect: 'radius', values: { radius: 13 }, field: 'radius' }]);
 
   onPanelInput({ type: 'input', target: range });
   onPanelInput({ type: 'change', target: range });
@@ -135,6 +150,15 @@ test('panel controls ignore duplicate input and change values while preserving r
   range.value = '13';
   onPanelInput({ type: 'input', target: range });
   assert.deepEqual(applied.map(({ values }) => values.radius), [13, 14, 13], 'each genuine value transition remains live');
+
+  range.value = '15';
+  controlState.image.isConnected = false;
+  deferReacquire = true;
+  onPanelInput({ type: 'input', target: range });
+  assert.deepEqual(applied.map(({ values }) => values.radius), [13, 14, 13], 'a value waits while the editor rebuilds');
+  controlState.image = { isConnected: true };
+  pendingReacquire(controlState.image);
+  assert.deepEqual(applied.map(({ values }) => values.radius), [13, 14, 13, 15], 'the latest value replays after automatic rebind');
 
   const text = { name: 'caption', type: 'text', value: 'before', dataset: {}, closest: () => panel };
   panel.controls = [text];
@@ -157,11 +181,13 @@ test('active image panel is restored after editor DOM replacement but not after 
   const imageTools = readText('src/image-tools.js');
   const imageControls = readText('src/image-controls.js');
   const refreshPanel = imageControls.match(/function refreshVisiblePanel\(\) \{[\s\S]*?\n    \}\n\n    function onPanelInput/);
+  const bindSelected = imageTools.match(/function bindSelectedImage\(image, expectedIdentity = state\.identity\) \{[\s\S]*?\n  \}\n\n  function reacquireSelectedImage/);
   const reacquire = imageTools.match(/function reacquireSelectedImage\(identity = state\.identity\) \{[\s\S]*?\n  \}\n\n  function revealToolElements/);
   const hideElements = imageTools.match(/function hideToolElements\(preserveFocusedPanel = false\) \{[\s\S]*?\n  \}\n\n  function hideTools/);
   const closePanel = imageControls.match(/function closePanel\(\) \{[\s\S]*?\n    \}\n\n    function showPanel/);
 
   assert.ok(refreshPanel, 'panel refresh function must exist');
+  assert.ok(bindSelected, 'selected-image binding function must exist');
   assert.ok(reacquire, 'image reacquire function must exist');
   assert.ok(hideElements, 'temporary tool hiding function must exist');
   assert.ok(closePanel, 'explicit panel close function must exist');
@@ -169,7 +195,8 @@ test('active image panel is restored after editor DOM replacement but not after 
   assert.doesNotMatch(hideElements[0], /activePanel/, 'temporary DOM replacement must preserve panel intent');
   assert.match(refreshPanel[0], /\(!panel\.classList\.contains\('mpse-visible'\) && !state\.activePanel\)/);
   assert.match(refreshPanel[0], /showPanel\(state\.activePanel \|\| panel\.dataset\.effect \|\| 'radius'\)/);
-  assert.match(reacquire[0], /revealToolElements\(\);[\s\S]*?refreshVisiblePanel\(\)/);
+  assert.match(bindSelected[0], /revealToolElements\(\);[\s\S]*?refreshVisiblePanel\(\)/);
+  assert.match(reacquire[0], /bindSelectedImage\(best, identity\)/);
   assert.match(closePanel[0], /panel\.classList\.remove\('mpse-visible'\);[\s\S]*?state\.activePanel = null/);
 });
 

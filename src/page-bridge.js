@@ -11,7 +11,6 @@
   const EDITOR_INPUT_IDLE_MS = 160;
   const EDITOR_INPUT_WAIT_TIMEOUT_MS = 2500;
   const MAX_PASTE_IMAGE_BYTES = 10 * 1024 * 1024;
-  const POST_PASTE_STABILITY_CHECKS = 4;
 
   if (window.__MP_SOURCE_EDITOR_BRIDGE_INSTALLED__) {
     return;
@@ -798,6 +797,9 @@
 
     context.ownedCandidate = candidate;
     context.ownedPlacement = candidate === anchor ? 'replace' : 'after';
+    if (context.ownedPlacement === 'after' && candidate.style?.setProperty) {
+      candidate.style.setProperty('display', 'none', 'important');
+    }
     candidate.setAttribute('data-mpse-native-paste-id', context.pasteId);
     const editId = String(context.locator?.editId || '');
     if (editId) candidate.setAttribute('data-mpse-paste-for', editId);
@@ -812,7 +814,8 @@
         const readiness = await invokeMpEditor('mp_editor_get_isready', undefined, 3000, api);
         if (readiness?.isReady && readiness?.isNew) {
           await invokeMpEditor('mp_editor_set_selection', {
-            container: image
+            container: image,
+            selectAfter: true
           }, 3000, api);
           return 'mp-editor-jsapi';
         }
@@ -824,7 +827,8 @@
     const doc = editor.ownerDocument;
     const selection = doc.getSelection();
     const range = doc.createRange();
-    range.selectNode(image);
+    range.setStartAfter(image);
+    range.collapse(true);
     selection.removeAllRanges();
     selection.addRange(range);
     editor.focus();
@@ -1085,10 +1089,13 @@
       dispatchEditorEvents(editor, '');
       await confirmPastedImageInContent(cdnUrl, epoch, baseline, context);
       sourceAttributes = nativeImageAttributes(pasted);
-      rollbackAttempted = true;
-      rolledBack = await rollbackNativePaste(baseline, context, epoch, pasted, placement);
-      if (!rolledBack) {
-        throw nativePasteUnsupported('微信编辑器已生成图片，但粘贴占位内容无法安全撤回');
+      if (placement !== 'after') {
+        rollbackAttempted = true;
+        rolledBack = await rollbackNativePaste(baseline, context, epoch, pasted, placement);
+        if (!rolledBack) {
+          throw nativePasteUnsupported('微信编辑器替换了原图，且无法安全恢复原图');
+        }
+        throw nativePasteUnsupported('微信编辑器没有在原图后创建独立上传载体');
       }
     } catch (error) {
       if (!pasted) {
@@ -1125,15 +1132,6 @@
       releaseNativePasteInputLock(context);
     }
 
-    schedulePastedImageCleanup({
-      pasteId,
-      cdnUrl,
-      expectedArticleKey: baseline.articleKey,
-      placement: 'after',
-      originalAttributes: context.originalAttributes,
-      locator
-    }, POST_PASTE_STABILITY_CHECKS);
-
     return {
       pasteId,
       cdnUrl,
@@ -1142,8 +1140,8 @@
       channel: 'editor-paste',
       selectionMode,
       articleKey: baseline.articleKey,
-      placement,
-      cleanupPending: placement === 'after'
+      placement: 'after',
+      cleanupPending: true
     };
   }
 
@@ -1271,22 +1269,18 @@
     pendingPastedImageCleanups.delete(key);
   }
 
-  function schedulePastedImageCleanup(payload, stabilityChecks = 0) {
+  function schedulePastedImageCleanup(payload) {
     const key = pastedImageCleanupKey(payload);
     if (key === '||') return false;
-    const requestedStabilityChecks = Math.max(0, Number(stabilityChecks) || 0);
     let entry = pendingPastedImageCleanups.get(key);
     if (!entry) {
       entry = {
         payload,
         attempts: 0,
         createdAt: Date.now(),
-        timer: 0,
-        stabilityChecks: requestedStabilityChecks
+        timer: 0
       };
       pendingPastedImageCleanups.set(key, entry);
-    } else {
-      entry.stabilityChecks = Math.max(entry.stabilityChecks, requestedStabilityChecks);
     }
     if (entry.timer) return true;
     const delay = Math.min(30000, 1000 * (2 ** Math.min(entry.attempts, 5)));
@@ -1304,11 +1298,8 @@
           { invalidateRevision: false }
         );
         if (result.changed || result.confirmedAbsent) {
-          if (entry.stabilityChecks <= 1) {
-            forgetPastedImageCleanup(key);
-            return;
-          }
-          entry.stabilityChecks -= 1;
+          forgetPastedImageCleanup(key);
+          return;
         }
       } catch (error) {
         console.warn('[公众号源码排版助手] pasted image cleanup retry failed:', error);

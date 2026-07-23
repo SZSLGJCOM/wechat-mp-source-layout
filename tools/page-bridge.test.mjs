@@ -499,10 +499,18 @@ test('a confirmed SET failure releases the queue for the next write', async () =
 
 function fakeImage(attributes) {
   const values = new Map(Object.entries(attributes));
+  const styles = new Map();
   return {
     __attributes: values,
     isConnected: true,
     currentSrc: values.get('src') || '',
+    style: {
+      setProperty(name, value, priority = '') {
+        styles.set(name, { value: String(value), priority: String(priority) });
+      },
+      getPropertyValue: (name) => styles.get(name)?.value || '',
+      getPropertyPriority: (name) => styles.get(name)?.priority || ''
+    },
     getAttribute: (name) => values.get(name) || '',
     hasAttribute: (name) => values.has(name),
     setAttribute(name, value) {
@@ -546,7 +554,7 @@ class FakeClipboardEvent {
   }
 }
 
-test('image bake removes a late native-paste duplicate without losing the original state', async () => {
+test('image bake keeps an after-target carrier for the atomic snapshot commit', async () => {
   const original = fakeImage({
     src: 'https://mmbiz.qpic.cn/source.png',
     'data-src': 'https://mmbiz.qpic.cn/source.png',
@@ -563,6 +571,7 @@ test('image bake removes a late native-paste duplicate without losing the origin
   const images = [original];
   let selectionPayload = null;
   let pasteEvent = null;
+  let setContentCalls = 0;
   let canonicalContent = '<p><img src="https://mmbiz.qpic.cn/source.png"></p>';
   const editor = {
     innerHTML: canonicalContent,
@@ -596,6 +605,7 @@ test('image bake removes a late native-paste duplicate without losing the origin
       return;
     }
     if (payload.apiName === 'mp_editor_set_content') {
+      setContentCalls += 1;
       canonicalContent = payload.apiParam.content;
       payload.sucCb({});
       return;
@@ -621,13 +631,17 @@ test('image bake removes a late native-paste duplicate without losing the origin
 
   assert.equal(response.ok, true, JSON.stringify(response.error));
   assert.equal(selectionPayload.container, original);
-  assert.equal(Object.hasOwn(selectionPayload, 'selectAfter'), false);
+  assert.equal(selectionPayload.selectAfter, true);
   assert.equal(pasteEvent.type, 'paste');
   assert.equal(pasteEvent.clipboardData.files.length, 1);
   assert.equal(pasteEvent.clipboardData.files[0].name, 'article-effect.png');
   assert.equal(original.isConnected, true, 'the original stays until the atomic content commit');
-  assert.equal(pasted.isConnected, false, 'the temporary pasted node is rolled back before returning');
-  assert.equal(canonicalContent, '<p><img src="https://mmbiz.qpic.cn/source.png"></p>');
+  assert.equal(pasted.isConnected, true, 'the snapshot transaction owns the temporary carrier');
+  assert.equal(pasted.style.getPropertyValue('display'), 'none', 'the upload carrier never flashes as a second article image');
+  assert.equal(pasted.style.getPropertyPriority('display'), 'important');
+  assert.equal((canonicalContent.match(/<img\b/g) || []).length, 2);
+  assert.equal(setContentCalls, 0, 'the page bridge must not race the snapshot with a baseline rewrite');
+  assert.equal(harness.timers.size, 0, 'normal carrier ownership belongs only to the snapshot transaction');
   assert.match(response.data.pasteId, /^mpse-paste-/);
   assert.deepEqual(JSON.parse(JSON.stringify({ ...response.data, pasteId: '<dynamic>' })), {
     pasteId: '<dynamic>',
@@ -647,28 +661,9 @@ test('image bake removes a late native-paste duplicate without losing the origin
     placement: 'after',
     cleanupPending: true
   });
-
-  canonicalContent = [
-    '<p><img data-mpse-image-id="image-7"',
-    ' data-mpse-glow-on="1" style="width:70%"',
-    ' data-src="https://mmbiz.qpic.cn/mmbiz_png/baked.png?wx_fmt=png&amp;from=appmsg"></p>',
-    '<p><img data-src="https://mmbiz.qpic.cn/mmbiz_png/baked.png?wx_fmt=png&amp;from=appmsg"></p>'
-  ].join('');
-  harness.runTimer(1000);
-  await nextTurn();
-  await nextTurn();
-
-  assert.equal((canonicalContent.match(/<img\b/g) || []).length, 1);
-  assert.match(canonicalContent, /data-mpse-image-id="image-7"/);
-  assert.match(canonicalContent, /data-mpse-glow-on="1"/);
-  assert.match(canonicalContent, /style="width:70%"/);
-  assert.ok(
-    [...harness.timers.values()].some((timer) => timer.delay === 2000),
-    'the cleanup guard must keep watching for a late editor reconciliation'
-  );
 });
 
-test('an in-place native paste is restored without deleting the target image', async () => {
+test('an in-place native paste fails closed after restoring the target image', async () => {
   const target = fakeImage({
     src: 'https://mmbiz.qpic.cn/source-replace.png',
     'data-src': 'https://mmbiz.qpic.cn/source-replace.png',
@@ -723,16 +718,15 @@ test('an in-place native paste is restored without deleting the target image', a
     }
   });
 
-  assert.equal(response.ok, true, JSON.stringify(response.error));
-  assert.equal(response.data.placement, 'replace');
-  assert.equal(response.data.cdnUrl, 'https://mmbiz.qpic.cn/replaced.png');
+  assert.equal(response.ok, false);
+  assert.equal(response.error.code, 'MPSE_NATIVE_IMAGE_PASTE_UNSUPPORTED');
   assert.equal(target.isConnected, true);
   assert.equal(target.getAttribute('data-src'), 'https://mmbiz.qpic.cn/source-replace.png');
   assert.equal(target.getAttribute('data-mpse-native-paste-id'), '');
   assert.equal(canonicalContent, baseline);
 });
 
-test('an in-place raw upload placeholder receives the bounded upload window', async () => {
+test('an in-place raw upload placeholder receives the bounded window before failing closed', async () => {
   let now = 0;
   class ControlledDate extends Date {
     static now() {
@@ -812,9 +806,8 @@ test('an in-place raw upload placeholder receives the bounded upload window', as
   harness.runTimer(120);
 
   const response = await pending;
-  assert.equal(response.ok, true, JSON.stringify(response.error));
-  assert.equal(response.data.placement, 'replace');
-  assert.equal(response.data.cdnUrl, 'https://mmbiz.qpic.cn/uploaded-placeholder.png');
+  assert.equal(response.ok, false);
+  assert.equal(response.error.code, 'MPSE_NATIVE_IMAGE_PASTE_UNSUPPORTED');
   assert.equal(canonicalContent, baseline);
 });
 
@@ -919,7 +912,7 @@ test('an input conflict restores the known replacement and hands canonical clean
   assert.doesNotMatch(canonicalContent, /replacement-conflict\.png|replacement-file|data-mpse-native-paste-id/);
 });
 
-test('a replacement node without the extension image id is recognized by its bounded position', async () => {
+test('a replacement node without the extension image id is restored by its bounded position', async () => {
   const original = fakeImage({
     src: 'https://mmbiz.qpic.cn/source-node.png',
     'data-src': 'https://mmbiz.qpic.cn/source-node.png',
@@ -989,9 +982,8 @@ test('a replacement node without the extension image id is recognized by its bou
     }
   });
 
-  assert.equal(response.ok, true, JSON.stringify(response.error));
-  assert.equal(response.data.placement, 'replace');
-  assert.equal(response.data.cdnUrl, 'https://mmbiz.qpic.cn/replacement-node.png');
+  assert.equal(response.ok, false);
+  assert.equal(response.error.code, 'MPSE_NATIVE_IMAGE_PASTE_UNSUPPORTED');
   assert.equal(replacement.isConnected, true);
   assert.equal(replacement.getAttribute('data-src'), 'https://mmbiz.qpic.cn/source-node.png');
   assert.equal(canonicalContent, baseline);
@@ -1222,7 +1214,9 @@ test('native paste blocks editor input only until it owns a placeholder', async 
   const response = await pending;
   assert.equal(response.ok, true, JSON.stringify(response.error));
   assert.equal(response.data.cdnUrl, 'https://mmbiz.qpic.cn/pasted-lock.png');
-  assert.equal(canonicalContent, baseline);
+  assert.equal((canonicalContent.match(/<img\b/g) || []).length, 2);
+  assert.match(canonicalContent, /source-lock\.png/);
+  assert.match(canonicalContent, /pasted-lock\.png/);
 });
 
 test('a queued SET invalidates an unresolved paste before writing new HTML', async () => {
@@ -1709,8 +1703,8 @@ test('ambiguous cleanup is retained by the page bridge retry owner', async () =>
 test('the page bridge no longer calls the private image upload endpoint', () => {
   assert.doesNotMatch(source, /\/cgi-bin\/filetransfer|ticket_id|writetype|scene:\s*['"]8['"]/);
   assert.match(source, /mp_editor_set_selection/);
-  assert.doesNotMatch(source, /selectAfter:\s*true|setStartAfter\(image\)/);
-  assert.match(source, /range\.selectNode\(image\)/);
+  assert.match(source, /selectAfter:\s*true/);
+  assert.match(source, /range\.setStartAfter\(image\)/);
   assert.match(source, /new view\.ClipboardEvent\('paste'/);
   assert.match(source, /channel:\s*'editor-paste'/);
   assert.match(

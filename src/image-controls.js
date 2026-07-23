@@ -44,6 +44,7 @@
       positionTools,
       schedulePositionTools,
       markChanged,
+      reacquireSelectedImage,
       prepareAdvancedPreview,
       requestAdvancedBake
     } = dependencies;
@@ -1097,6 +1098,10 @@
       const panel = document.getElementById(PANEL_ID);
       if (!panel || !panel.classList.contains('mpse-visible')) return;
       if (!event.target || !event.target.closest(`#${PANEL_ID}`)) return;
+      if ((!state.image || !state.image.isConnected) && typeof reacquireSelectedImage === 'function') {
+        const control = event.target;
+        reacquireSelectedImage(() => onPanelInput({ target: control }));
+      }
       if (!state.image || !state.image.isConnected) return;
       if (!hasNewPanelControlValue(event.target)) return;
       updateValueLabels(panel);
