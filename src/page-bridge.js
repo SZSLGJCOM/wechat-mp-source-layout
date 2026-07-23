@@ -265,7 +265,7 @@
   let compositionActive = false;
   let resolveCompositionEnd = null;
   let compositionEnd = Promise.resolve();
-  let activeNativePasteInputLock = null;
+  let activeNativePasteTransaction = null;
 
   function isEditorInputEvent(event, doc) {
     if (event && event.isTrusted === false) return false;
@@ -276,8 +276,8 @@
     return Boolean(target.closest && target.closest('[contenteditable="true"], body[contenteditable="true"]'));
   }
 
-  function nativePasteLockOwnsEvent(event, doc) {
-    const editor = activeNativePasteInputLock?.editor;
+  function nativePasteTransactionOwnsEvent(event, doc) {
+    const editor = activeNativePasteTransaction?.editor;
     if (!editor || editor.isConnected === false || event?.isTrusted === false) return false;
     let target = event?.target;
     if (target && target.nodeType !== Node.ELEMENT_NODE) target = target.parentElement;
@@ -285,9 +285,21 @@
     return target === editor || Boolean(editor.contains?.(target));
   }
 
-  function blockNativePasteInput(event) {
-    event?.preventDefault?.();
-    event?.stopImmediatePropagation?.();
+  function nativePasteTransactionOwnsModelInput(event, doc) {
+    const transaction = activeNativePasteTransaction;
+    if (
+      !transaction
+      || transaction.userIntent
+      || !nativePasteTransactionOwnsEvent(event, doc)
+    ) return false;
+    const context = transaction.context;
+    if (!context || context.revision !== transaction.revision) return false;
+    return Boolean(ownedNativePasteCandidate(context) || claimNativePasteCandidate(context));
+  }
+
+  function noteNativePasteUserIntent() {
+    if (activeNativePasteTransaction) activeNativePasteTransaction.userIntent = true;
+    noteEditorInput();
   }
 
   function noteEditorInput() {
@@ -331,54 +343,32 @@
       for (const type of ['beforeinput', 'input', 'paste', 'drop', 'cut']) {
         doc.addEventListener(type, (event) => {
           if (!isEditorInputEvent(event, doc)) return;
-          if (nativePasteLockOwnsEvent(event, doc)) {
-            // WeChat emits a trusted input while committing our synthetic paste.
-            // Let that input reach its editor model, but do not count it as an
-            // external article edit that invalidates the same paste transaction.
-            if (type !== 'input') blockNativePasteInput(event);
+          if (type === 'input' && nativePasteTransactionOwnsModelInput(event, doc)) {
             return;
           }
-          noteEditorInput();
+          noteNativePasteUserIntent();
         }, true);
       }
       doc.addEventListener('keydown', (event) => {
-        if (!activeNativePasteInputLock || event?.isTrusted === false) return;
-        if (nativePasteLockOwnsEvent(event, doc)) {
-          blockNativePasteInput(event);
-        } else {
-          noteEditorInput();
-        }
+        if (!activeNativePasteTransaction || event?.isTrusted === false) return;
+        noteNativePasteUserIntent();
       }, true);
       doc.addEventListener('pointerdown', (event) => {
-        if (!activeNativePasteInputLock || event?.isTrusted === false) return;
-        if (nativePasteLockOwnsEvent(event, doc)) {
-          blockNativePasteInput(event);
-        } else {
-          noteEditorInput();
-        }
+        if (!activeNativePasteTransaction || event?.isTrusted === false) return;
+        noteNativePasteUserIntent();
       }, true);
       doc.addEventListener('compositionstart', (event) => {
         if (!isEditorInputEvent(event, doc)) return;
-        if (nativePasteLockOwnsEvent(event, doc)) {
-          blockNativePasteInput(event);
-          return;
-        }
+        if (activeNativePasteTransaction) activeNativePasteTransaction.userIntent = true;
         beginComposition();
       }, true);
       doc.addEventListener('compositionupdate', (event) => {
         if (!isEditorInputEvent(event, doc)) return;
-        if (nativePasteLockOwnsEvent(event, doc)) {
-          blockNativePasteInput(event);
-          return;
-        }
-        noteEditorInput();
+        noteNativePasteUserIntent();
       }, true);
       doc.addEventListener('compositionend', (event) => {
         if (!isEditorInputEvent(event, doc)) return;
-        if (nativePasteLockOwnsEvent(event, doc)) {
-          blockNativePasteInput(event);
-          return;
-        }
+        if (activeNativePasteTransaction) activeNativePasteTransaction.userIntent = true;
         endComposition();
       }, true);
     }
@@ -700,19 +690,21 @@
     };
   }
 
-  function acquireNativePasteInputLock(context) {
-    activeNativePasteInputLock = {
+  function beginNativePasteTransaction(context) {
+    activeNativePasteTransaction = {
       editor: context.editor,
-      revision: context.revision
+      revision: context.revision,
+      context,
+      userIntent: false
     };
   }
 
-  function releaseNativePasteInputLock(context) {
+  function endNativePasteTransaction(context) {
     if (
-      activeNativePasteInputLock?.editor === context.editor
-      && activeNativePasteInputLock?.revision === context.revision
+      activeNativePasteTransaction?.editor === context.editor
+      && activeNativePasteTransaction?.revision === context.revision
     ) {
-      activeNativePasteInputLock = null;
+      activeNativePasteTransaction = null;
     }
   }
 
@@ -1022,7 +1014,10 @@
   }
 
   async function rollbackNativePaste(baseline, context, epoch, candidate = null, placement = '') {
-    if (editorInputEpoch !== epoch) {
+    if (
+      editorInputEpoch !== epoch
+      || context.revision !== editorWriteRevision
+    ) {
       restoreKnownPasteCandidate(context, candidate, placement);
       return false;
     }
@@ -1032,6 +1027,13 @@
       const current = api
         ? await getContent({ api, allowFallback: false, timeoutMs: 3000 })
         : fallbackGetContent(context.editor);
+      if (
+        editorInputEpoch !== epoch
+        || context.revision !== editorWriteRevision
+      ) {
+        restoreKnownPasteCandidate(context, candidate, placement);
+        return false;
+      }
       if (current.articleKey !== baseline.articleKey) return false;
       if (current.content === baseline.content) return true;
       await setContent(
@@ -1078,7 +1080,7 @@
     let placement = 'after';
     let rollbackAttempted = false;
     let rolledBack = false;
-    acquireNativePasteInputLock(context);
+    beginNativePasteTransaction(context);
     try {
       pasted = await waitForNativePastedImage(context, epoch, event);
       placement = context.ownedPlacement
@@ -1131,7 +1133,7 @@
       }
       throw error;
     } finally {
-      releaseNativePasteInputLock(context);
+      endNativePasteTransaction(context);
     }
 
     return {

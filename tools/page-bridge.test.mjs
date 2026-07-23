@@ -727,6 +727,98 @@ test('an in-place native paste fails closed after restoring the target image', a
   assert.equal(canonicalContent, baseline);
 });
 
+test('input during rollback validation never rewrites the newer article content', async () => {
+  const target = fakeImage({
+    src: 'https://mmbiz.qpic.cn/source-rollback-race.png',
+    'data-src': 'https://mmbiz.qpic.cn/source-rollback-race.png',
+    'data-fileid': 'source-rollback-file',
+    'data-mpse-image-id': 'image-rollback-race'
+  });
+  const baseline = [
+    '<p><img data-mpse-image-id="image-rollback-race"',
+    ' data-src="https://mmbiz.qpic.cn/source-rollback-race.png"',
+    ' data-fileid="source-rollback-file"></p>'
+  ].join('');
+  let canonicalContent = baseline;
+  let getCalls = 0;
+  let setCalls = 0;
+  let rollbackRequest = null;
+  const editor = {
+    innerHTML: baseline,
+    textContent: '',
+    isConnected: true,
+    querySelectorAll: (selector) => (selector === 'img' ? [target] : []),
+    contains: (node) => node === target,
+    dispatchEvent(event) {
+      if (event.type === 'paste') {
+        target.setAttribute('src', 'https://mmbiz.qpic.cn/replacement-rollback-race.png');
+        target.setAttribute('data-src', 'https://mmbiz.qpic.cn/replacement-rollback-race.png');
+        target.setAttribute('data-fileid', 'replacement-rollback-file');
+        canonicalContent = [
+          '<p><img data-mpse-image-id="image-rollback-race"',
+          ' data-src="https://mmbiz.qpic.cn/replacement-rollback-race.png"',
+          ' data-fileid="replacement-rollback-file"></p>'
+        ].join('');
+      }
+      return true;
+    },
+    focus() {}
+  };
+  const harness = createPageHarness((payload) => {
+    if (payload.apiName === 'mp_editor_get_isready') {
+      payload.sucCb({ isReady: true, isNew: true });
+    } else if (payload.apiName === 'mp_editor_set_selection') {
+      payload.sucCb({});
+    } else if (payload.apiName === 'mp_editor_get_content') {
+      getCalls += 1;
+      if (getCalls < 3) payload.sucCb({ content: canonicalContent });
+      else if (getCalls === 3) rollbackRequest = payload;
+      else payload.sucCb({ content: canonicalContent });
+    } else if (payload.apiName === 'mp_editor_set_content') {
+      setCalls += 1;
+      canonicalContent = payload.apiParam.content;
+      payload.sucCb({});
+    } else {
+      throw new Error(`unexpected API ${payload.apiName}`);
+    }
+  }, {
+    editor,
+    File: FakeFile,
+    DataTransfer: FakeDataTransfer,
+    ClipboardEvent: FakeClipboardEvent
+  });
+
+  const pending = harness.request('PASTE_IMAGE', {
+    bytes: new Uint8Array([137, 80, 78, 71]).buffer,
+    mimeType: 'image/png',
+    locator: {
+      editId: 'image-rollback-race',
+      sourceUrl: 'https://mmbiz.qpic.cn/source-rollback-race.png',
+      index: 0
+    }
+  });
+  await nextTurn();
+
+  assert.ok(rollbackRequest, 'rollback must be waiting on its final content validation');
+  const userIntent = harness.fireDocumentEvent('beforeinput', editor, {
+    inputType: 'insertText',
+    data: 'new user text'
+  });
+  assert.deepEqual(userIntent, { prevented: false, stopped: false });
+  canonicalContent = `<p>new user text</p>${canonicalContent}`;
+  harness.fireDocumentEvent('input', editor);
+  rollbackRequest.sucCb({ content: canonicalContent });
+
+  const response = await pending;
+  assert.equal(response.ok, false);
+  assert.equal(response.error.code, 'MPSE_NATIVE_IMAGE_PASTE_UNSUPPORTED');
+  assert.equal(setCalls, 0, 'rollback must not write an old baseline after newer input');
+  assert.match(canonicalContent, /new user text/);
+  assert.match(canonicalContent, /replacement-rollback-race\.png/);
+  assert.equal(target.getAttribute('data-src'), 'https://mmbiz.qpic.cn/source-rollback-race.png');
+  assert.equal(target.getAttribute('data-fileid'), 'source-rollback-file');
+});
+
 test('an in-place raw upload placeholder receives the bounded window before failing closed', async () => {
   let now = 0;
   class ControlledDate extends Date {
@@ -885,10 +977,11 @@ test('an input conflict restores the known replacement and hands canonical clean
   await nextTurn();
 
   assert.ok(confirmationRequest, 'the pasted replacement must be owned before the input conflict');
-  harness.fireDocumentEvent('input', {
-    nodeType: 1,
-    isContentEditable: true
+  const userIntent = harness.fireDocumentEvent('beforeinput', editor, {
+    inputType: 'insertText',
+    data: 'x'
   });
+  assert.deepEqual(userIntent, { prevented: false, stopped: false });
   confirmationRequest.sucCb({ content: canonicalContent });
 
   const response = await pending;
@@ -1081,7 +1174,7 @@ test('native paste waits for the candidate beside the target across a full edito
   assert.notEqual(response.data.cdnUrl, 'https://mmbiz.qpic.cn/neighbor.png');
 });
 
-test('trusted input outside the locked editor leaves a later unowned image untouched', async () => {
+test('trusted input outside the paste transaction editor leaves a later unowned image untouched', async () => {
   const target = fakeImage({
     src: 'https://mmbiz.qpic.cn/source.png',
     'data-src': 'https://mmbiz.qpic.cn/source.png',
@@ -1152,7 +1245,7 @@ test('trusted input outside the locked editor leaves a later unowned image untou
   assert.match(canonicalContent, /delayed\.png/);
 });
 
-test('native paste holds the input lock through canonical confirmation', async () => {
+test('native paste attributes only the owned carrier model input to its transaction', async () => {
   const target = fakeImage({
     src: 'https://mmbiz.qpic.cn/source-lock.png',
     'data-src': 'https://mmbiz.qpic.cn/source-lock.png',
@@ -1211,13 +1304,6 @@ test('native paste holds the input lock through canonical confirmation', async (
   });
   await nextTurn();
 
-  const blocked = harness.fireDocumentEvent('beforeinput', editor, {
-    inputType: 'insertText',
-    data: 'x'
-  });
-  assert.equal(blocked.prevented, true);
-  assert.equal(blocked.stopped, true);
-
   images = [target, pasted];
   canonicalContent += '<p><img data-src="https://mmbiz.qpic.cn/pasted-lock.png"></p>';
   harness.runTimer(120);
@@ -1229,12 +1315,6 @@ test('native paste holds the input lock through canonical confirmation', async (
     { prevented: false, stopped: false },
     'WeChat must receive its own trusted model input'
   );
-  const stillBlocked = harness.fireDocumentEvent('beforeinput', editor, {
-    inputType: 'insertText',
-    data: 'y'
-  });
-  assert.equal(stillBlocked.prevented, true);
-  assert.equal(stillBlocked.stopped, true);
   confirmationRequest.sucCb({ content: canonicalContent });
 
   const response = await pending;
@@ -1243,11 +1323,6 @@ test('native paste holds the input lock through canonical confirmation', async (
   assert.equal((canonicalContent.match(/<img\b/g) || []).length, 2);
   assert.match(canonicalContent, /source-lock\.png/);
   assert.match(canonicalContent, /pasted-lock\.png/);
-  assert.deepEqual(
-    harness.fireDocumentEvent('beforeinput', editor),
-    { prevented: false, stopped: false },
-    'the lock must be released after the paste transaction settles'
-  );
 });
 
 test('a queued SET invalidates an unresolved paste before writing new HTML', async () => {
