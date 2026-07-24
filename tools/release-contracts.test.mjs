@@ -1,4 +1,4 @@
-import assert from 'node:assert/strict';
+﻿import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -22,7 +22,7 @@ test('repository exposes one-command extension verification', () => {
   assert.equal(pkg.scripts?.check, 'node tools/verify-extension.mjs');
   assert.equal(
     pkg.scripts?.test,
-    'node --test tools/release-contracts.test.mjs tools/source-mode-contracts.test.mjs tools/mobile-preview-contracts.test.mjs tools/image-interaction-contracts.test.mjs tools/image-effects.test.mjs tools/image-source.test.mjs tools/image-bake.test.mjs tools/image-background.test.mjs tools/image-geometry.test.mjs tools/image-state-contracts.test.mjs tools/bridge-client.test.mjs tools/page-bridge.test.mjs'
+    'node --test tools/release-contracts.test.mjs tools/source-mode-contracts.test.mjs tools/mobile-preview-contracts.test.mjs tools/image-interaction-contracts.test.mjs tools/image-effects.test.mjs tools/image-geometry.test.mjs tools/image-state-contracts.test.mjs tools/bridge-client.test.mjs tools/page-bridge.test.mjs'
   );
   assert.equal(pkg.scripts?.package, 'node tools/package-extension.mjs');
 
@@ -45,9 +45,9 @@ test('release version and ASCII package folder stay consistent', () => {
   const releaseVersion = manifest.version_name || manifest.version;
 
   assert.equal(pkg.version, manifest.version);
-  assert.equal(releaseVersion, '0.12');
-  assert.ok(readme.includes(`当前版本：\`v${releaseVersion}\``));
-  assert.ok(changelog.includes(`## v${releaseVersion} ·`));
+  assert.equal(releaseVersion, '0.01');
+  assert.ok(readme.includes(`褰撳墠鐗堟湰锛歕`v${releaseVersion}\``));
+  assert.ok(changelog.includes(`## v${releaseVersion} 路`));
   assert.ok(bridgeClient.includes(`const VERSION = 'v${manifest.version}';`));
   assert.ok(imageTools.includes(`const VERSION = 'v${manifest.version}';`));
   assert.match(packager, /releaseSlug = 'gongzhonghao-yuanma-paiban-zhushou'/);
@@ -63,8 +63,8 @@ test('license is noncommercial and product introductions stay product-focused', 
   assert.match(license, /Noncommercial Purposes/);
   assert.doesNotMatch(license, /MIT License/);
   assert.equal(pkg.license, 'PolyForm-Noncommercial-1.0.0');
-  assert.doesNotMatch(readme, /源码公开|非商用|商业使用|开源|授权/);
-  assert.doesNotMatch(manifest.description, /源码公开|非商用|开源|授权/);
+  assert.doesNotMatch(readme, /婧愮爜鍏紑|闈炲晢鐢▅鍟嗕笟浣跨敤|寮€婧恷鎺堟潈/);
+  assert.doesNotMatch(manifest.description, /婧愮爜鍏紑|闈炲晢鐢▅寮€婧恷鎺堟潈/);
 });
 
 test('content scripts load the shared bridge client before dependent modules', () => {
@@ -80,9 +80,6 @@ test('content scripts load the shared bridge client before dependent modules', (
     'src/image-controls.js',
     'src/image-snapshot-merge.js',
     'src/image-effect-records.js',
-    'src/image-source.js',
-    'src/image-bake.js',
-    'src/image-bake-pipeline.js',
     'src/image-tools.js',
     'src/svg-tools.js',
     'src/svg-block-tools.js'
@@ -259,7 +256,7 @@ test('style-only image snapshots never claim or delete native source attributes'
     identity: { editId: 'img-source-owner' },
     image: sourceImage,
     previous: opacity,
-    reason: 'bake',
+    reason: 'reset',
     imageAttributeNames: sourceNames
   });
   assert.equal(baked.imgAttributeAction, 'sync');
@@ -437,7 +434,6 @@ test('editor writes are serialized and uncertain JSAPI writes never fall back co
   assert.match(pageBridge, /let editorWriteRevision = 0/);
   assert.match(pageBridge, /\+\+editorWriteRevision/);
   assert.match(pageBridge, /function enqueueSetContent\(/);
-  assert.match(pageBridge, /function enqueueNativeImagePaste\(payload\) \{[\s\S]*?enqueueEditorWrite/);
   assert.match(pageBridge, /const SET_CONFIRM_TIMEOUT_MS = 5000/);
   assert.match(pageBridge, /invokeMpEditor\('mp_editor_set_content', \{ content \}, SET_CONFIRM_TIMEOUT_MS, api\)/);
   assert.match(pageBridge, /writeStateUncertain = true;[\s\S]*?throw uncertainWrite\(\)/);
@@ -476,8 +472,8 @@ test('README presents product updates without internal development wording', () 
   const readme = readText('README.md');
   const css = readText('src/overlay.css');
 
-  assert.match(readme, /\[查看更新日志\]\(CHANGELOG\.md\)/);
-  assert.doesNotMatch(readme, /自检|旧版|开发阶段/);
+  assert.match(readme, /\[鏌ョ湅鏇存柊鏃ュ織\]\(CHANGELOG\.md\)/);
+  assert.doesNotMatch(readme, /鑷|鏃х増|寮€鍙戦樁娈?);
   assert.doesNotMatch(css, /\/\*\s*v\d+\.\d+\.\d+/i);
 });
 
@@ -500,7 +496,7 @@ test('public release files avoid internal release-log wording', () => {
 
   for (const file of publicFiles) {
     const source = readText(file);
-    assert.doesNotMatch(source, /自检|旧版|开发阶段|v\d+\.\d+\.\d+ 生成|旧 SVG/, file);
+    assert.doesNotMatch(source, /鑷|鏃х増|寮€鍙戦樁娈祙v\d+\.\d+\.\d+ 鐢熸垚|鏃?SVG/, file);
   }
 
   assert.equal(fs.existsSync(path.join(rootDir, 'docs', 'self-check-v0.9.4.md')), false);
@@ -523,6 +519,7 @@ test('production comments are concise and professional', () => {
     const source = readText(file);
     assert.doesNotMatch(source, /\/\/\s*(ignore|fall through)\b/i, file);
     assert.doesNotMatch(source, /catch\s*\([^)]*\)\s*\{\s*\}/, file);
-    assert.doesNotMatch(source, /壹伴|临时|随便|凑合|低级|垃圾|屎山|忽略/i, file);
+    assert.doesNotMatch(source, /澹逛即|涓存椂|闅忎究|鍑戝悎|浣庣骇|鍨冨溇|灞庡北|蹇界暐/i, file);
   }
 });
+

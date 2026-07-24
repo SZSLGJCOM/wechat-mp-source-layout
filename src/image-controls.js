@@ -45,8 +45,7 @@
       schedulePositionTools,
       markChanged,
       reacquireSelectedImage,
-      prepareAdvancedPreview,
-      requestAdvancedBake
+      revertBakedSource
     } = dependencies;
 
     const ADVANCED_EFFECTS = new Set(['shadow', 'glow', 'feather', 'stroke', 'color']);
@@ -783,10 +782,6 @@
           restoreAppearanceBase(image, config, host);
         }
       }
-      if (image.dataset.mpseBaked === '1') {
-        finishAdvancedBake(image, true);
-        return;
-      }
       const hasAlphaEffect = image.dataset.mpseShadowOn === '1'
         || image.dataset.mpseGlowOn === '1'
         || image.dataset.mpseFeatherOn === '1'
@@ -802,20 +797,6 @@
         rebuildManagedFilter(image);
       }
       if (image.dataset.mpseStrokeOn === '1') clearStrokeOutline(image);
-    }
-
-    function finishAdvancedBake(image, baked) {
-      if (!image) return;
-      migrateLegacyBoxShadow(image);
-      migrateLegacyFeather(image);
-      if (image.dataset.mpseFilterBase !== undefined) {
-        restoreStyleBase(image, 'mpseFilterBase', FILTER_STYLE_PROPS);
-      } else if (baked) {
-        setStyle(image, 'filter', '');
-      }
-      if (image.dataset.mpseStrokeBase !== undefined) restoreStrokeOutline(image);
-      if (baked) image.dataset.mpseBaked = '1';
-      else delete image.dataset.mpseBaked;
     }
 
     function renderCropAppearance(image) {
@@ -1111,8 +1092,8 @@
     function applyEffect(effect, values, changedField = '') {
       const image = state.image;
       if (!image || !image.isConnected) return;
-      if (ADVANCED_EFFECTS.has(effect) && typeof prepareAdvancedPreview === 'function') {
-        prepareAdvancedPreview(image);
+      if (ADVANCED_EFFECTS.has(effect) && typeof revertBakedSource === 'function') {
+        revertBakedSource(image);
       }
       captureImageBase(image);
       const layoutHost = getLayoutHost(image);
@@ -1277,11 +1258,7 @@
       const changeReason = effect === 'size'
         ? (!changedField ? 'size' : (changedField === 'align' ? 'size-align' : 'size-width'))
         : effect;
-      if (ADVANCED_EFFECTS.has(effect) && typeof requestAdvancedBake === 'function') {
-        requestAdvancedBake(image, changeReason);
-      } else {
-        markChanged(image, changeReason);
-      }
+      markChanged(image, changeReason);
       setButtonStates();
       schedulePositionTools();
     }
@@ -1312,8 +1289,8 @@
       const image = state.image;
       if (!image || !image.isConnected || effect === 'size') return;
       if (!hasManagedEffect(image, effect)) return;
-      if (ADVANCED_EFFECTS.has(effect) && typeof prepareAdvancedPreview === 'function') {
-        prepareAdvancedPreview(image);
+      if (ADVANCED_EFFECTS.has(effect) && typeof revertBakedSource === 'function') {
+        revertBakedSource(image);
       }
 
       if (effect === 'radius') {
@@ -1395,11 +1372,7 @@
       }
 
       if (commit) {
-        if (ADVANCED_EFFECTS.has(effect) && typeof requestAdvancedBake === 'function') {
-          requestAdvancedBake(image, `clear-${effect}`);
-        } else {
-          markChanged(image, `clear-${effect}`);
-        }
+        markChanged(image, `clear-${effect}`);
         setButtonStates();
         schedulePositionTools();
       }
@@ -1441,8 +1414,7 @@
       applyEffect,
       clearEffect,
       hasManagedEffect,
-      getCaptionNode,
-      finishAdvancedBake
+      getCaptionNode
     });
   }
 

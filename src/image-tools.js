@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const VERSION = 'v0.12.0';
+  const VERSION = 'v0.01.0';
   const MENU_ID = 'mpse-img2-menu';
   const PANEL_ID = 'mpse-img2-panel';
   const BADGE_ID = 'mpse-img2-badge';
@@ -13,8 +13,6 @@
   const imageGeometry = window.__MPSE_IMAGE_GEOMETRY__;
   const snapshotMerge = window.__MPSE_IMAGE_SNAPSHOT_MERGE__;
   const effectRecordFactory = window.__MPSE_IMAGE_EFFECT_RECORDS__;
-  const bakeEngine = window.__MPSE_IMAGE_BAKE__;
-  const bakePipelineFactory = window.__MPSE_IMAGE_BAKE_PIPELINE__;
   const injectBridge = bridgeClient && typeof bridgeClient.inject === 'function'
     ? bridgeClient.inject
     : () => false;
@@ -24,17 +22,17 @@
   const mutateEditorContent = bridgeClient && typeof bridgeClient.mutateContent === 'function'
     ? bridgeClient.mutateContent
     : () => Promise.reject(new Error('扩展桥接客户端未加载，请刷新页面后重试'));
-  const discardPastedImage = bridgeClient && typeof bridgeClient.discardPastedImage === 'function'
-    ? bridgeClient.discardPastedImage
-    : () => Promise.reject(new Error('扩展图片清理桥接未加载，请刷新页面后重试'));
 
   if (!imageGeometry) throw new Error('图片几何模块未加载，请刷新页面后重试');
   if (!snapshotMerge) throw new Error('图片写回合并模块未加载，请刷新页面后重试');
   if (!effectRecordFactory) throw new Error('图片效果记录模块未加载，请刷新页面后重试');
-  if (!bakeEngine || !bakePipelineFactory) throw new Error('图片像素烘焙模块未加载，请刷新页面后重试');
 
   const effectRecords = effectRecordFactory.create();
-  const IMAGE_SOURCE_ATTRIBUTES = bakePipelineFactory.SOURCE_ATTRIBUTES;
+  const IMAGE_SOURCE_ATTRIBUTES = Object.freeze([
+    'src', 'data-src', 'data-backsrc', 'data-croporisrc',
+    'data-fileid', 'data-mediaid', 'data-w', 'data-ratio', 'data-type', 'data-s'
+  ]);
+  const URL_SOURCE_ATTRIBUTES = new Set(['src', 'data-src', 'data-backsrc', 'data-croporisrc']);
 
   const MANAGED_DATA_KEYS = [
     'mpseGlowOn', 'mpseGlowBlur', 'mpseGlowSpread', 'mpseGlowOpacity', 'mpseGlowColor',
@@ -1088,7 +1086,6 @@
   if (!controlsFactory || typeof controlsFactory.create !== 'function') {
     throw new Error('图片参数控制模块未加载，请刷新页面后重试');
   }
-  let imageBakePipeline = null;
   const imageControls = controlsFactory.create({
     MENU_ID,
     PANEL_ID,
@@ -1132,8 +1129,7 @@
     schedulePositionTools,
     markChanged,
     reacquireSelectedImage: reacquireSelectedImageForControl,
-    prepareAdvancedPreview: (image) => imageBakePipeline?.preparePreview(image),
-    requestAdvancedBake: (image) => imageBakePipeline?.requestBake(image)
+    revertBakedSource
   });
   const {
     restoreImageBase,
@@ -1150,50 +1146,31 @@
     applyEffect,
     clearEffect,
     hasManagedEffect,
-    getCaptionNode,
-    finishAdvancedBake
+    getCaptionNode
   } = imageControls;
 
-  imageBakePipeline = bakePipelineFactory.create({
-    state,
-    records: effectRecords,
-    bridgeClient,
-    bakeEngine,
-    getAttr,
-    stableUrl,
-    imageSignature,
-    ensureImageEditId,
-    managedDataFromImage,
-    getCropContainer,
-    markChanged,
-    setBadgeText,
-    finishAdvancedBake,
-    schedulePositionTools,
-    resolveImage: resolveBakeImage,
-    onBakePending() {
-      if (!state.commitTimer) return;
-      window.clearTimeout(state.commitTimer);
-      state.commitTimer = null;
-    },
-    onBakeSettled(image, identity, outcome) {
-      const settledIdentity = identity || (image?.isConnected ? imageSignature(image) : null);
-      if (image?.isConnected && sameLogicalImageIdentity(state.identity, settledIdentity)) {
-        bindSelectedImage(image, settledIdentity);
+  // Legacy articles may still contain images whose source was replaced by a
+  // baked CDN asset. Before applying a pure-CSS effect, restore the original
+  // source so the new style does not stack on top of an already-baked picture.
+  function revertBakedSource(image) {
+    if (!image || !image.isConnected || image.dataset.mpseBaked !== '1') return;
+    const asset = effectRecords.find(imageSignature(image))?.asset;
+    if (asset && asset.sourceUrl) {
+      const attributes = asset.sourceAttributes || {};
+      for (const name of IMAGE_SOURCE_ATTRIBUTES) {
+        if (attributes[name]) image.setAttribute(name, attributes[name]);
+        else if (!URL_SOURCE_ATTRIBUTES.has(name)) image.removeAttribute(name);
       }
-      if (outcome === 'failed' && image?.isConnected) {
-        const key = imageIdentityKey(settledIdentity);
-        if (state.pendingSnapshots.has(key)) markChanged(image, 'bake', false, identity);
-      }
-      if (!imageBakePipeline?.hasPending() && state.needsCommit) {
-        commitSnapshotToEditor(outcome === 'failed' ? 'bake-fallback' : 'bake');
-      }
+      image.setAttribute('src', asset.sourceUrl);
+      image.setAttribute('data-src', asset.sourceUrl);
     }
-  });
+    delete image.dataset.mpseBaked;
+  }
 
   function resetImage() {
     let image = state.image;
     if (!image || !image.isConnected) return;
-    imageBakePipeline.restoreOriginal(image, false);
+    revertBakedSource(image);
     const hasExactBase = image.dataset.mpseImageBase !== undefined;
     if (!hasExactBase) {
       for (const effect of ['radius', 'spacing', 'shadow', 'glow', 'feather', 'stroke', 'opacity', 'color', 'rotate', 'frame', 'caption', 'circle']) {
@@ -1234,41 +1211,7 @@
       imageAttributeNames: IMAGE_SOURCE_ATTRIBUTES,
       cropAttribute: CROP_ATTR
     });
-    const candidates = [
-      ...(previous?.nativePasteCandidates || []),
-      ...(image.__mpseNativePasteCandidates || [])
-    ];
-    const seenCandidates = new Set();
-    snapshot.nativePasteCandidates = [];
-    for (const candidate of candidates) {
-      const normalized = {
-        pasteId: String(candidate?.pasteId || ''),
-        cdnUrl: stableUrl(candidate?.cdnUrl || '')
-      };
-      const articleKey = String(candidate?.articleKey || '');
-      if (articleKey) normalized.articleKey = articleKey;
-      normalized.placement = candidate?.placement === 'replace' ? 'replace' : 'after';
-      if (candidate?.originalAttributes && typeof candidate.originalAttributes === 'object') {
-        normalized.originalAttributes = { ...candidate.originalAttributes };
-      }
-      if (candidate?.cleanupOwner === 'page-bridge') {
-        normalized.cleanupOwner = 'page-bridge';
-      }
-      const candidateKey = `${normalized.pasteId}|${normalized.cdnUrl}`;
-      if (candidateKey === '|' || seenCandidates.has(candidateKey)) continue;
-      seenCandidates.add(candidateKey);
-      snapshot.nativePasteCandidates.push(normalized);
-    }
-    delete image.__mpseNativePasteCandidates;
     return snapshot;
-  }
-
-  function resolveBakeImage(identity) {
-    const target = findImageByIdentity(identity);
-    if (!target) return null;
-    const snapshot = state.pendingSnapshots.get(imageIdentityKey(identity));
-    const root = snapshot && (findEditableRoot(target) || target.ownerDocument.body);
-    return snapshot && root ? applySnapshotToTarget(target, root, snapshot) : target;
   }
 
   function markChanged(image, reason, schedule = true, identityOverride = null) {
@@ -1298,11 +1241,6 @@
 
     if (state.isDragging) {
       setBadgeText('待同步');
-      return;
-    }
-
-    if (imageBakePipeline?.hasPending()) {
-      state.commitTimer = null;
       return;
     }
 
@@ -1481,186 +1419,11 @@
     return doc.getElementById('mpse-root');
   }
 
-  function removeNativePasteCandidateNode(root, target, image) {
-    if (!image) return;
-    const parent = image.parentElement;
-    image.remove();
-    if (
-      parent
-      && parent !== root
-      && parent !== target?.parentElement
-      && /^(?:P|FIGURE|SECTION)$/.test(parent.tagName)
-      && !parent.textContent.trim()
-      && !parent.querySelector('img,svg,video,canvas')
-    ) {
-      parent.remove();
-    }
-  }
-
-  function removeNativePasteCandidates(root, target, candidates, identity = {}) {
-    const pending = [];
-    let changed = false;
-
-    const imageSource = (image) => stableUrl(
-      image?.getAttribute('data-src') || image?.getAttribute('src') || ''
-    );
-    const assetKey = (value) => {
-      try {
-        const url = new URL(stableUrl(value), 'https://mp.weixin.qq.com/');
-        return /^(?:mmbiz\.qpic\.cn|mmbiz\.qlogo\.cn|m\.qpic\.cn|mmsns\.qpic\.cn)$/i.test(url.hostname)
-          ? `${url.hostname}${url.pathname}`
-          : url.href;
-      } catch (_) {
-        return stableUrl(value);
-      }
-    };
-    const imageMatchesSource = (image, source) => (
-      imageSource(image) === source || assetKey(imageSource(image)) === assetKey(source)
-    );
-    const clearPasteMarker = (image) => {
-      if (!image) return;
-      image.removeAttribute('data-mpse-native-paste-id');
-      image.removeAttribute('data-mpse-paste-for');
-    };
-    const matchRun = (images, start, sources) => {
-      if (start < 0 || !sources.length) return [];
-      const counts = sources.reduce((result, source) => {
-        const key = assetKey(source);
-        result.set(key, (result.get(key) || 0) + 1);
-        return result;
-      }, new Map());
-      const matched = [];
-      for (const image of images.slice(start)) {
-        const source = assetKey(imageSource(image));
-        const count = counts.get(source) || 0;
-        if (!count) break;
-        matched.push(image);
-        if (count === 1) counts.delete(source);
-        else counts.set(source, count - 1);
-        if (!counts.size) return matched;
-      }
-      return [];
-    };
-
-    const candidateList = candidates || [];
-    let images = Array.from(root.querySelectorAll('img'));
-    const fallbackIndex = Number.isInteger(identity.index) && identity.index >= 0
-      ? Math.min(identity.index, images.length)
-      : -1;
-    const afterSources = candidateList
-      .filter((candidate) => candidate?.placement !== 'replace' && candidate?.cdnUrl)
-      .map((candidate) => stableUrl(candidate.cdnUrl));
-    if (!target && fallbackIndex >= 0 && images[fallbackIndex] && afterSources.length) {
-      const window = images.slice(fallbackIndex, fallbackIndex + afterSources.length + 1);
-      if (window.some((image) => afterSources.some((source) => imageMatchesSource(image, source)))) {
-        target = images[fallbackIndex];
-      }
-    }
-
-    for (const candidate of candidateList) {
-      const pasteId = String(candidate?.pasteId || '');
-      const cdnUrl = stableUrl(candidate?.cdnUrl || '');
-      const placement = candidate?.placement === 'replace' ? 'replace' : 'after';
-      let matched = null;
-      if (pasteId) {
-        matched = Array.from(root.querySelectorAll('img')).find((image) => (
-          image.getAttribute('data-mpse-native-paste-id') === pasteId
-        )) || null;
-      }
-      if (matched) {
-        if (placement === 'replace' && (!target || matched === target)) {
-          target = matched;
-          clearPasteMarker(matched);
-        } else {
-          if (!target && placement === 'after' && Number.isInteger(identity.index)) {
-            const markerImages = Array.from(root.querySelectorAll('img'));
-            const matchedIndex = markerImages.indexOf(matched);
-            if (matchedIndex === identity.index + 1) {
-              target = markerImages[identity.index] || null;
-            }
-          }
-          removeNativePasteCandidateNode(root, target, matched);
-          if (matched === target) target = null;
-        }
-        changed = true;
-      } else if (cdnUrl) {
-        const currentImages = Array.from(root.querySelectorAll('img'));
-        const targetIndex = currentImages.indexOf(target);
-        const sourceStillPresent = placement === 'after' && targetIndex >= 0
-          ? currentImages
-            .slice(targetIndex + 1, targetIndex + 1 + Math.max(1, afterSources.length))
-            .some((image) => imageMatchesSource(image, cdnUrl))
-          : currentImages.some((image) => imageMatchesSource(image, cdnUrl));
-        if (sourceStillPresent) pending.push({ cdnUrl, placement });
-      } else if (pasteId) {
-        pending.push({ cdnUrl: '', placement });
-      }
-    }
-    if (!pending.length) return { changed, unresolved: [], target };
-    if (pending.some((candidate) => !candidate.cdnUrl)) {
-      return { changed, unresolved: pending, target };
-    }
-
-    images = Array.from(root.querySelectorAll('img'));
-
-    const replaceIndex = pending.findIndex((candidate) => candidate.placement === 'replace');
-    if (replaceIndex >= 0) {
-      const replacement = pending[replaceIndex];
-      const replacementNode = target && imageMatchesSource(target, replacement.cdnUrl)
-        ? target
-        : (!target && fallbackIndex >= 0 && imageMatchesSource(images[fallbackIndex], replacement.cdnUrl)
-          ? images[fallbackIndex]
-          : null);
-      if (!replacementNode) return { changed, unresolved: pending, target };
-      target = replacementNode;
-      clearPasteMarker(target);
-      pending.splice(replaceIndex, 1);
-      changed = true;
-    }
-    if (!pending.length) return { changed, unresolved: [], target };
-    if (pending.some((candidate) => candidate.placement !== 'after')) {
-      return { changed, unresolved: pending, target };
-    }
-
-    images = Array.from(root.querySelectorAll('img'));
-    const sources = pending.map((candidate) => candidate.cdnUrl);
-    let targetIndex = images.indexOf(target);
-    let matched = targetIndex >= 0 ? matchRun(images, targetIndex + 1, sources) : [];
-    if (!matched.length && targetIndex < 0 && fallbackIndex >= 0 && images[fallbackIndex]) {
-      matched = matchRun(images, fallbackIndex + 1, sources);
-      if (matched.length) {
-        target = images[fallbackIndex];
-        targetIndex = fallbackIndex;
-      }
-    }
-    if (!matched.length) return { changed, unresolved: pending, target };
-    for (const image of matched) {
-      removeNativePasteCandidateNode(root, target, image);
-      changed = true;
-    }
-    return { changed, unresolved: [], target };
-  }
-
   function applySnapshotToRoot(root, snapshot) {
     if (!snapshot || !snapshot.identity) return { changed: false, reason: 'no-snapshot' };
     if (!root) return { changed: false, reason: 'parse-failed' };
-
-    let target = locateImageInHtml(root, snapshot.identity);
-    const cleanup = removeNativePasteCandidates(
-      root,
-      target,
-      snapshot.nativePasteCandidates,
-      snapshot.identity
-    );
-    if (cleanup.unresolved.length) {
-      return { changed: false, reason: 'paste-candidate-not-found' };
-    }
-    target = cleanup.target;
-    if (!target) {
-      return cleanup.changed
-        ? { changed: true, reason: 'image-removed-candidates-cleaned' }
-        : { changed: false, reason: 'image-not-found' };
-    }
+    const target = locateImageInHtml(root, snapshot.identity);
+    if (!target) return { changed: false, reason: 'image-not-found' };
     applySnapshotToTarget(target, root, snapshot);
     return { changed: true, reason: 'ok' };
   }
@@ -1694,7 +1457,6 @@
 
   function commitBatchIsCurrent(batch) {
     return Boolean(batch.length && !state.isDragging
-      && !imageBakePipeline?.hasPending()
       && state.pendingSnapshots.size === batch.length
       && batch.every(({ key, snapshot }) => state.pendingSnapshots.get(key) === snapshot));
   }
@@ -1714,36 +1476,6 @@
       if (state.pendingSnapshots.get(key) === snapshot) state.pendingSnapshots.delete(key);
     }
     state.needsCommit = state.pendingSnapshots.size > 0;
-  }
-
-  async function handoffSnapshotCandidates(batch) {
-    for (const { snapshot } of batch) {
-      if (!snapshot?.nativePasteCandidates?.length) continue;
-      const locator = {
-        editId: String(snapshot.identity?.editId || ''),
-        sourceUrl: String(snapshot.identity?.src || ''),
-        index: Number.isInteger(snapshot.identity?.index) ? snapshot.identity.index : -1
-      };
-      const unresolved = [];
-      for (const candidate of [...snapshot.nativePasteCandidates].reverse()) {
-        if (candidate.cleanupOwner === 'page-bridge') {
-          unresolved.unshift(candidate);
-          continue;
-        }
-        try {
-          const result = await discardPastedImage(candidate, locator);
-          if (result?.cleanupScheduled) {
-            unresolved.unshift({ ...candidate, cleanupOwner: 'page-bridge' });
-          } else if (!result?.changed && !result?.confirmedAbsent) {
-            unresolved.unshift(candidate);
-          }
-        } catch (error) {
-          unresolved.unshift(candidate);
-          console.warn('[公众号源码排版助手] snapshot candidate handoff failed:', error);
-        }
-      }
-      snapshot.nativePasteCandidates = unresolved;
-    }
   }
 
   function restorePendingSnapshotsInEditor() {
@@ -1785,8 +1517,7 @@
       if (!result.changed) {
         const missingWasRemoved = result.reason === 'image-not-found'
           && result.failedKey
-          && !findImageByIdentity(result.failedSnapshot?.identity)
-          && !result.failedSnapshot?.nativePasteCandidates?.length;
+          && !findImageByIdentity(result.failedSnapshot?.identity);
         if (missingWasRemoved) {
           if (state.pendingSnapshots.get(result.failedKey) === result.failedSnapshot) {
             state.pendingSnapshots.delete(result.failedKey);
@@ -1800,7 +1531,6 @@
         state.commitRetryCount += 1;
         allowRetry = state.commitRetryCount < 3;
         state.needsCommit = true;
-        if (!allowRetry) await handoffSnapshotCandidates(batch);
         console.warn('[公众号源码排版助手] image html sync skipped:', result.reason);
         setBadgeText('仅预览');
         return;
@@ -1839,7 +1569,6 @@
       state.commitRetryCount += 1;
       allowRetry = error?.code !== 'MPSE_WRITE_UNCERTAIN' && state.commitRetryCount < 3;
       failed = !allowRetry;
-      if (!allowRetry) await handoffSnapshotCandidates(batch);
       console.warn('[公众号源码排版助手] image html sync failed:', error);
       setBadgeText(allowRetry ? '正在重试同步' : '同步失败');
     } finally {

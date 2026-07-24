@@ -20,8 +20,7 @@
     shadow: ['box-shadow'],
     glow: ['box-shadow'],
     feather: featherMask,
-    stroke: ['outline', 'outline-offset'],
-    bake: ['box-shadow', ...featherMask, 'outline', 'outline-offset']
+    stroke: ['outline', 'outline-offset']
   };
   const alphaFilterEffects = new Set(Object.keys(alphaEffectCleanup));
   const appearance = {
@@ -34,7 +33,6 @@
     stroke: ['filter', 'outline', 'outline-offset'],
     opacity: ['opacity'],
     color: ['filter'],
-    bake: ['filter', 'box-shadow', ...featherMask, 'outline', 'outline-offset'],
     rotate: ['transform', 'transform-origin'],
     frame,
     circle: [...frame, 'width', 'height', 'max-width', 'object-fit', 'display', 'margin-left', 'margin-right']
@@ -244,7 +242,7 @@
     }
 
     const isCropAttribute = (name) => name === cropAttribute || name.startsWith('data-mpse-');
-    const ownsImageAttributes = reason === 'bake' || reason === 'reset';
+    const ownsImageAttributes = reason === 'reset';
     const imgAttributeAction = ownsImageAttributes
       ? 'sync'
       : (previous?.imgAttributeAction === 'sync' ? 'sync' : 'none');

@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const VERSION = 'v0.12.0';
+  const VERSION = 'v0.01.0';
   const CONTENT_SOURCE = 'wechat-mp-source-layout:content';
   const PAGE_SOURCE = 'wechat-mp-source-layout:page';
   const CONTENT_CONFLICT_CODE = 'MPSE_CONTENT_CONFLICT';
@@ -10,9 +10,7 @@
 
   if (window.__MPSE_BRIDGE_CLIENT__
     && window.__MPSE_BRIDGE_CLIENT__.version === VERSION
-    && typeof window.__MPSE_BRIDGE_CLIENT__.mutateContent === 'function'
-    && typeof window.__MPSE_BRIDGE_CLIENT__.pasteImage === 'function'
-    && typeof window.__MPSE_BRIDGE_CLIENT__.discardPastedImage === 'function') return;
+    && typeof window.__MPSE_BRIDGE_CLIENT__.mutateContent === 'function') return;
 
   function getExtensionResourceUrl(path) {
     try {
@@ -213,46 +211,6 @@
     });
   }
 
-  function pasteImage(blob, filename = 'mpse-image.png', locator = {}) {
-    if (!(blob instanceof Blob) || !blob.size) return Promise.reject(new TypeError('Image blob is required'));
-    return enqueueContentOperation(async () => {
-      const bytes = await blob.arrayBuffer();
-      return requestBridge('PASTE_IMAGE', {
-        bytes,
-        mimeType: blob.type || 'image/png',
-        filename,
-        locator: {
-          editId: String(locator.editId || ''),
-          sourceUrl: String(locator.sourceUrl || ''),
-          index: Number.isInteger(locator.index) ? locator.index : -1
-        }
-      }, 0);
-    });
-  }
-
-  function discardPastedImage(candidate, locator = {}) {
-    const pasteId = String(candidate?.pasteId || '');
-    const cdnUrl = String(candidate?.cdnUrl || '');
-    const expectedArticleKey = String(candidate?.articleKey || '');
-    const placement = candidate?.placement === 'replace' ? 'replace' : 'after';
-    const originalAttributes = candidate?.originalAttributes && typeof candidate.originalAttributes === 'object'
-      ? { ...candidate.originalAttributes }
-      : {};
-    if (!pasteId && !cdnUrl) return Promise.resolve({ changed: false });
-    return enqueueContentOperation(() => requestBridge('DISCARD_PASTED_IMAGE', {
-      pasteId,
-      cdnUrl,
-      expectedArticleKey,
-      placement,
-      originalAttributes,
-      locator: {
-        editId: String(locator.editId || ''),
-        sourceUrl: String(locator.sourceUrl || ''),
-        index: Number.isInteger(locator.index) ? locator.index : -1
-      }
-    }, 0));
-  }
-
   window.__MPSE_BRIDGE_CLIENT__ = Object.freeze({
     version: VERSION,
     inject: injectBridge,
@@ -260,8 +218,6 @@
     readContent,
     writeContent,
     mutateContent,
-    pasteImage,
-    discardPastedImage,
     getResourceUrl: getExtensionResourceUrl
   });
 })();
