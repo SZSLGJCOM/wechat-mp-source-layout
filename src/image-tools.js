@@ -1150,8 +1150,8 @@
   } = imageControls;
 
   // Legacy articles may still contain images whose source was replaced by a
-  // baked CDN asset. Before applying a pure-CSS effect, restore the original
-  // source so the new style does not stack on top of an already-baked picture.
+  // CDN asset snapshot. Before applying a pure-CSS effect, restore the original
+  // source so the new style does not stack on top of an already synced picture.
   function revertBakedSource(image) {
     if (!image || !image.isConnected || image.dataset.mpseBaked !== '1') return;
     const asset = effectRecords.find(imageSignature(image))?.asset;

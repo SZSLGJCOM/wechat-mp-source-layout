@@ -973,13 +973,13 @@
 
     function panelTipForEffect(effect) {
       if (effect === 'size') return '选中框、拖动和缩放使用微信编辑器原生能力；这里仅设置精确宽度与对齐。';
-      const bakedHint = '调整停下后会自动烘焙成 PNG，并作为本地图片上传到编辑器；正文不保存滤镜代码。';
-      if (effect === 'shadow') return `阴影跟随图片 Alpha 轮廓，不会把透明区域当作容器边框。${bakedHint}`;
-      if (effect === 'glow') return `发光沿图片 Alpha 轮廓生成，由两层柔光组成。${bakedHint}`;
-      if (effect === 'feather') return `羽化沿图片 Alpha 轮廓向内柔化，不按容器边框计算；拖到 0 可恢复原状。${bakedHint}`;
-      if (effect === 'stroke') return `描边跟随图片 Alpha 透明轮廓，不再沿图片容器画矩形框。${bakedHint}`;
-      if (effect === 'opacity') return `滑块 100% 为完全不透明；“恢复”会还原应用效果前的透明度。${bakedHint}`;
-      if (effect === 'color') return `色彩调整先实时预览。${bakedHint}`;
+      const effectHintSuffix = '调整停下后会自动将样式参数同步到微信编辑器；正文不保存滤镜代码。';
+      if (effect === 'shadow') return `阴影跟随图片 Alpha 轮廓，不会把透明区域当作容器边框。${effectHintSuffix}`;
+      if (effect === 'glow') return `发光沿图片 Alpha 轮廓生成，由两层柔光组成。${effectHintSuffix}`;
+      if (effect === 'feather') return `羽化沿图片 Alpha 轮廓向内柔化，不按容器边框计算；拖到 0 可恢复原状。${effectHintSuffix}`;
+      if (effect === 'stroke') return `描边跟随图片 Alpha 透明轮廓，不再沿图片容器画矩形框。${effectHintSuffix}`;
+      if (effect === 'opacity') return `滑块 100% 为完全不透明；“恢复”会还原应用效果前的透明度。${effectHintSuffix}`;
+      if (effect === 'color') return `色彩调整先实时预览。${effectHintSuffix}`;
       return '只有实际调整后才会同步到正文 HTML';
     }
 
