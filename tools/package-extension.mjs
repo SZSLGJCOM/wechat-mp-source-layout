@@ -4,6 +4,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { assertValidChromeExtensionVersion } from './chrome-extension-version.mjs';
+
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const manifest = JSON.parse(fs.readFileSync(path.join(rootDir, 'manifest.json'), 'utf8'));
 const productName = String(manifest.name || '').trim().replace(/[\\/:*?"<>|]/g, '');
@@ -15,11 +17,21 @@ const packageFiles = ['manifest.json', 'src', 'icons', 'README.md', 'CHANGELOG.m
 if (!productName || !version) {
   throw new Error('manifest.json must provide a product name and version');
 }
+assertValidChromeExtensionVersion(version);
 
 for (const file of packageFiles) {
   if (!fs.existsSync(path.join(rootDir, file))) {
     throw new Error(`Missing package file: ${file}`);
   }
+}
+
+const pendingPackageChanges = execFileSync(
+  'git',
+  ['status', '--porcelain', '--', ...packageFiles],
+  { cwd: rootDir, encoding: 'utf8' }
+).trim();
+if (pendingPackageChanges) {
+  throw new Error(`Commit release files before packaging:\n${pendingPackageChanges}`);
 }
 
 const outputDir = path.join(rootDir, 'release');

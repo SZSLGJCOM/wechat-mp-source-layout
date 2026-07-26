@@ -4,6 +4,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { isValidChromeExtensionVersion } from './chrome-extension-version.mjs';
+
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const errors = [];
 
@@ -54,6 +56,10 @@ function checkManifest() {
   assert(manifest.manifest_version === 3, 'manifest_version must be 3');
   assert(typeof manifest.name === 'string' && manifest.name.length > 0, 'manifest.name is required');
   assert(typeof manifest.version === 'string' && manifest.version.length > 0, 'manifest.version is required');
+  assert(
+    isValidChromeExtensionVersion(manifest.version),
+    'manifest.version must use 1-4 integers without leading zeros'
+  );
 
   const script = manifest.content_scripts?.[0];
   const js = script?.js || [];
@@ -88,8 +94,14 @@ function checkVersionConsistency() {
   assert(pkg.version === version, 'package.json and manifest.json versions must match');
   assert(readText('README.md').includes(`当前版本：\`v${releaseVersion}\``), 'README current version must match manifest version_name');
   assert(readText('CHANGELOG.md').includes(`## v${releaseVersion} ·`), 'CHANGELOG must include the current release version');
-  assert(readText('src/bridge-client.js').includes(`const VERSION = 'v${version}';`), 'bridge-client version must match manifest.json');
-  assert(readText('src/image-tools.js').includes(`const VERSION = 'v${version}';`), 'image-tools version must match manifest.json');
+  for (const file of [
+    'src/bridge-client.js',
+    'src/image-tools.js',
+    'src/svg-tools.js',
+    'src/svg-block-tools.js'
+  ]) {
+    assert(readText(file).includes(`const VERSION = 'v${version}';`), `${file} version must match manifest.json`);
+  }
 }
 
 function checkLicense() {

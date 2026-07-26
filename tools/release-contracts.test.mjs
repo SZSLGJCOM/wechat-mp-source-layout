@@ -1,9 +1,10 @@
-﻿import assert from 'node:assert/strict';
+import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 
+import { isValidChromeExtensionVersion } from './chrome-extension-version.mjs';
 import { FakeElement, FakeStyle, readJson, readText, rootDir } from './test-helpers.mjs';
 
 await import(new URL('../src/image-snapshot-merge.js', import.meta.url));
@@ -45,12 +46,15 @@ test('release version and ASCII package folder stay consistent', () => {
   const releaseVersion = manifest.version_name || manifest.version;
 
   assert.equal(pkg.version, manifest.version);
+  assert.equal(manifest.version, '0.13.0');
+  assert.equal(isValidChromeExtensionVersion(manifest.version), true);
   assert.equal(releaseVersion, '0.01');
-  assert.ok(readme.includes(`褰撳墠鐗堟湰锛歕`v${releaseVersion}\``));
-  assert.ok(changelog.includes(`## v${releaseVersion} 路`));
+  assert.ok(readme.includes(`当前版本：\`v${releaseVersion}\``));
+  assert.ok(changelog.includes(`## v${releaseVersion} ·`));
   assert.ok(bridgeClient.includes(`const VERSION = 'v${manifest.version}';`));
   assert.ok(imageTools.includes(`const VERSION = 'v${manifest.version}';`));
   assert.match(packager, /releaseSlug = 'gongzhonghao-yuanma-paiban-zhushou'/);
+  assert.match(packager, /\['status', '--porcelain', '--', \.\.\.packageFiles\]/);
 });
 
 test('license is noncommercial and product introductions stay product-focused', () => {
@@ -63,8 +67,18 @@ test('license is noncommercial and product introductions stay product-focused', 
   assert.match(license, /Noncommercial Purposes/);
   assert.doesNotMatch(license, /MIT License/);
   assert.equal(pkg.license, 'PolyForm-Noncommercial-1.0.0');
-  assert.doesNotMatch(readme, /婧愮爜鍏紑|闈炲晢鐢▅鍟嗕笟浣跨敤|寮€婧恷鎺堟潈/);
-  assert.doesNotMatch(manifest.description, /婧愮爜鍏紑|闈炲晢鐢▅寮€婧恷鎺堟潈/);
+  assert.doesNotMatch(readme, /源码公开|非商用|商业使用|开源|授权/);
+  assert.doesNotMatch(manifest.description, /源码公开|非商用|开源|授权/);
+});
+
+test('Chrome extension versions reject leading zeros and invalid ranges', () => {
+  for (const version of ['1', '0.1', '0.13.0', '3.1.2.4567']) {
+    assert.equal(isValidChromeExtensionVersion(version), true, version);
+  }
+
+  for (const version of ['0', '0.0.0.0', '0.01.0', '1.00', '1.2.3.4.5', '1.65536']) {
+    assert.equal(isValidChromeExtensionVersion(version), false, version);
+  }
 });
 
 test('content scripts load the shared bridge client before dependent modules', () => {
@@ -472,8 +486,8 @@ test('README presents product updates without internal development wording', () 
   const readme = readText('README.md');
   const css = readText('src/overlay.css');
 
-  assert.match(readme, /\[鏌ョ湅鏇存柊鏃ュ織\]\(CHANGELOG\.md\)/);
-  assert.doesNotMatch(readme, /鑷|鏃х増|寮€鍙戦樁娈?);
+  assert.match(readme, /\[查看更新日志\]\(CHANGELOG\.md\)/);
+  assert.doesNotMatch(readme, /自检|旧版|开发阶段/);
   assert.doesNotMatch(css, /\/\*\s*v\d+\.\d+\.\d+/i);
 });
 
@@ -496,7 +510,7 @@ test('public release files avoid internal release-log wording', () => {
 
   for (const file of publicFiles) {
     const source = readText(file);
-    assert.doesNotMatch(source, /鑷|鏃х増|寮€鍙戦樁娈祙v\d+\.\d+\.\d+ 鐢熸垚|鏃?SVG/, file);
+    assert.doesNotMatch(source, /自检|旧版|开发阶段|v\d+\.\d+\.\d+ 生成|旧 SVG/, file);
   }
 
   assert.equal(fs.existsSync(path.join(rootDir, 'docs', 'self-check-v0.9.4.md')), false);
@@ -519,7 +533,7 @@ test('production comments are concise and professional', () => {
     const source = readText(file);
     assert.doesNotMatch(source, /\/\/\s*(ignore|fall through)\b/i, file);
     assert.doesNotMatch(source, /catch\s*\([^)]*\)\s*\{\s*\}/, file);
-    assert.doesNotMatch(source, /澹逛即|涓存椂|闅忎究|鍑戝悎|浣庣骇|鍨冨溇|灞庡北|蹇界暐/i, file);
+    assert.doesNotMatch(source, /壹伴|临时|随便|凑合|低级|垃圾|屎山|忽略/i, file);
   }
 });
 

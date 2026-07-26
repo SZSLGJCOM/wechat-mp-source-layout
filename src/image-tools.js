@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const VERSION = 'v0.01.0';
+  const VERSION = 'v0.13.0';
   const MENU_ID = 'mpse-img2-menu';
   const PANEL_ID = 'mpse-img2-panel';
   const BADGE_ID = 'mpse-img2-badge';
