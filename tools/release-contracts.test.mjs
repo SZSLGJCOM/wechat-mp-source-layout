@@ -48,7 +48,7 @@ test('release version and ASCII package folder stay consistent', () => {
   assert.equal(pkg.version, manifest.version);
   assert.equal(manifest.version, '0.13.0');
   assert.equal(isValidChromeExtensionVersion(manifest.version), true);
-  assert.equal(releaseVersion, '0.01');
+  assert.equal(releaseVersion, '0.13');
   assert.ok(readme.includes(`当前版本：\`v${releaseVersion}\``));
   assert.ok(changelog.includes(`## v${releaseVersion} ·`));
   assert.ok(bridgeClient.includes(`const VERSION = 'v${manifest.version}';`));
