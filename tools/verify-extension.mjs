@@ -144,8 +144,16 @@ function checkBridgeCentralization() {
 function checkProductWording() {
   const readme = readText('README.md');
   const css = readText('src/overlay.css');
+  const manifest = readJson('manifest.json');
 
   assert(/\[查看更新日志\]\(CHANGELOG\.md\)/.test(readme), 'README should link to the changelog');
+  assert(!/SVG/.test(readme), 'README introduction should not promote SVG features');
+  assert(manifest && !/SVG/.test(manifest.description || ''), 'manifest description should not promote SVG features');
+  assert(/部分样式可能被微信过滤或重写/.test(readme), 'README should state that WeChat may filter image styles');
+  assert(
+    readme.includes('https://mp.weixin.qq.com/s/BrRBmb3PzDGAmC4TXCEhng'),
+    'README should link to the WeChat filtering rules'
+  );
   assert(!/自检|旧版|开发阶段/.test(readme), 'README should avoid internal development wording');
   assert(!/\/\*\s*v\d+\.\d+\.\d+/i.test(css), 'overlay.css should avoid historical version comments');
 

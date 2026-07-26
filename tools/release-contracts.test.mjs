@@ -485,8 +485,13 @@ test('all editor tools share one atomic content mutation queue', () => {
 test('README presents product updates without internal development wording', () => {
   const readme = readText('README.md');
   const css = readText('src/overlay.css');
+  const manifest = readJson('manifest.json');
 
   assert.match(readme, /\[查看更新日志\]\(CHANGELOG\.md\)/);
+  assert.doesNotMatch(readme, /SVG/);
+  assert.doesNotMatch(manifest.description, /SVG/);
+  assert.match(readme, /部分样式可能被微信过滤或重写/);
+  assert.match(readme, /https:\/\/mp\.weixin\.qq\.com\/s\/BrRBmb3PzDGAmC4TXCEhng/);
   assert.doesNotMatch(readme, /自检|旧版|开发阶段/);
   assert.doesNotMatch(css, /\/\*\s*v\d+\.\d+\.\d+/i);
 });
